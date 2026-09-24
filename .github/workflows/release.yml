@@ -1,0 +1,47 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    # ubuntu, not macOS: the package is a pure-Python (py3-none-any) wheel, so the
+    # build is platform-independent, and pypa/gh-action-pypi-publish is Linux-only.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # hatch-vcs derives the version from the tag
+      - uses: hynek/build-and-inspect-python-package@v3.0.1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # PyPI Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: Packages
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: Packages
+          path: dist
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          generate_release_notes: true
+          draft: false
+          # Tags containing a hyphen (e.g. v0.2.0-alpha) are marked prerelease.
+          prerelease: ${{ contains(github.ref_name, '-') }}
