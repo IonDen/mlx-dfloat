@@ -16,7 +16,9 @@ GATED_MARKERS: tuple[tuple[str, str, str], ...] = (
 # Install caps at import, before collection imports any MLX-heavy module.
 INSTALLED_CAPS_GB = install_memory_caps()
 
-_FINAL_EXIT_CODE = 0
+# None until pytest_sessionfinish runs. A usage or config error (unknown flag, --strict-config)
+# never starts a session, so the hard exit below must not replace pytest's own exit code.
+_FINAL_EXIT_CODE: int | None = None
 
 
 def _markers_to_skip(enabled_flags: set[str]) -> list[tuple[str, str]]:
@@ -25,6 +27,14 @@ def _markers_to_skip(enabled_flags: set[str]) -> list[tuple[str, str]]:
         for marker, flag, description in GATED_MARKERS
         if flag not in enabled_flags
     ]
+
+
+def _hard_exit_code(recorded: int | None) -> int | None:
+    """Code for the atexit hard exit, or None to let the interpreter exit normally.
+
+    None means no session finished, so no Metal work ran and there is no destructor to skip.
+    """
+    return recorded
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -60,6 +70,9 @@ def _hard_exit_past_metal_teardown() -> None:  # pragma: no cover - runs at inte
     Runs after pytest has printed its summary and recorded the final exit code, so output
     is preserved and a real failure still exits non-zero.
     """
+    code = _hard_exit_code(_FINAL_EXIT_CODE)
+    if code is None:
+        return
     sys.stdout.flush()
     sys.stderr.flush()
-    os._exit(_FINAL_EXIT_CODE)
+    os._exit(code)

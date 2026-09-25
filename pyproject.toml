@@ -132,7 +132,7 @@ markers = [
 
 [tool.coverage.run]
 branch = true
-source = ["mlx_dfloat"]
+source = ["mlx_dfloat", "scripts"]
 parallel = true
 omit = ["src/mlx_dfloat/_version.py"]
 

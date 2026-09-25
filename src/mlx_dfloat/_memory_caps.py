@@ -53,17 +53,21 @@ def device_string() -> str | None:
 def install_memory_caps() -> tuple[int, int]:
     """Apply wired + memory caps for the current device. Idempotent; never raises.
 
-    Returns the (wired_gb, memory_gb) actually installed, or (0, 0) on a device
-    with no reported working-set size or where caps could not be applied.
+    Returns the (wired_gb, memory_gb) actually installed; each is 0 when that cap could not be
+    applied, and both are 0 on a device with no reported working-set size. The two caps are
+    applied independently, so a failed wired cap still leaves the memory cap in place.
     """
     wired_gb, memory_gb = compute_safe_caps_gb()
     if wired_gb == 0:
         return (0, 0)
     try:
         mx.set_wired_limit(wired_gb * 1024**3)
+    except Exception:
+        wired_gb = 0
+    try:
         mx.set_memory_limit(memory_gb * 1024**3)
     except Exception:
-        return (0, 0)
+        memory_gb = 0
     return (wired_gb, memory_gb)
 
 
