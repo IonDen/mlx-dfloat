@@ -1,7 +1,9 @@
-"""Process-level watchdog for heavy scripts: RSS ceiling plus wall-clock backstop.
+"""Process-level watchdog for heavy scripts: RSS + MLX memory ceiling plus a wall-clock backstop.
 
-NumPy allocations are invisible to MLX's counters, so the ceiling is checked against the process
-RSS; MLX active + cache is sampled too and recorded in the abort artifact.
+The ceiling is checked against process RSS plus MLX active and cache memory combined, since MLX
+buffers are not reliably visible in the process's own RSS on this platform (measured: ~1 GB MLX
+active memory with ~0 RSS delta). A sampling failure (psutil, MLX, or the artifact write itself)
+still aborts the process instead of leaving the job running unwatched.
 """
 
 import json
@@ -18,7 +20,12 @@ EXIT_WALL = 71
 
 
 def verdict(*, rss: int, ceiling: int, elapsed: float, budget: float) -> str | None:
-    """Decide whether to abort: "memory", "wall", or None."""
+    """Decide whether to abort: "memory", "wall", or None.
+
+    ``rss`` is whatever single memory number the caller is enforcing the ceiling against; the
+    caller (``Watchdog``) feeds it process RSS plus MLX active and cache memory combined, since
+    the verdict itself stays a pure function of one memory number.
+    """
     if rss > ceiling:
         return "memory"
     if elapsed > budget:
@@ -39,6 +46,7 @@ class Watchdog:
     ) -> None:
         """Configure the ceiling (bytes), wall budget (seconds) and poll interval."""
         self.out_dir, self.ceiling, self.budget, self.interval = out_dir, ceiling, budget, interval
+        # Peak of (process RSS + MLX active + MLX cache): the verdict's own memory number.
         self.peak_rss = 0
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -56,13 +64,24 @@ class Watchdog:
         self._thread.join(timeout=1)
 
     def _run(self) -> None:
-        proc = psutil.Process()
         while not self._stop.wait(self.interval):
-            rss = int(proc.memory_info().rss)
-            self.peak_rss = max(self.peak_rss, rss)
             elapsed = time.monotonic() - self._start
-            reason = verdict(rss=rss, ceiling=self.ceiling, elapsed=elapsed, budget=self.budget)
-            if reason:
+            rss = mlx_active = mlx_cache = 0
+            try:
+                rss = int(psutil.Process().memory_info().rss)
+                mlx_active = int(mx.get_active_memory())
+                mlx_cache = int(mx.get_cache_memory())
+                total = rss + mlx_active + mlx_cache
+                self.peak_rss = max(self.peak_rss, total)
+                reason = verdict(
+                    rss=total, ceiling=self.ceiling, elapsed=elapsed, budget=self.budget
+                )
+            except Exception:  # a dead sampler must still abort, not run the job unwatched
+                reason = "sample_error"
+            if reason is None:
+                continue
+            code = EXIT_WALL if reason == "wall" else EXIT_MEMORY
+            try:
                 self.out_dir.mkdir(parents=True, exist_ok=True)
                 (self.out_dir / "abort.json").write_text(
                     json.dumps(
@@ -73,10 +92,11 @@ class Watchdog:
                             "ceiling": self.ceiling,
                             "elapsed": elapsed,
                             "budget": self.budget,
-                            "mlx_active": int(mx.get_active_memory()),
-                            "mlx_cache": int(mx.get_cache_memory()),
+                            "mlx_active": mlx_active,
+                            "mlx_cache": mlx_cache,
                         },
                         indent=1,
                     )
                 )
-                os._exit(EXIT_MEMORY if reason == "memory" else EXIT_WALL)
+            finally:
+                os._exit(code)  # always exits, even if the artifact write above raised

@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -34,6 +35,8 @@ EXIT_OK, EXIT_MISMATCH, EXIT_ERROR = 0, 1, 2
 _SNAPSHOT = re.compile(r"/snapshots/([0-9a-f]{40})(/|$)")
 _SHARD = re.compile(r"[A-Za-z0-9_.\-]+\.safetensors")
 _SRC = Path(__file__).resolve().parents[1] / "src" / "mlx_dfloat"
+_REPO = _SRC.parents[1]
+_SCRIPTS = Path(__file__).resolve().parent
 
 
 class VerifyError(Exception):
@@ -52,10 +55,18 @@ def revision_from_path(path: Path) -> str:
 
 
 def source_hash() -> str:
-    """sha256 over every package source file (reader, format, decoder)."""
+    """sha256 over every package source file plus this script and the watchdog module.
+
+    Recurses through ``src/mlx_dfloat`` (not just its top level) and also covers
+    ``scripts/verify_checkpoint.py`` and ``scripts/_watchdog.py`` themselves, so an edit to the
+    parity script or its watchdog invalidates a stored result too, not just an edit to the package.
+    """
+    files = sorted(_SRC.rglob("*.py")) + sorted(
+        [_SCRIPTS / "_watchdog.py", _SCRIPTS / "verify_checkpoint.py"]
+    )
     digest = hashlib.sha256()
-    for file in sorted(_SRC.glob("*.py")):
-        digest.update(file.name.encode() + b"\0" + file.read_bytes())
+    for file in files:
+        digest.update(str(file.relative_to(_REPO)).encode() + b"\0" + file.read_bytes())
     return digest.hexdigest()
 
 
@@ -63,16 +74,15 @@ def run_key(
     *, df11_revision: str, bf16_revision: str, mode: str, decoder: str = "reference"
 ) -> dict[str, str]:
     """Everything that must be unchanged for a stored result to be reused."""
-    repo = _SRC.parents[1]
     try:
         sha = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            ["git", "-C", str(_REPO), "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
             check=True,
         ).stdout.strip()
         dirty = subprocess.run(
-            ["git", "-C", str(repo), "status", "--porcelain", "--", "src"],
+            ["git", "-C", str(_REPO), "status", "--porcelain", "--", "src", "scripts"],
             capture_output=True,
             text=True,
             check=True,
@@ -92,11 +102,22 @@ def run_key(
 
 
 def _shard(root: Path, name: str) -> Path:
+    """A shard path directly inside ``root``, following symlinks (HF cache blobs are regular files).
+
+    ``_SHARD`` already forbids ``/`` (and so ``..``) in ``name``, so ``root / name`` cannot escape
+    ``root`` regardless of what the resulting path resolves to; a Hugging Face cache snapshot shard
+    is itself a symlink into a sibling ``blobs/`` directory, so the check is "does this land on a
+    regular file", not "does the resolved path stay under root".
+    """
     if not _SHARD.fullmatch(name):
         raise VerifyError(f"unsafe shard name {name!r} in the original's index")
     path = root / name
-    if path.resolve().parent != root.resolve():
-        raise VerifyError(f"shard {name!r} resolves outside {root}")
+    try:
+        is_regular = stat.S_ISREG(path.stat().st_mode)
+    except OSError as exc:
+        raise VerifyError(f"shard {name!r} cannot be read: {exc}") from exc
+    if not is_regular:
+        raise VerifyError(f"shard {name!r} is not a regular file")
     return path
 
 
@@ -139,14 +160,29 @@ def _write_atomic(path: Path, obj: object) -> None:
     tmp.replace(path)
 
 
-def _stored(path: Path, key: dict[str, str]) -> dict | None:
+def _stored(path: Path, key: dict[str, str], matrix_names: tuple[str, ...]) -> dict | None:
+    """A previously-written group result, only if its key AND matrix names still match.
+
+    A matrix with no matching original is recorded in ``missing``, not ``matrices``, so the check
+    is against the union of the two (order-insensitive) rather than ``matrices`` alone — a real
+    coverage gap must still resume, and only a name that appears in neither must force a recompute.
+    """
     if "unknown" in (key["df11_revision"], key["bf16_revision"]):
         return None
     try:
         stored = json.loads(path.read_text())
     except (OSError, ValueError):
         return None
-    return stored if isinstance(stored, dict) and stored.get("key") == key else None
+    if not isinstance(stored, dict) or stored.get("key") != key:
+        return None
+    try:
+        names = [str(m.get("name", "")) for m in stored.get("matrices", [])]
+        names += [str(n) for n in stored.get("missing", [])]
+    except AttributeError:  # a matrices entry isn't itself a dict: an unusably malformed record
+        return None
+    if sorted(names) != sorted(matrix_names):
+        return None
+    return stored
 
 
 def _compare(
@@ -163,16 +199,33 @@ def _compare(
     for shard, names in by_shard.items():
         for matrix, original in _load_bits(shard, names).items():
             got = decoded[matrix]
-            equal = got.size == original.size and bool(np.array_equal(got, original))
-            first = (
-                int(np.flatnonzero(got != original)[0])
-                if not equal and got.size == original.size
-                else None
-            )
+            if got.size != original.size:
+                # A size mismatch is a mapping/format problem, not a bit mismatch: it means the
+                # decoded matrix and its "original" don't describe the same tensor at all.
+                raise VerifyError(
+                    f"{matrix}: decoded {got.size} elements, original has {original.size}"
+                )
+            equal = bool(np.array_equal(got, original))
+            first = int(np.flatnonzero(got != original)[0]) if not equal else None
             records.append(
                 {"name": matrix, "n": int(got.size), "equal": equal, "first_mismatch_index": first}
             )
     return records, missing
+
+
+def _error_summary(out_dir: Path, *, key: dict[str, str], started: float, message: str) -> int:
+    """Print and persist an exit-2 summary for an early failure; returns EXIT_ERROR."""
+    print(f"error: {message}", file=sys.stderr)
+    _write_atomic(
+        out_dir / "summary.json",
+        {
+            "key": key,
+            "exit_code": EXIT_ERROR,
+            "error": message,
+            "seconds": time.monotonic() - started,
+        },
+    )
+    return EXIT_ERROR
 
 
 def verify(
@@ -190,24 +243,34 @@ def verify(
     started = time.monotonic()
     groups_dir = out_dir / "groups"
     groups_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = out_dir / "summary.json"
+    if summary_path.exists():
+        # A stale summary from a previous (possibly differently-scoped) run must never be
+        # mistaken for this run's result; move it aside rather than deleting it.
+        summary_path.replace(out_dir / "summary.previous.json")
     try:
         ckpt = open_checkpoint(df11_root)
         originals = index_original(bf16_root) if bf16_root else {}
     except (DFloatError, VerifyError, OSError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return EXIT_ERROR
+        return _error_summary(out_dir, key=key, started=started, message=str(exc))
     selected = sorted(groups or ckpt.groups, key=natural_key)
     unknown = [g for g in selected if g not in ckpt.groups]
     if unknown:
-        print(f"error: unknown groups {unknown[:5]}", file=sys.stderr)
-        return EXIT_ERROR
+        return _error_summary(
+            out_dir, key=key, started=started, message=f"unknown groups {unknown[:5]}"
+        )
     expected = sum(len(ckpt.groups[g].matrix_names) for g in selected)
+    if expected == 0:
+        return _error_summary(
+            out_dir, key=key, started=started, message="checkpoint has zero DF11 groups to verify"
+        )
     compared = mismatched = 0
     missing: list[str] = []
     consumed: set[str] = set()
     for name in selected:
+        matrix_names = ckpt.groups[name].matrix_names
         result_path = groups_dir / _safe_filename(name)
-        stored = _stored(result_path, key)
+        stored = _stored(result_path, key, matrix_names)
         if stored is None:
             t0 = time.monotonic()
             try:
@@ -218,31 +281,36 @@ def verify(
                         for n, v in decoded.items()
                     ]
                     status = "structural-ok"
+                    group_missing: list[str] = []
                 else:
                     records, group_missing = _compare(decoded, originals)
-                    missing += group_missing
                     status = "equal" if all(r["equal"] for r in records) else "mismatch"
             except (DFloatError, VerifyError) as exc:
-                print(f"error in {name}: {exc}", file=sys.stderr)
-                return EXIT_ERROR
+                return _error_summary(out_dir, key=key, started=started, message=f"{name}: {exc}")
             stored = {
                 "key": key,
                 "status": status,
                 "seconds": time.monotonic() - t0,
                 "rss": int(psutil.Process().memory_info().rss),
                 "matrices": records,
+                "missing": group_missing,
             }
             _write_atomic(result_path, stored)
             del decoded
         compared += len(stored["matrices"])
         mismatched += sum(not m["equal"] for m in stored["matrices"])
         consumed.update(m["name"] for m in stored["matrices"])
+        missing += stored.get("missing", [])
     extras_compared = 0
     if bf16_root is not None:
         try:
             for extra, (path, info) in sorted(ckpt.extras.items()):
-                if extra not in originals or info.dtype != "BF16":
+                if extra not in originals:
                     continue
+                if info.dtype != "BF16":
+                    raise VerifyError(
+                        f"extra {extra!r} is {info.dtype}, not BF16, but has a same-named original"
+                    )
                 original = _load_bits(originals[extra], [extra])[extra]
                 ours = np.asarray(read_array(path, info)).reshape(-1)
                 extras_compared += 1
@@ -251,11 +319,10 @@ def verify(
                     mismatched += 1
                     print(f"mismatch in extra {extra}", file=sys.stderr)
         except VerifyError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return EXIT_ERROR
+            return _error_summary(out_dir, key=key, started=started, message=str(exc))
     uncovered: list[str] = []
     if bf16_root is not None and groups is None:
-        uncovered = sorted(set(originals) - set(ckpt.extras) - consumed - set(ignore_originals))
+        uncovered = sorted(set(originals) - consumed - set(ignore_originals))
     complete = compared == expected and not missing and not uncovered
     code = EXIT_MISMATCH if mismatched else (EXIT_OK if complete else EXIT_ERROR)
     _write_atomic(
@@ -264,6 +331,8 @@ def verify(
             "key": key,
             "exit_code": code,
             "groups": len(selected),
+            "partial": groups is not None,
+            "selected_groups": selected,
             "compared": compared,
             "expected": expected,
             "extras_compared": extras_compared,
@@ -304,6 +373,11 @@ def main(argv: list[str] | None = None) -> int:
             decoder=args.decoder,
         )
         if not args.no_watchdog:
+            abort_path = args.out / "abort.json"
+            if abort_path.exists():
+                # A stale abort artifact from a previous run must never be mistaken for this
+                # run's outcome; move it aside rather than deleting it.
+                abort_path.replace(args.out / "abort.previous.json")
             watchdog = Watchdog(
                 args.out, ceiling=default_ceiling(), budget=args.wall_budget
             ).start()
