@@ -1,6 +1,5 @@
 import json
 import threading
-from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
@@ -37,6 +36,20 @@ def pair(tmp_path):
     for g, (q, k) in mats.items():
         originals[f"{g}.q.weight"], originals[f"{g}.k.weight"] = q, k
     return df11, write_bf16_original(tmp_path / "bf16", originals), originals
+
+
+def _summary(out):
+    return json.loads((out / "summary.json").read_text())
+
+
+def _corrupt_gaps(df11, group):
+    shard = df11 / f"{group.replace('.', '_')}.safetensors"
+    data = mx.load(str(shard))
+    mx.eval(data)
+    gaps = np.array(data[f"{group}.gaps"])
+    gaps[0] ^= 0xFF  # thread continuity breaks -> DFloatFormatError while decoding this group
+    data[f"{group}.gaps"] = mx.array(gaps)
+    mx.save_safetensors(str(shard), data)
 
 
 def _count_decodes(monkeypatch):
@@ -187,6 +200,9 @@ def test_truncated_original_shard_is_an_error_not_a_mismatch(tmp_path, pair):
     shard = bf16 / "model-00001-of-00002.safetensors"
     shard.write_bytes(shard.read_bytes()[:-20])
     assert verify(df11, bf16, tmp_path / "out", key=KEY) == 2
+    # The first group with an original in the truncated shard is the one that fails.
+    error = _summary(tmp_path / "out")["error"]
+    assert error.startswith("blocks.0: cannot load originals from model-00001-of-00002"), error
 
 
 def test_shard_path_escaping_the_directory_is_refused(tmp_path, pair):
@@ -196,6 +212,7 @@ def test_shard_path_escaping_the_directory_is_refused(tmp_path, pair):
     data["weight_map"]["blocks.0.q.weight"] = "../elsewhere.safetensors"
     index.write_text(json.dumps(data))
     assert verify(df11, bf16, tmp_path / "out", key=KEY) == 2
+    assert "unsafe shard name '../elsewhere.safetensors'" in _summary(tmp_path / "out")["error"]
 
 
 def test_hf_cache_shard_symlinks_into_a_sibling_blobs_dir_are_followed(tmp_path, pair):
@@ -268,6 +285,7 @@ def test_structural_only_passes_on_a_good_checkpoint_and_fails_on_a_corrupt_one(
     data["blocks.1.gaps"] = mx.array(gaps)
     mx.save_safetensors(str(shard), data)
     assert verify(df11, None, tmp_path / "o2", key=SKEY) == 2
+    assert _summary(tmp_path / "o2")["error"].startswith("blocks.1: ")
 
 
 def test_checkpoint_with_zero_groups_is_an_error_in_both_modes(tmp_path):
@@ -307,18 +325,26 @@ def test_success_summary_records_partial_and_selected_groups(tmp_path, pair):
     assert summary["selected_groups"] == ["blocks.0", "blocks.1"]
 
 
-def test_source_hash_covers_verify_checkpoint_and_watchdog_scripts():
-    # Bug caught: hashing only src/mlx_dfloat/*.py lets an edit to verify_checkpoint.py or
-    # _watchdog.py itself go unnoticed, so a stale resumed result from before the edit is reused.
-    scripts_dir = Path(vc.__file__).resolve().parent
-    watchdog_path = scripts_dir / "_watchdog.py"
-    original = vc.source_hash()
-    original_bytes = watchdog_path.read_bytes()
-    try:
-        watchdog_path.write_bytes(original_bytes + b"\n# source_hash coverage probe\n")
-        assert vc.source_hash() != original
-    finally:
-        watchdog_path.write_bytes(original_bytes)
+@pytest.mark.parametrize(
+    "edited",
+    ["src/mlx_dfloat/sub/deep.py", "scripts/_watchdog.py", "scripts/verify_checkpoint.py"],
+)
+def test_source_hash_covers_package_watchdog_and_script(tmp_path, monkeypatch, edited):
+    # Bug caught: hashing only src/mlx_dfloat/*.py (top level) lets an edit to a subpackage,
+    # verify_checkpoint.py or _watchdog.py go unnoticed, so a stale resumed result is reused.
+    # Runs on a throwaway copy: the tracked files are never touched.
+    for rel in ["src/mlx_dfloat/format.py", *[e for e in [edited] if e.endswith(".py")]]:
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(f"# {rel}\n")
+    for rel in ["scripts/_watchdog.py", "scripts/verify_checkpoint.py"]:
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(f"# {rel}\n")
+    monkeypatch.setattr(vc, "_SRC", tmp_path / "src" / "mlx_dfloat")
+    monkeypatch.setattr(vc, "_SCRIPTS", tmp_path / "scripts")
+    monkeypatch.setattr(vc, "_REPO", tmp_path)
+    before = vc.source_hash()
+    (tmp_path / edited).write_text("# edited\n")
+    assert vc.source_hash() != before
 
 
 def test_resume_recomputes_when_stored_matrix_names_do_not_match_the_group(
@@ -436,3 +462,75 @@ def test_run_key_hashes_sources_and_records_mode():
     key = run_key(df11_revision="r1", bf16_revision="r2", mode="parity")
     assert key["mode"] == "parity"
     assert len(key["source"]) == 64
+
+
+def test_index_without_weight_map_is_an_error_with_a_summary(tmp_path, pair):
+    # Bug caught: json.loads(...)["weight_map"] raising KeyError past verify's except tuple exits
+    # 2 through main's catch-all with NO summary.json (the previous one was already moved aside).
+    df11, bf16, _ = pair
+    (bf16 / "model.safetensors.index.json").write_text(json.dumps({"metadata": {}}))
+    out = tmp_path / "out"
+    assert verify(df11, bf16, out, key=KEY) == 2
+    assert "weight_map" in _summary(out)["error"]
+
+
+@pytest.mark.parametrize(
+    "index", [[1, 2], {"weight_map": ["a"]}, {"weight_map": {"blocks.0.q.weight": 7}}]
+)
+def test_malformed_index_shapes_are_errors_with_a_summary(tmp_path, pair, index):
+    df11, bf16, _ = pair
+    (bf16 / "model.safetensors.index.json").write_text(json.dumps(index))
+    out = tmp_path / "out"
+    assert verify(df11, bf16, out, key=KEY) == 2
+    assert _summary(out)["exit_code"] == 2
+
+
+def test_an_error_after_a_mismatch_keeps_exit_2_but_records_the_mismatch(tmp_path, pair):
+    # Bug caught: the error summary for a later group dropping `mismatched`/`compared`, so a real
+    # bit mismatch already found (the kill signal) is visible only in that group's own JSON.
+    df11, _, originals = pair
+    bad = dict(originals)
+    bad["blocks.0.q.weight"] = bad["blocks.0.q.weight"] ^ np.uint16(0x8000)
+    bf16 = write_bf16_original(tmp_path / "bad", bad)
+    _corrupt_gaps(df11, "blocks.1")
+    out = tmp_path / "out"
+    assert verify(df11, bf16, out, key=KEY) == 2
+    summary = _summary(out)
+    assert summary["error"].startswith("blocks.1: ")
+    assert summary["mismatched"] == 1
+    assert summary["compared"] == 2
+
+
+class _StopProbe:
+    """A watchdog stand-in that records whether summary.json already existed when stopped."""
+
+    def __init__(self, out):
+        self._out = out
+        self.summary_existed_at_stop = None
+
+    def stop(self):
+        self.summary_existed_at_stop = (self._out / "summary.json").exists()
+
+
+@pytest.mark.parametrize("groups", [None, ["nope"]])
+def test_the_watchdog_is_stopped_before_the_summary_is_written(tmp_path, pair, groups):
+    # Bug caught: stopping the watchdog only after verify() returns leaves a window in which a
+    # verdict fires after summary.json already says the run passed (or failed) cleanly.
+    df11, bf16, _ = pair
+    out = tmp_path / "out"
+    probe = _StopProbe(out)
+    verify(df11, bf16, out, key=KEY, groups=groups, watchdog=probe)
+    assert probe.summary_existed_at_stop is False
+    assert (out / "summary.json").exists()
+
+
+def test_summary_records_the_installed_memory_caps(tmp_path, pair, monkeypatch):
+    # Bug caught: a cap that failed to install (see install_memory_caps) leaves no trace in the
+    # run's own record.
+    monkeypatch.setattr(vc, "install_memory_caps", lambda: (7, 9))
+    df11, bf16, _ = pair
+    out = tmp_path / "out"
+    assert verify(df11, bf16, out, key=KEY) == 0
+    assert _summary(out)["memory_caps_gb"] == [7, 9]
+    assert verify(df11, bf16, out, key=KEY, groups=["nope"]) == 2
+    assert _summary(out)["memory_caps_gb"] == [7, 9]

@@ -1,6 +1,8 @@
 import json
+import struct
 from pathlib import Path
 
+import mlx.core as mx
 import numpy as np
 import pytest
 from scripts.verify_checkpoint import VerifyError
@@ -319,7 +321,7 @@ def test_main_unknown_group_selector_exits_two(tmp_path):
     assert main(argv, source_factory=_local_factory) == 2
 
 
-def test_main_requires_bf16_repo_or_structural_only(tmp_path):
+def test_main_requires_bf16_repo_or_structural_only(tmp_path, capsys):
     df11, _, _ = _pair(tmp_path, False)
     out = tmp_path / "out.json"
     argv = [
@@ -332,7 +334,23 @@ def test_main_requires_bf16_repo_or_structural_only(tmp_path):
         "--wall-budget",
         "60",
     ]
-    assert main(argv, source_factory=_local_factory) == 2
+    with pytest.raises(SystemExit) as info:
+        main(argv, source_factory=_local_factory)
+    assert info.value.code == 2
+    assert "usage:" in capsys.readouterr().err
+
+
+def test_main_refuses_bf16_repo_together_with_structural_only(tmp_path, capsys):
+    # Bug caught: --structural-only silently winning over --bf16-repo, so a run the caller meant
+    # as parity records "structural-ok" and exits 0 without comparing a single bit.
+    df11, bf16, _ = _pair(tmp_path, False)
+    argv = [*_argv(df11, bf16, tmp_path / "out.json"), "--structural-only"]
+    with pytest.raises(SystemExit) as info:
+        main(argv, source_factory=_local_factory)
+    assert info.value.code == 2
+    err = capsys.readouterr().err
+    assert "usage:" in err
+    assert "not allowed with" in err
 
 
 def test_main_structural_only_exits_zero_and_records_mode(tmp_path):
@@ -353,3 +371,219 @@ def test_main_structural_only_exits_zero_and_records_mode(tmp_path):
     written = json.loads(out.read_text())
     assert written["mode"] == "structural-only"
     assert all(g["status"] == "structural-ok" for g in written["groups"])
+
+
+class _RecordingSource(_CountingSource):
+    """Records every (path, start, n) read, to prove what was fetched before a check fired."""
+
+    def __init__(self, inner):
+        super().__init__(inner)
+        self.reads: list[tuple[str, int, int]] = []
+
+    def read(self, path, start, n):
+        self.reads.append((path, start, n))
+        return super().read(path, start, n)
+
+
+def _raw_bf16_shard(path, entries, payload):
+    body = json.dumps(entries).encode()
+    path.write_bytes(struct.pack("<Q", len(body)) + body + payload)
+
+
+def test_a_bf16_size_mismatch_is_an_error_not_a_mismatch(tmp_path):
+    # Bug caught: `equal = original.size == got.size and ...` reports a size mismatch (a mapping
+    # problem) as a bit mismatch: status "mismatch", exit 1, the kill signal.
+    df11, _, originals = _pair(tmp_path, False)
+    short = {**originals, "blocks.0.q.weight": originals["blocks.0.q.weight"].reshape(-1)[:-1]}
+    bf16 = write_bf16_original(tmp_path / "short", short)
+    record = _run(df11, bf16)
+    assert record["status"] == "error"
+    assert "blocks.0.q.weight" in record["error"]
+    out = tmp_path / "out.json"
+    assert main(_argv(df11, bf16, out), source_factory=_local_factory) == 2
+    assert json.loads(out.read_text())["groups"][0]["status"] == "error"
+
+
+@pytest.mark.parametrize(
+    ("offsets", "shape"),
+    [
+        ([90, 0], [5, 9]),  # negative length: fsspec would read to EOF
+        ([0, 10], [5, 9]),  # length disagrees with the shape
+        ([-2, 88], [5, 9]),
+        ([0, 90], [-5, -9]),  # a negative shape whose product still matches
+    ],
+)
+def test_bf16_entry_bounds_are_checked_before_any_data_read(tmp_path, offsets, shape):
+    # Bug caught: independent_header's entries used unchecked; a crafted original pulls a whole
+    # multi-GB shard into RAM before anything notices the entry is nonsense.
+    df11, _, originals = _pair(tmp_path, False)
+    bf16 = tmp_path / "craft"
+    bf16.mkdir()
+    k = originals["blocks.0.k.weight"]
+    q_bytes = originals["blocks.0.q.weight"].tobytes()
+    entries = {
+        "blocks.0.q.weight": {"dtype": "BF16", "shape": shape, "data_offsets": offsets},
+        "blocks.0.k.weight": {
+            "dtype": "BF16",
+            "shape": list(k.shape),
+            "data_offsets": [90, 90 + k.nbytes],
+        },
+    }
+    _raw_bf16_shard(bf16 / "model.safetensors", entries, q_bytes + k.tobytes())
+    d, b = LocalRangeSource(df11), _RecordingSource(LocalRangeSource(bf16))
+    record = verify_group(
+        d, b, "blocks.0", config=read_df11_config(df11), dindex=df11_index(d), bindex=bf16_index(b)
+    )
+    assert record["status"] == "error"
+    assert "data_offsets" in record["error"] or "invalid shape" in record["error"]
+    header_len = struct.unpack("<Q", (bf16 / "model.safetensors").read_bytes()[:8])[0]
+    assert all(start < 8 + header_len for _, start, _ in b.reads), b.reads
+
+
+def _rewrite(shard, transform):
+    data = mx.load(str(shard))
+    mx.eval(data)
+    mx.save_safetensors(str(shard), transform(data))
+
+
+def test_oversized_luts_are_refused_before_they_are_read(tmp_path):
+    # Bug caught: the group-stats pass reads every group's luts before any validation, with no
+    # size cap: a crafted header makes it download an arbitrarily large tensor.
+    df11, bf16, _ = _pair(tmp_path, False)
+    rows = 19  # one more than the 18 rows upstream can emit
+    _rewrite(
+        df11 / "blocks_0.safetensors",
+        lambda d: {**d, "blocks.0.luts": mx.zeros((rows, 256), mx.uint8)},
+    )
+    recorders: list[_RecordingSource] = []
+
+    def factory(repo, revision, subdir):
+        recorders.append(_RecordingSource(LocalRangeSource(Path(repo))))
+        return recorders[-1]
+
+    assert main(_argv(df11, bf16, tmp_path / "out.json"), source_factory=factory) == 2
+    assert all(n != rows * 256 for r in recorders for _, _, n in r.reads)
+
+
+def test_oversized_output_positions_are_refused_before_they_are_read(tmp_path):
+    # One 4096-byte block allows at most 2 uint32 entries (8 bytes); 3 entries must not be read.
+    df11, bf16, _ = _pair(tmp_path, False)
+    _rewrite(
+        df11 / "blocks_0.safetensors",
+        lambda d: {**d, "blocks.0.output_positions": mx.zeros((12,), mx.uint8)},
+    )
+    recorders: list[_RecordingSource] = []
+
+    def factory(repo, revision, subdir):
+        recorders.append(_RecordingSource(LocalRangeSource(Path(repo))))
+        return recorders[-1]
+
+    assert main(_argv(df11, bf16, tmp_path / "out.json"), source_factory=factory) == 2
+    assert all(n != 12 for r in recorders for _, _, n in r.reads)
+
+
+def test_group_arrays_refuses_oversized_luts_before_reading(tmp_path):
+    df11, _, _ = _pair(tmp_path, False)
+    _rewrite(
+        df11 / "blocks_0.safetensors",
+        lambda d: {**d, "blocks.0.luts": mx.zeros((19, 256), mx.uint8)},
+    )
+    d = _RecordingSource(LocalRangeSource(df11))
+    record = verify_group(
+        d, None, "blocks.0", config=read_df11_config(df11), dindex=df11_index(d), bindex={}
+    )
+    assert record["status"] == "error"
+    assert "luts" in record["error"]
+    assert all(n != 19 * 256 for _, _, n in d.reads)
+
+
+def test_main_moves_a_stale_abort_and_result_aside(tmp_path):
+    # Bug caught: a stale abort.json (the watchdog's artifact, in --out's parent) makes a clean run
+    # look aborted, and a stale RESULT.json passes for this run's result.
+    df11, bf16, _ = _pair(tmp_path, False)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "abort.json").write_text('{"reason": "stale"}')
+    (run_dir / "RESULT.json").write_text('{"stale": true}')
+    assert main(_argv(df11, bf16, run_dir / "RESULT.json"), source_factory=_local_factory) == 0
+    assert (run_dir / "abort.previous.json").read_text() == '{"reason": "stale"}'
+    assert not (run_dir / "abort.json").exists()
+    assert (run_dir / "RESULT.previous.json").read_text() == '{"stale": true}'
+    assert json.loads((run_dir / "RESULT.json").read_text())["mode"] == "parity"
+
+
+def test_a_failing_run_leaves_no_previous_result_in_place(tmp_path):
+    # Bug caught: a run that exits 2 before writing its result leaves the previous (passing)
+    # RESULT.json in place, so anything reading it sees a pass.
+    df11, bf16, _ = _pair(tmp_path, False)
+    out = tmp_path / "RESULT.json"
+    assert main(_argv(df11, bf16, out), source_factory=_local_factory) == 0
+    argv = [*_argv(df11, bf16, out), "--groups", "nope"]
+    assert main(argv, source_factory=_local_factory) == 2
+    assert not out.exists()
+    assert json.loads((tmp_path / "RESULT.previous.json").read_text())["mode"] == "parity"
+
+
+def test_main_creates_a_missing_output_directory(tmp_path):
+    # Bug caught: a missing --out parent fails the final write after the whole decode (exit 2).
+    df11, bf16, _ = _pair(tmp_path, False)
+    out = tmp_path / "new" / "deeper" / "RESULT.json"
+    assert main(_argv(df11, bf16, out), source_factory=_local_factory) == 0
+    assert out.exists()
+
+
+def test_an_error_after_a_mismatch_keeps_exit_2_but_records_the_mismatch(tmp_path):
+    # Bug caught: an error in one sampled group hiding a real mismatch in another from the
+    # result's top-level counts.
+    df11, _, originals = _triple(tmp_path)
+    bad = dict(originals)
+    bad["blocks.0.weight"] = bad["blocks.0.weight"] ^ np.uint16(0x8000)
+    del bad["blocks.2.weight"]  # blocks.2 has no original -> error
+    bf16 = write_bf16_original(tmp_path / "bad3", bad)
+    out = tmp_path / "RESULT.json"
+    argv = [*_argv(df11, bf16, out), "--groups", "blocks.0,blocks.2"]
+    assert main(argv, source_factory=_local_factory) == 2
+    result = json.loads(out.read_text())
+    assert result["mismatched"] == 1
+    assert result["compared"] == 1
+
+
+def test_main_sets_the_mlx_cache_limit_to_zero_and_records_caps(tmp_path):
+    # Bug caught: this script keeping MLX's default cache pool (near device memory) while the
+    # whole-checkpoint script bounds it; and a failed cap leaving no trace in the result.
+    df11, bf16, _ = _pair(tmp_path, False)
+    out = tmp_path / "RESULT.json"
+    previous = mx.set_cache_limit(12345678)
+    try:
+        assert main(_argv(df11, bf16, out), source_factory=_local_factory) == 0
+        assert mx.set_cache_limit(previous) == 0
+    finally:
+        mx.set_cache_limit(previous)
+    caps = json.loads(out.read_text())["memory_caps_gb"]
+    assert len(caps) == 2
+    assert all(isinstance(c, int) for c in caps)
+
+
+def test_main_stops_the_watchdog_before_writing_the_result(tmp_path, monkeypatch):
+    # Bug caught: stopping the watchdog only in `finally`, after RESULT.json is written, leaves a
+    # window in which an abort (exit 70/71) contradicts a result already on disk.
+    import scripts.verify_remote_group as vrg
+
+    out = tmp_path / "RESULT.json"
+    seen: list[bool] = []
+
+    class _ProbeWatchdog:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self):
+            return self
+
+        def stop(self):
+            seen.append(out.exists())
+
+    monkeypatch.setattr(vrg, "Watchdog", _ProbeWatchdog)
+    df11, bf16, _ = _pair(tmp_path, False)
+    assert main(_argv(df11, bf16, out), source_factory=_local_factory) == 0
+    assert seen[0] is False
+    assert out.exists()

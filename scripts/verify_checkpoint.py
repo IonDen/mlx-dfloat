@@ -1,11 +1,13 @@
 """Whole-checkpoint DF11 parity: decode every group, compare every matrix with the BF16 original.
 
-Heavy-runs script (not a pytest lane). Results are written per group, atomically, as they finish,
-and resumed only when the run key (revisions, mode, decoder, source hash, git, mlx) is unchanged.
+Operational script, not a test; run it directly. Results are written per group, atomically, as
+they finish, and resumed only when the run key (revisions, mode, decoder, source hash, git, mlx)
+is unchanged.
 
-Usage:
-    uv run python scripts/verify_checkpoint.py --df11 DIR [--bf16 DIR] --out DIR \
+Usage (from the repository root of a synced checkout):
+    uv run python -m scripts.verify_checkpoint --df11 DIR [--bf16 DIR] --out DIR \
         [--df11-revision SHA] [--bf16-revision SHA] [--groups a,b] [--ignore-original NAME ...]
+``uv run python scripts/verify_checkpoint.py ...`` works too.
 Exit codes: 0 equal and complete, 1 mismatch, 2 error/coverage, 70/71 watchdog abort.
 """
 
@@ -19,17 +21,29 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from typing import Protocol
 
-import mlx.core as mx
-import numpy as np
-import psutil
-from scripts._watchdog import Watchdog, default_ceiling
+# Run as a file, Python puts scripts/ (not the repository root) first on sys.path, and the
+# `scripts.` imports below would fail.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from mlx_dfloat._memory_caps import install_memory_caps
-from mlx_dfloat._safetensors import read_array
-from mlx_dfloat.errors import DFloatError
-from mlx_dfloat.format import open_checkpoint
-from mlx_dfloat.reference import decode_matrices
+try:
+    import mlx.core as mx
+    import numpy as np
+    import psutil
+    from scripts._watchdog import Watchdog, default_ceiling
+
+    from mlx_dfloat._memory_caps import install_memory_caps
+    from mlx_dfloat._safetensors import read_array
+    from mlx_dfloat.errors import DFloatError
+    from mlx_dfloat.format import open_checkpoint
+    from mlx_dfloat.reference import decode_matrices
+except ImportError as exc:  # a broken environment is a tool error (2), never a mismatch (1)
+    print(
+        f"error: cannot import the project modules ({exc}); run from a synced checkout",
+        file=sys.stderr,
+    )
+    raise SystemExit(2) from exc
 
 EXIT_OK, EXIT_MISMATCH, EXIT_ERROR = 0, 1, 2
 _SNAPSHOT = re.compile(r"/snapshots/([0-9a-f]{40})(/|$)")
@@ -41,6 +55,12 @@ _SCRIPTS = Path(__file__).resolve().parent
 
 class VerifyError(Exception):
     """An input or tool problem (exit 2), distinct from a bit mismatch (exit 1)."""
+
+
+class Stoppable(Protocol):
+    """What ``verify`` needs from a watchdog: a way to stop it before the verdict is written."""
+
+    def stop(self) -> None: ...  # noqa: D102
 
 
 def natural_key(name: str) -> list[tuple[int, int | str]]:
@@ -124,7 +144,12 @@ def _shard(root: Path, name: str) -> Path:
 def index_original(root: Path) -> dict[str, Path]:
     """Map each original tensor name to its shard (validated to stay inside ``root``)."""
     for index in sorted(root.glob("*.safetensors.index.json")):
-        weight_map = json.loads(index.read_text())["weight_map"]
+        data = json.loads(index.read_text())
+        weight_map = data.get("weight_map") if isinstance(data, dict) else None
+        if not isinstance(weight_map, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in weight_map.items()
+        ):
+            raise VerifyError(f"{index.name}: no weight_map object of tensor name -> shard name")
         return {name: _shard(root, shard) for name, shard in weight_map.items()}
     mapping: dict[str, Path] = {}
     for shard in sorted(root.glob("*.safetensors")):
@@ -213,21 +238,6 @@ def _compare(
     return records, missing
 
 
-def _error_summary(out_dir: Path, *, key: dict[str, str], started: float, message: str) -> int:
-    """Print and persist an exit-2 summary for an early failure; returns EXIT_ERROR."""
-    print(f"error: {message}", file=sys.stderr)
-    _write_atomic(
-        out_dir / "summary.json",
-        {
-            "key": key,
-            "exit_code": EXIT_ERROR,
-            "error": message,
-            "seconds": time.monotonic() - started,
-        },
-    )
-    return EXIT_ERROR
-
-
 def verify(
     df11_root: Path,
     bf16_root: Path | None,
@@ -236,11 +246,43 @@ def verify(
     key: dict[str, str],
     groups: list[str] | None = None,
     ignore_originals: tuple[str, ...] = (),
+    watchdog: Stoppable | None = None,
 ) -> int:
-    """Run parity (or structural-only decoding) and return the exit code."""
-    install_memory_caps()
+    """Run parity (or structural-only decoding) and return the exit code.
+
+    ``watchdog`` is stopped before summary.json is written, so no abort can follow the verdict.
+    """
+    caps = list(install_memory_caps())
     mx.set_cache_limit(0)
     started = time.monotonic()
+    compared = mismatched = 0
+
+    def _finish(summary: dict) -> int:
+        if watchdog is not None:
+            watchdog.stop()
+        _write_atomic(
+            out_dir / "summary.json",
+            {
+                "key": key,
+                **summary,
+                "memory_caps_gb": caps,
+                "seconds": time.monotonic() - started,
+            },
+        )
+        return int(summary["exit_code"])
+
+    def _error_summary(message: str) -> int:
+        # "Error wins" (exit 2), but a mismatch found before the error stays visible here.
+        print(f"error: {message}", file=sys.stderr)
+        return _finish(
+            {
+                "exit_code": EXIT_ERROR,
+                "error": message,
+                "compared": compared,
+                "mismatched": mismatched,
+            }
+        )
+
     groups_dir = out_dir / "groups"
     groups_dir.mkdir(parents=True, exist_ok=True)
     summary_path = out_dir / "summary.json"
@@ -252,26 +294,19 @@ def verify(
         # `groups or ckpt.groups` would otherwise treat `[]` the same as `None` (run every group)
         # while `groups is None` (which gates the coverage check below) is False for `[]` -- an
         # empty list must never silently run the full checkpoint with coverage checking disabled.
-        return _error_summary(
-            out_dir, key=key, started=started, message="groups is an empty list; pass None for all"
-        )
+        return _error_summary("groups is an empty list; pass None for all")
     try:
         ckpt = open_checkpoint(df11_root)
         originals = index_original(bf16_root) if bf16_root else {}
     except (DFloatError, VerifyError, OSError, ValueError) as exc:
-        return _error_summary(out_dir, key=key, started=started, message=str(exc))
+        return _error_summary(str(exc))
     selected = sorted(groups or ckpt.groups, key=natural_key)
     unknown = [g for g in selected if g not in ckpt.groups]
     if unknown:
-        return _error_summary(
-            out_dir, key=key, started=started, message=f"unknown groups {unknown[:5]}"
-        )
+        return _error_summary(f"unknown groups {unknown[:5]}")
     expected = sum(len(ckpt.groups[g].matrix_names) for g in selected)
     if expected == 0:
-        return _error_summary(
-            out_dir, key=key, started=started, message="checkpoint has zero DF11 groups to verify"
-        )
-    compared = mismatched = 0
+        return _error_summary("checkpoint has zero DF11 groups to verify")
     missing: list[str] = []
     consumed: set[str] = set()
     for name in selected:
@@ -293,7 +328,7 @@ def verify(
                     records, group_missing = _compare(decoded, originals)
                     status = "equal" if all(r["equal"] for r in records) else "mismatch"
             except (DFloatError, VerifyError) as exc:
-                return _error_summary(out_dir, key=key, started=started, message=f"{name}: {exc}")
+                return _error_summary(f"{name}: {exc}")
             stored = {
                 "key": key,
                 "status": status,
@@ -332,16 +367,14 @@ def verify(
                     mismatched += 1
                     print(f"mismatch in extra {extra}", file=sys.stderr)
         except VerifyError as exc:
-            return _error_summary(out_dir, key=key, started=started, message=str(exc))
+            return _error_summary(str(exc))
     uncovered: list[str] = []
     if bf16_root is not None and groups is None:
         uncovered = sorted(set(originals) - consumed - set(ignore_originals))
     complete = compared == expected and not missing and not uncovered
     code = EXIT_MISMATCH if mismatched else (EXIT_OK if complete else EXIT_ERROR)
-    _write_atomic(
-        out_dir / "summary.json",
+    return _finish(
         {
-            "key": key,
             "exit_code": code,
             "groups": len(selected),
             "partial": groups is not None,
@@ -353,10 +386,8 @@ def verify(
             "missing_originals": missing,
             "uncovered_originals": uncovered,
             "ignored_originals": list(ignore_originals),
-            "seconds": time.monotonic() - started,
-        },
+        }
     )
-    return code
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -402,6 +433,7 @@ def main(argv: list[str] | None = None) -> int:
             key=key,
             groups=groups,
             ignore_originals=tuple(args.ignore_original),
+            watchdog=watchdog,
         )
     except Exception:
         traceback.print_exc()

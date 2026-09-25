@@ -3,15 +3,17 @@
 Decodes selected groups (first, last, max-block, max-code, or names) with the reference decoder
 and compares each matrix with the BF16 original read by range requests.
 
-Usage:
-    uv run python scripts/verify_remote_group.py --df11-repo DFloat11/FLUX.1-schnell-DF11 \
+Usage (from the repository root of a synced checkout):
+    uv run python -m scripts.verify_remote_group --df11-repo DFloat11/FLUX.1-schnell-DF11 \
         --bf16-repo black-forest-labs/FLUX.1-schnell --bf16-subdir transformer \
         --groups first,last,max-block,max-code --out RESULT.json
+``uv run python scripts/verify_remote_group.py ...`` works too.
 Exit codes: 0 all sampled matrices equal, 1 a mismatch, 2 an error, 70/71 watchdog abort.
 """
 
 import argparse
 import json
+import math
 import re
 import struct
 import sys
@@ -20,29 +22,43 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
-import numpy as np
-from huggingface_hub import HfApi, HfFileSystem
-from scripts._watchdog import Watchdog, default_ceiling
-from scripts.verify_checkpoint import VerifyError, natural_key
+# Run as a file, Python puts scripts/ (not the repository root) first on sys.path, and the
+# `scripts.` imports below would fail.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from mlx_dfloat._memory_caps import install_memory_caps
-from mlx_dfloat._safetensors import MAX_HEADER_BYTES, parse_header
-from mlx_dfloat.errors import DFloatError
-from mlx_dfloat.format import (
-    GROUP_FIELD_TYPES,
-    GROUP_FIELDS,
-    DF11Config,
-    GroupArrays,
-    matrix_names_for,
-    parse_df11_config,
-    validate_group_name,
-)
-from mlx_dfloat.reference import (
-    decode_group,
-    max_code_length,
-    max_elements_per_block,
-    split_matrices,
-)
+try:
+    import mlx.core as mx
+    import numpy as np
+    from huggingface_hub import HfApi, HfFileSystem
+    from scripts._watchdog import Watchdog, default_ceiling
+    from scripts.verify_checkpoint import VerifyError, natural_key
+
+    from mlx_dfloat._memory_caps import install_memory_caps
+    from mlx_dfloat._safetensors import MAX_HEADER_BYTES, TensorInfo, parse_header
+    from mlx_dfloat.errors import DFloatError
+    from mlx_dfloat.format import (
+        GROUP_FIELD_TYPES,
+        GROUP_FIELDS,
+        MAX_LUT_ROWS,
+        DF11Config,
+        GroupArrays,
+        matrix_names_for,
+        n_blocks_for,
+        parse_df11_config,
+        validate_group_name,
+    )
+    from mlx_dfloat.reference import (
+        decode_group,
+        max_code_length,
+        max_elements_per_block,
+        split_matrices,
+    )
+except ImportError as exc:  # a broken environment is a tool error (2), never a mismatch (1)
+    print(
+        f"error: cannot import the project modules ({exc}); run from a synced checkout",
+        file=sys.stderr,
+    )
+    raise SystemExit(2) from exc
 
 _SHARD = re.compile(r"[A-Za-z0-9_.\-]+\.safetensors")
 
@@ -147,6 +163,43 @@ def independent_header(src: RangeSource, path: str) -> tuple[dict, int]:
     return json.loads(src.read(path, 8, length)), 8 + length
 
 
+def bf16_range(meta: object, name: str) -> tuple[int, int, int]:
+    """(start, length, n_elements) of a BF16 original's data, checked before anything is read.
+
+    The BF16 side is parsed without mlx_dfloat code, so its entries are checked here: a negative
+    or shape-inconsistent length would otherwise make a range read pull a whole shard into RAM.
+    """
+    if not isinstance(meta, dict):
+        raise VerifyError(f"original {name}: malformed header entry")
+    if meta.get("dtype") != "BF16":
+        raise VerifyError(f"original {name} is {str(meta.get('dtype'))[:40]}, not BF16")
+    shape, offsets = meta.get("shape"), meta.get("data_offsets")
+    if not isinstance(shape, list) or not all(type(d) is int and d >= 0 for d in shape):
+        raise VerifyError(f"original {name}: invalid shape")
+    if (
+        not isinstance(offsets, list)
+        or len(offsets) != 2
+        or not all(type(o) is int for o in offsets)
+        or not 0 <= offsets[0] <= offsets[1]
+        or offsets[1] - offsets[0] != 2 * math.prod(shape)
+    ):
+        raise VerifyError(f"original {name}: data_offsets do not match its shape")
+    return offsets[0], offsets[1] - offsets[0], math.prod(shape)
+
+
+def check_small_fields(header: dict[str, TensorInfo], group: str) -> None:
+    """Refuse luts / output_positions larger than any valid group has, before they are read."""
+    luts = header[f"{group}.luts"]
+    positions = header[f"{group}.output_positions"]
+    n_blocks = n_blocks_for(header[f"{group}.encoded_exponent"].nbytes)
+    if luts.nbytes > MAX_LUT_ROWS * 256:
+        raise VerifyError(f"{group}: luts has {luts.nbytes} bytes, over {MAX_LUT_ROWS} rows")
+    if positions.nbytes > 4 * (n_blocks + 1):
+        raise VerifyError(
+            f"{group}: output_positions has {positions.nbytes} bytes for {n_blocks} blocks"
+        )
+
+
 def df11_index(src: RangeSource) -> dict[str, tuple[str, dict]]:
     """Group name -> (file, parsed header), for every DF11 group; built once.
 
@@ -205,6 +258,7 @@ def bf16_index(src: RangeSource) -> dict[str, str]:
 
 
 def _group_arrays(src: RangeSource, file: str, header: dict, group: str) -> GroupArrays:
+    check_small_fields(header, group)
     raw: dict[str, bytes] = {}
     for field in GROUP_FIELDS:
         info = header[f"{group}.{field}"]
@@ -282,12 +336,12 @@ def verify_group(
             if shard not in header_cache:
                 header_cache[shard] = independent_header(bf16, shard)
             bheader, base = header_cache[shard]
-            meta = bheader[name]
-            if meta["dtype"] != "BF16":
-                raise VerifyError(f"original {name} is {meta['dtype']}, not BF16")
-            start, end = meta["data_offsets"]
-            original = np.frombuffer(bf16.read(shard, base + start, end - start), "<u2")
-            equal = original.size == got.size and bool(np.array_equal(got, original))
+            start, length, n_original = bf16_range(bheader.get(name), name)
+            if n_original != got.size:
+                # A mapping/format problem, not a bit mismatch (same rule as verify_checkpoint).
+                raise VerifyError(f"{name}: decoded {got.size} elements, original has {n_original}")
+            original = np.frombuffer(bf16.read(shard, base + start, length), "<u2")
+            equal = bool(np.array_equal(got, original))
             record["matrices"].append({"name": name, "n": int(got.size), "equal": equal})
         record["status"] = "equal" if all(m["equal"] for m in record["matrices"]) else "mismatch"
     except (DFloatError, VerifyError, KeyError, ValueError) as exc:
@@ -316,10 +370,11 @@ def main(
     )
     parser.add_argument("--df11-repo", required=True)
     parser.add_argument("--df11-revision")
-    parser.add_argument("--bf16-repo")
+    against = parser.add_mutually_exclusive_group(required=True)
+    against.add_argument("--bf16-repo")
     parser.add_argument("--bf16-revision")
     parser.add_argument("--bf16-subdir", default="")
-    parser.add_argument(
+    against.add_argument(
         "--structural-only",
         action="store_true",
         help="decode and validate structure only; no BF16 comparison",
@@ -328,12 +383,18 @@ def main(
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--wall-budget", type=float, default=3 * 3600.0)
     args = parser.parse_args(argv)
-    if not args.bf16_repo and not args.structural_only:
-        print("error: either --bf16-repo or --structural-only is required", file=sys.stderr)
-        return 2
     mode = "structural-only" if args.structural_only else "parity"
-    install_memory_caps()
-    watchdog = Watchdog(args.out.parent, ceiling=default_ceiling(), budget=args.wall_budget).start()
+    run_dir = args.out.parent
+    run_dir.mkdir(parents=True, exist_ok=True)
+    # Neither a previous result nor a previous abort artifact may pass for this run's outcome;
+    # move them aside rather than deleting them.
+    if args.out.exists():
+        args.out.replace(args.out.with_name(f"{args.out.stem}.previous.json"))
+    if (run_dir / "abort.json").exists():
+        (run_dir / "abort.json").replace(run_dir / "abort.previous.json")
+    caps = list(install_memory_caps())
+    mx.set_cache_limit(0)
+    watchdog = Watchdog(run_dir, ceiling=default_ceiling(), budget=args.wall_budget).start()
     try:
         api = HfApi()
         df11_rev = args.df11_revision or api.model_info(args.df11_repo).sha
@@ -349,6 +410,7 @@ def main(
         dindex = df11_index(df11)
         stats = {}
         for group, (file, header) in dindex.items():
+            check_small_fields(header, group)
             pos_info, lut_info = header[f"{group}.output_positions"], header[f"{group}.luts"]
             positions = np.frombuffer(df11.read(file, pos_info.offset, pos_info.nbytes), "<u4")
             luts = np.frombuffer(
@@ -364,22 +426,28 @@ def main(
             verify_group(df11, bf16, g, config=config, dindex=dindex, bindex=bindex)
             for g in pick_groups(stats, args.groups)
         ]
-        args.out.write_text(
-            json.dumps(
-                {
-                    "df11_repo": args.df11_repo,
-                    "df11_revision": df11_rev,
-                    "bf16_repo": args.bf16_repo,
-                    "bf16_revision": bf16_rev,
-                    "mode": mode,
-                    "groups": records,
-                },
-                indent=1,
-            )
-        )
-        if any(r["status"] == "error" for r in records):
-            return 2
-        return 1 if any(r["status"] == "mismatch" for r in records) else 0
+        matrices = [m for r in records for m in r["matrices"]]
+        mismatched = sum(not m["equal"] for m in matrices)
+        # "Error wins" (exit 2), but a mismatch found alongside it stays visible in the counts.
+        errored = any(r["status"] == "error" for r in records)
+        code = 2 if errored else (1 if mismatched else 0)
+        watchdog.stop()  # no abort may follow the verdict written below
+        result = {
+            "df11_repo": args.df11_repo,
+            "df11_revision": df11_rev,
+            "bf16_repo": args.bf16_repo,
+            "bf16_revision": bf16_rev,
+            "mode": mode,
+            "exit_code": code,
+            "compared": len(matrices),
+            "mismatched": mismatched,
+            "memory_caps_gb": caps,
+            "groups": records,
+        }
+        tmp = args.out.with_name(args.out.name + ".tmp")
+        tmp.write_text(json.dumps(result, indent=1))
+        tmp.replace(args.out)
+        return code
     except Exception:
         traceback.print_exc()
         print("error: see traceback", file=sys.stderr)
