@@ -6,6 +6,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+import numpy.typing as npt
+
 from mlx_dfloat.errors import DFloatFormatError
 
 SUPPORTED_VERSIONS: frozenset[str] = frozenset({"0.2.0", "0.3.1", "0.3.2", "0.5.0"})
@@ -120,3 +123,83 @@ def read_df11_config(model_dir: Path) -> DF11Config:
         raise DFloatFormatError(f"{config_path}: no dfloat11_config block")
     assert isinstance(config, dict)  # narrowed by has_df11
     return parse_df11_config(config["dfloat11_config"], source=str(config_path))
+
+
+def n_blocks_for(n_bytes: int) -> int:
+    """Number of 4096-byte thread-blocks that cover ``n_bytes`` of encoded exponents."""
+    return -(-n_bytes // BLOCK_BYTES)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GroupArrays:
+    """The six arrays stored for one compressed group, in decoder-ready dtypes."""
+
+    encoded_exponent: npt.NDArray[np.uint8]
+    sign_mantissa: npt.NDArray[np.uint8]
+    luts: npt.NDArray[np.uint8]
+    gaps: npt.NDArray[np.uint8]
+    output_positions: npt.NDArray[np.uint32]
+    split_positions: npt.NDArray[np.int64]
+
+    @property
+    def n_elements(self) -> int:
+        """Number of BF16 values in the group."""
+        return int(self.sign_mantissa.size)
+
+    @property
+    def n_bytes(self) -> int:
+        """Length of the encoded exponent stream in bytes."""
+        return int(self.encoded_exponent.size)
+
+    @property
+    def n_blocks(self) -> int:
+        """Number of 512-thread blocks the upstream kernel launches for this group."""
+        return n_blocks_for(self.n_bytes)
+
+    @property
+    def n_threads(self) -> int:
+        """Total decode threads (512 per block)."""
+        return self.n_blocks * THREADS_PER_BLOCK
+
+
+def validate_group_arrays(arrays: GroupArrays, *, name: str) -> None:
+    """Check the structural invariants a well-formed DF11 group satisfies.
+
+    Raises:
+        DFloatFormatError: Any invariant is violated; the message names the group.
+    """
+    n, n_bytes = arrays.n_elements, arrays.n_bytes
+    if n == 0 or n_bytes == 0:
+        raise DFloatFormatError(f"{name}: empty group")
+    luts = arrays.luts
+    if luts.ndim != 2 or luts.shape[1] != 256 or not 2 <= luts.shape[0] <= MAX_LUT_ROWS:
+        raise DFloatFormatError(f"{name}: luts must be [2..{MAX_LUT_ROWS}, 256], got {luts.shape}")
+    decode_rows = luts[:-1]
+    pointers = decode_rows[decode_rows >= LUT_POINTER_MIN].astype(np.int64)
+    targets = 256 - pointers
+    if pointers.size and (targets.min() < 1 or targets.max() > luts.shape[0] - 2):
+        raise DFloatFormatError(
+            f"{name}: a LUT pointer targets a row outside 1..{luts.shape[0] - 2}"
+        )
+    positions = arrays.output_positions.astype(np.int64)
+    n_blocks = arrays.n_blocks
+    if positions.size < 2 or positions.size - 1 not in (n_blocks, n_blocks - 1):
+        raise DFloatFormatError(
+            f"{name}: output_positions has {positions.size} entries for {n_blocks} blocks"
+        )
+    if positions[0] != 0:
+        raise DFloatFormatError(f"{name}: first output position is {positions[0]}, expected 0")
+    if np.any(np.diff(positions) < 0):
+        raise DFloatFormatError(f"{name}: output_positions is not monotonic")
+    if positions[-1] != n:
+        raise DFloatFormatError(f"{name}: last output position {positions[-1]} != {n} elements")
+    need_gap_bytes = -(-5 * arrays.n_threads // 8)
+    if arrays.gaps.size < need_gap_bytes:
+        raise DFloatFormatError(
+            f"{name}: gaps has {arrays.gaps.size} bytes, needs {need_gap_bytes}"
+        )
+    split = arrays.split_positions.astype(np.int64)
+    if split.size and (split[0] <= 0 or split[-1] >= n or np.any(np.diff(split) <= 0)):
+        raise DFloatFormatError(
+            f"{name}: split_positions must be strictly increasing inside (0, {n})"
+        )
