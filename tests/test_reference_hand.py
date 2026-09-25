@@ -182,6 +182,23 @@ def test_corrupt_gap_breaks_continuity():
         decode_group(_arrays(encoded, list(range(23)), _h1_luts(), gaps, [0, 23]))
 
 
+def test_check_stream_end_false_still_runs_the_gap_continuity_check():
+    # Bug caught: check_stream_end=False used as a general "lenient" switch that also skips
+    # continuity; the committed upstream slice then stops proving the gaps are consistent.
+    encoded, gaps = _h3()
+    gaps[1] = 0x00
+    arrays = _arrays(encoded, list(range(23)), _h1_luts(), gaps, [0, 23])
+    with pytest.raises(DFloatFormatError, match="corrupt gaps"):
+        decode_group(arrays, check_stream_end=False)
+
+
+def test_check_stream_end_false_skips_only_the_eof_byte_count():
+    # H1 plus one trailing byte: refused by default (see the trailing-bytes test), decoded to the
+    # H1 values when only the stream-end check is off.
+    arrays = _arrays([0x9B, 0x00], [0x00, 0x80, 0x7F], _h1_luts(), np.zeros(320), [0, 3])
+    assert decode_group(arrays, check_stream_end=False).tolist() == [0x3F00, 0xBF80, 0x407F]
+
+
 def test_invalid_code_in_a_non_final_thread_is_a_format_error():
     # H3 stream, but '110' (exponent 128) has length 0: thread 0 (not the last real thread) hits
     # an invalid code in its first code. Only the pass-1 per-thread check catches this.

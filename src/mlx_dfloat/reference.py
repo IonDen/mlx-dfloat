@@ -187,8 +187,10 @@ def decode_group(
             f"{int(positions[b])}"
         )
     if positions.size - 1 == arrays.n_blocks - 1:
+        # The last block holds at least one byte, so its first thread is always a real one
+        # (tail <= last_real) and first[tail] is in range.
         tail = (arrays.n_blocks - 1) * THREADS_PER_BLOCK
-        if tail <= last_real and first[tail] < n:
+        if first[tail] < n:
             raise DFloatFormatError(
                 f"{name}: block {arrays.n_blocks - 1} starts codes but output_positions has no entry for it"
             )

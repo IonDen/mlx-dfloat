@@ -19,6 +19,7 @@ import numpy.typing as npt
 from mlx_dfloat.errors import DFloatFormatError
 
 MAX_HEADER_BYTES = 100_000_000
+_MAX_REPR_CHARS = 80
 
 DTYPES: Mapping[str, np.dtype[Any]] = {
     "BOOL": np.dtype(np.bool_),
@@ -46,6 +47,12 @@ class TensorInfo:
     shape: tuple[int, ...]
     offset: int
     nbytes: int
+
+
+def short_repr(value: object) -> str:
+    """``repr(value)`` capped at 80 characters, for echoing untrusted header/config values."""
+    text = repr(value)
+    return text if len(text) <= _MAX_REPR_CHARS else text[: _MAX_REPR_CHARS - 3] + "..."
 
 
 def _no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -95,14 +102,23 @@ def parse_header(
 def _parse_entry(
     name: str, meta: object, *, data_start: int, file_size: int, source: str
 ) -> TensorInfo:
+    label = short_repr(name)
     if not isinstance(meta, dict) or {"dtype", "shape", "data_offsets"} - meta.keys():
-        raise DFloatFormatError(f"{source}: tensor entry {name!r} is malformed")
+        raise DFloatFormatError(f"{source}: tensor entry {label} is malformed")
     dtype = meta["dtype"]
     if not isinstance(dtype, str) or dtype not in DTYPES:
-        raise DFloatFormatError(f"{source}: tensor {name!r} has unsupported dtype {dtype!r}")
+        raise DFloatFormatError(
+            f"{source}: tensor {label} has unsupported dtype {short_repr(dtype)}"
+        )
     shape = meta["shape"]
-    if not isinstance(shape, list) or not all(type(d) is int and d >= 0 for d in shape):
-        raise DFloatFormatError(f"{source}: tensor {name!r} has an invalid shape {shape!r}")
+    # No real dimension exceeds the file size; the bound also keeps a zero-element shape such as
+    # [0, 2**63] (product 0, so the byte-size check passes) from reaching np.empty.
+    if not isinstance(shape, list) or not all(
+        type(d) is int and 0 <= d <= file_size for d in shape
+    ):
+        raise DFloatFormatError(
+            f"{source}: tensor {label} has an invalid shape {short_repr(shape)}"
+        )
     offsets = meta["data_offsets"]
     if (
         not isinstance(offsets, list)
@@ -110,15 +126,17 @@ def _parse_entry(
         or not all(type(o) is int for o in offsets)
         or not 0 <= offsets[0] <= offsets[1]
     ):
-        raise DFloatFormatError(f"{source}: tensor {name!r} has invalid data offsets {offsets!r}")
+        raise DFloatFormatError(
+            f"{source}: tensor {label} has invalid data offsets {short_repr(offsets)}"
+        )
     nbytes = offsets[1] - offsets[0]
     if nbytes != math.prod(shape) * DTYPES[dtype].itemsize:
         raise DFloatFormatError(
-            f"{source}: tensor {name!r} byte size does not match its shape and dtype"
+            f"{source}: tensor {label} byte size does not match its shape and dtype"
         )
     if data_start + offsets[1] > file_size:
         raise DFloatFormatError(
-            f"{source}: tensor {name!r} extends past end of file ({file_size} bytes); partial download?"
+            f"{source}: tensor {label} extends past end of file ({file_size} bytes); partial download?"
         )
     return TensorInfo(
         name=name, dtype=dtype, shape=tuple(shape), offset=data_start + offsets[0], nbytes=nbytes
@@ -156,4 +174,12 @@ def read_array(path: Path, info: TensorInfo) -> npt.NDArray[Any]:
     return np.memmap(path, dtype=dtype, mode="r", offset=info.offset, shape=info.shape)
 
 
-__all__ = ["DTYPES", "MAX_HEADER_BYTES", "TensorInfo", "parse_header", "read_array", "read_header"]
+__all__ = [
+    "DTYPES",
+    "MAX_HEADER_BYTES",
+    "TensorInfo",
+    "parse_header",
+    "read_array",
+    "read_header",
+    "short_repr",
+]

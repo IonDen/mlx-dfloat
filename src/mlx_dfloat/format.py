@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 
-from mlx_dfloat._safetensors import TensorInfo, read_array, read_header
+from mlx_dfloat._safetensors import TensorInfo, read_array, read_header, short_repr
 from mlx_dfloat.errors import DFloatFormatError
 
 SUPPORTED_VERSIONS: frozenset[str] = frozenset({"0.2.0", "0.3.1", "0.3.2", "0.5.0"})
@@ -24,7 +24,16 @@ MAX_LUT_ROWS = (
 )
 MAX_PATTERNS = 64
 MAX_PATTERN_CHARS = 256
+# pattern_dict keys come from a downloaded config.json and are matched with re.fullmatch, so they
+# are held to the small grammar upstream DF11 configs use (literals, `\.`, `\d`, `\w`, classes
+# such as `[0-9]`, `+`/`*`/`?`, `|` and plain groups), with a cap on every kind of backtracking
+# choice point. Group names are at most 256 characters, so two unbounded quantifiers cost at most
+# ~256^2 steps per match; optional parts and alternation branches each double the worst case.
 _QUANTIFIED_GROUP = re.compile(r"\)[*+{]")
+_PATTERN_TOKEN = re.compile(r"\\[.dw]|[A-Za-z0-9_\-\[\]()|*+?]")
+MAX_UNBOUNDED_QUANTIFIERS = 2
+MAX_OPTIONAL_QUANTIFIERS = 2
+MAX_ALTERNATIONS = 4
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -46,6 +55,33 @@ def _check_pattern(pattern: str, *, source: str) -> None:
         raise DFloatFormatError(
             f"{source}: pattern {pattern!r} has a quantified group; refused to avoid catastrophic backtracking"
         )
+    pos = 0
+    while pos < len(pattern):
+        token = _PATTERN_TOKEN.match(pattern, pos)
+        if token is None:
+            raise DFloatFormatError(
+                f"{source}: pattern {pattern!r}: {pattern[pos : pos + 2]!r} at offset {pos} is not "
+                "allowed in a DF11 pattern"
+            )
+        pos = token.end()
+    if "(?" in pattern:
+        raise DFloatFormatError(
+            f"{source}: pattern {pattern!r}: inline flags and extension groups '(?' are not allowed"
+        )
+    unbounded = pattern.count("*") + pattern.count("+")
+    if unbounded > MAX_UNBOUNDED_QUANTIFIERS:
+        raise DFloatFormatError(
+            f"{source}: pattern {pattern!r} has {unbounded} unbounded quantifiers "
+            f"(at most {MAX_UNBOUNDED_QUANTIFIERS})"
+        )
+    for symbol, limit, what in (
+        ("?", MAX_OPTIONAL_QUANTIFIERS, "optional parts"),
+        ("|", MAX_ALTERNATIONS, "alternations"),
+    ):
+        if pattern.count(symbol) > limit:
+            raise DFloatFormatError(
+                f"{source}: pattern {pattern!r} has too many {what} (at most {limit})"
+            )
     try:
         re.compile(pattern)
     except re.error as exc:
@@ -68,16 +104,16 @@ def parse_df11_config(raw: object, *, source: str) -> DF11Config:
         raise DFloatFormatError(f"{source}: dfloat11_config has no version string")
     if version not in SUPPORTED_VERSIONS:
         raise DFloatFormatError(
-            f"{source}: unsupported DF11 format version {version!r} "
+            f"{source}: unsupported DF11 format version {short_repr(version)} "
             f"(supported: {', '.join(sorted(SUPPORTED_VERSIONS))})"
         )
     if raw.get("threads_per_block") != [THREADS_PER_BLOCK]:
         raise DFloatFormatError(
-            f"{source}: threads_per_block must be [512], got {raw.get('threads_per_block')!r}"
+            f"{source}: threads_per_block must be [512], got {short_repr(raw.get('threads_per_block'))}"
         )
     if raw.get("bytes_per_thread") != BYTES_PER_THREAD:
         raise DFloatFormatError(
-            f"{source}: bytes_per_thread must be 8, got {raw.get('bytes_per_thread')!r}"
+            f"{source}: bytes_per_thread must be 8, got {short_repr(raw.get('bytes_per_thread'))}"
         )
     patterns = raw.get("pattern_dict")
     if not isinstance(patterns, dict) or not patterns:
@@ -88,7 +124,7 @@ def parse_df11_config(raw: object, *, source: str) -> DF11Config:
     for pattern, subpaths in patterns.items():
         if not isinstance(subpaths, list) or not all(isinstance(s, str) for s in subpaths):
             raise DFloatFormatError(
-                f"{source}: pattern_dict entry {pattern!r} is not a list of names"
+                f"{source}: pattern_dict entry {short_repr(pattern)} is not a list of names"
             )
         _check_pattern(pattern, source=source)
         parsed[pattern] = tuple(subpaths)
@@ -239,13 +275,14 @@ def matrix_names_for(group: str, pattern_dict: Mapping[str, tuple[str, ...]]) ->
     Raises:
         DFloatFormatError: No pattern, or more than one pattern, fully matches the group name.
     """
+    label = short_repr(group)
+    for pattern in pattern_dict:  # a hand-built DF11Config never went through parse_df11_config
+        _check_pattern(pattern, source=f"group {label}")
     matches = [subs for pattern, subs in pattern_dict.items() if re.fullmatch(pattern, group)]
     if not matches:
-        raise DFloatFormatError(f"group {group!r}: no pattern in pattern_dict matches it")
+        raise DFloatFormatError(f"group {label}: no pattern in pattern_dict matches it")
     if len(matches) > 1:
-        raise DFloatFormatError(
-            f"group {group!r}: more than one pattern in pattern_dict matches it"
-        )
+        raise DFloatFormatError(f"group {label}: more than one pattern in pattern_dict matches it")
     subs = matches[0]
     if not subs:
         return (f"{group}.weight",)
@@ -318,7 +355,7 @@ def open_checkpoint(path: str | os.PathLike[str]) -> DF11Checkpoint:
         for name in header:
             if name in owner:
                 raise DFloatFormatError(
-                    f"tensor {name!r} appears in both {owner[name].name} and {file.name}"
+                    f"tensor {short_repr(name)} appears in both {owner[name].name} and {file.name}"
                 )
             owner[name] = file
     group_names = sorted({n.rsplit(".", 1)[0] for n in owner if n.endswith(".encoded_exponent")})

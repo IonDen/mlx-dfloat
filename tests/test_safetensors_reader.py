@@ -126,3 +126,30 @@ def test_empty_tensor_reads_as_empty_array(tmp_path):
     arr = read_array(path, read_header(path)["t"])
     assert arr.shape == (0,)
     assert arr.dtype == np.int64
+
+
+def test_a_huge_zero_product_shape_is_a_format_error(tmp_path):
+    # Bug caught: shape [0, 2**63] passes the product check (0 bytes) and np.empty later raises a
+    # bare ValueError instead of DFloatFormatError.
+    path = tmp_path / "z.safetensors"
+    _raw_file(path, {"t": {"dtype": "U8", "shape": [0, 2**63], "data_offsets": [0, 0]}})
+    with pytest.raises(DFloatFormatError, match="shape"):
+        read_header(path)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"dtype": "Q" * 10_000, "shape": [1], "data_offsets": [0, 1]},
+        {"dtype": "U8", "shape": [-1] * 10_000, "data_offsets": [0, 1]},
+        {"dtype": "U8", "shape": [1], "data_offsets": [0] * 10_000},
+    ],
+)
+def test_untrusted_header_values_are_truncated_in_error_text(tmp_path, entry):
+    # Bug caught: echoing a header value uncapped copies up to the 100 MB header into stderr and
+    # into the parity summary's "error" field.
+    path = tmp_path / "t.safetensors"
+    _raw_file(path, {"n" * 10_000: entry}, payload=b"\x00")
+    with pytest.raises(DFloatFormatError) as info:
+        read_header(path)
+    assert len(str(info.value)) < 400

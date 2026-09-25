@@ -19,6 +19,8 @@ from pathlib import Path
 import numpy as np
 from huggingface_hub import HfApi, HfFileSystem
 
+from mlx_dfloat.format import _check_pattern
+
 DF11_REPO = "DFloat11/Qwen3-4B-DF11"
 BF16_REPO = "Qwen/Qwen3-4B"
 GROUP = "model.layers.0"
@@ -46,6 +48,17 @@ def _read(fs: HfFileSystem, path: str, start: int, n: int) -> bytes:
     return data
 
 
+def subpaths_for(pattern_dict: dict[str, list[str]], group: str) -> list[str]:
+    """Sub-paths of the (screened) pattern that fully matches ``group``.
+
+    The config is downloaded, so every pattern goes through the package's pattern guard before
+    ``re.fullmatch`` sees it.
+    """
+    for pattern in pattern_dict:
+        _check_pattern(pattern, source="config.json")
+    return next(s for p, s in pattern_dict.items() if re.fullmatch(p, group))
+
+
 def main() -> None:
     """Extract the slice and write it with provenance."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -55,7 +68,7 @@ def main() -> None:
     df11_rev = api.model_info(DF11_REPO).sha
     bf16_rev = api.model_info(BF16_REPO).sha
     config = json.loads(fs.read_text(f"{DF11_REPO}@{df11_rev}/config.json"))["dfloat11_config"]
-    subs = next(s for p, s in config["pattern_dict"].items() if re.fullmatch(p, GROUP))
+    subs = subpaths_for(config["pattern_dict"], GROUP)
     if not subs or subs[0] != "self_attn.q_proj":
         raise SystemExit(f"unexpected first matrix in {GROUP}: {subs[:1]}")
     df11_file = header = base = None

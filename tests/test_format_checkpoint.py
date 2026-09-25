@@ -46,6 +46,13 @@ def test_unmatched_group_is_a_format_error():
         matrix_names_for("other.0", {PATTERN: SUBS})
 
 
+def test_matrix_names_for_screens_a_hand_built_pattern_dict():
+    # Bug caught: matrix_names_for trusting patterns that never went through parse_df11_config
+    # (a DF11Config built by hand) runs a catastrophic regex against the group name.
+    with pytest.raises(DFloatFormatError, match="not allowed"):
+        matrix_names_for("a" * 200, {".*" * 20 + "!": ()})
+
+
 def test_ambiguous_group_is_a_format_error():
     with pytest.raises(DFloatFormatError, match="more than one pattern"):
         matrix_names_for("blocks.0", {PATTERN: SUBS, r"blocks\.0": ("x",)})
@@ -151,7 +158,8 @@ def test_unsafe_group_names_are_refused(tmp_path, bad):
                     "version": "0.5.0",
                     "threads_per_block": [512],
                     "bytes_per_thread": 8,
-                    "pattern_dict": {".*": []},
+                    # Any in-grammar pattern: the name check runs before pattern matching.
+                    "pattern_dict": {r"blocks\.\d+": []},
                 }
             }
         )
