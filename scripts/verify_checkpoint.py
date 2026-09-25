@@ -248,6 +248,13 @@ def verify(
         # A stale summary from a previous (possibly differently-scoped) run must never be
         # mistaken for this run's result; move it aside rather than deleting it.
         summary_path.replace(out_dir / "summary.previous.json")
+    if groups is not None and not groups:
+        # `groups or ckpt.groups` would otherwise treat `[]` the same as `None` (run every group)
+        # while `groups is None` (which gates the coverage check below) is False for `[]` -- an
+        # empty list must never silently run the full checkpoint with coverage checking disabled.
+        return _error_summary(
+            out_dir, key=key, started=started, message="groups is an empty list; pass None for all"
+        )
     try:
         ckpt = open_checkpoint(df11_root)
         originals = index_original(bf16_root) if bf16_root else {}
@@ -313,6 +320,12 @@ def verify(
                     )
                 original = _load_bits(originals[extra], [extra])[extra]
                 ours = np.asarray(read_array(path, info)).reshape(-1)
+                if ours.size != original.size:
+                    # A size mismatch is a mapping/format problem, not a bit mismatch: same
+                    # reasoning as `_compare`'s matrix-size check, applied to extras.
+                    raise VerifyError(
+                        f"extra {extra!r}: has {ours.size} elements, original has {original.size}"
+                    )
                 extras_compared += 1
                 consumed.add(extra)
                 if not np.array_equal(ours, original):

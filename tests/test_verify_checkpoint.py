@@ -102,6 +102,25 @@ def test_flipped_extra_exits_1(tmp_path, pair):
     assert verify(df11, write_bf16_original(tmp_path / "bad", bad), tmp_path / "out", key=KEY) == 1
 
 
+def test_an_extra_size_mismatch_is_an_error_not_a_mismatch(tmp_path, pair):
+    # Bug caught: an extra whose element count differs from its same-named original goes through
+    # `np.array_equal` (False for mismatched shapes) and is counted as a bit mismatch (exit 1)
+    # instead of the mapping/format problem it actually is (exit 2), same bug as `_compare`'s
+    # matrix-size check above but on the extras path.
+    df11, _, originals = pair
+    bad = dict(originals)
+    bad["norm.weight"] = np.concatenate([NORM, NORM])
+    assert verify(df11, write_bf16_original(tmp_path / "bad", bad), tmp_path / "out", key=KEY) == 2
+
+
+def test_verify_with_an_empty_groups_list_is_an_error(tmp_path, pair):
+    # Bug caught: `groups or ckpt.groups` treats `[]` the same as `None` (falls back to every
+    # group) while `groups is None` (used to gate the coverage check) is False for `[]`, so an
+    # empty list silently runs the full checkpoint with the coverage check disabled.
+    df11, bf16, _ = pair
+    assert verify(df11, bf16, tmp_path / "out", key=KEY, groups=[]) == 2
+
+
 def test_a_size_mismatch_is_an_error_not_a_mismatch(tmp_path, pair):
     # Bug caught: treating a size mismatch (a mapping/format problem) as `equal=False` reports it
     # as a bit mismatch (exit 1) instead of the tool error it actually is (exit 2).

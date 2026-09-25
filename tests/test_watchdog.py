@@ -2,6 +2,7 @@ import json
 import threading
 
 import psutil
+import pytest
 import scripts._watchdog as wd
 from scripts._watchdog import Watchdog, verdict
 
@@ -91,3 +92,20 @@ def test_watchdog_sample_error_still_aborts(tmp_path, monkeypatch):
     assert exit_codes[0] == 70
     artifact = json.loads((tmp_path / "abort.json").read_text())
     assert artifact["reason"] == "sample_error"
+
+
+# Mocking `os._exit` (required so the test process itself doesn't exit) means the exception that
+# triggered the `finally: os._exit(code)` in the first place resumes propagating once the mocked
+# call returns normally, escaping the daemon thread; that residual propagation is an artifact of
+# the mock, not of the code under test (in production `os._exit` never returns at all), so it is
+# deliberately ignored here rather than silenced project-wide.
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_watchdog_still_exits_when_the_artifact_write_itself_fails(tmp_path, monkeypatch):
+    # Bug caught: removing the `finally:` around `os._exit(code)` (so a write failure in the abort
+    # artifact path propagates up and kills the sampler thread) leaves a genuine ceiling breach
+    # completely unenforced -- exit_codes stays empty and the job keeps running.
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory")  # mkdir(blocked, exist_ok=True) raises FileExistsError
+    exit_codes = _run_watchdog_to_abort(blocked, monkeypatch, ceiling=0, budget=1e9)
+    assert exit_codes
+    assert exit_codes[0] == 70
