@@ -37,6 +37,13 @@ def test_matrix_names_follow_pattern_dict_order():
     )
 
 
+def test_an_unescaped_dot_pattern_names_the_matrices_of_its_group():
+    # DFloat11/Qwen3-4B-DF11 ships `model.layers.\d+` with the dots unescaped.
+    assert matrix_names_for("model.layers.7", {r"model.layers.\d+": ("self_attn.q_proj",)}) == (
+        "model.layers.7.self_attn.q_proj.weight",
+    )
+
+
 def test_single_matrix_group_is_named_group_weight():
     assert matrix_names_for("lm_head", {r"lm_head": ()}) == ("lm_head.weight",)
 

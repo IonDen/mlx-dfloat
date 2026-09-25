@@ -82,6 +82,31 @@ def test_upstream_pattern_shapes_are_accepted(pattern):
     ) == [pattern]
 
 
+# Every distinct pattern_dict key in the published DFloat11 configs, verbatim (read 2026-09-25 from
+# DFloat11/Qwen3-4B, FLUX.1-schnell, FLUX.1-dev, FLUX.1-Krea-dev, FLUX.1-Kontext-dev,
+# Qwen-Image-Edit, Qwen-Image-Edit-2509, Chroma, HiDream-I1-Full, Wan2.1-T2V-14B-Diffusers,
+# Wan2.2-T2V-A14B and Wan2.2-I2V-A14B). The older (0.2.0) configs leave the dots unescaped.
+REAL_DF11_PATTERNS = [
+    r"model.layers.\d+",
+    r"transformer_blocks.\d+",
+    r"single_transformer_blocks.\d+",
+    r"transformer_blocks\.\d+",
+    r"single_transformer_blocks\.\d+",
+    r"distilled_guidance_layer",
+    r"double_stream_blocks\.\d+",
+    r"single_stream_blocks\.\d+",
+    r"blocks\.\d+",
+]
+
+
+@pytest.mark.parametrize("pattern", REAL_DF11_PATTERNS)
+def test_every_published_df11_pattern_is_accepted(pattern):
+    # Bug caught: a grammar that refuses a real checkpoint's config (Qwen3-4B, FLUX.1-dev and
+    # FLUX.1-schnell all use an unescaped `.`), so open_checkpoint fails on a valid model.
+    cfg = parse_df11_config({**GOOD, "pattern_dict": {pattern: []}}, source="c")
+    assert list(cfg.pattern_dict) == [pattern]
+
+
 @pytest.mark.parametrize(
     ("pattern", "message"),
     [
@@ -111,6 +136,9 @@ def test_patterns_outside_the_df11_grammar_are_refused(pattern, message):
         # trailing `.` is O(n^3) per fullmatch.
         (r"\d+\d+\d+", False),
         (r"\d*\d*\d*x", False),
+        # A bare `.` is admitted (real configs use it), so the cap is what stops a `.*` chain.
+        (r".*.*", True),
+        (r".*.*.*", False),
     ],
 )
 def test_unbounded_quantifiers_are_capped_at_two(pattern, ok):

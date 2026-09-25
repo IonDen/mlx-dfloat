@@ -25,12 +25,13 @@ MAX_LUT_ROWS = (
 MAX_PATTERNS = 64
 MAX_PATTERN_CHARS = 256
 # pattern_dict keys come from a downloaded config.json and are matched with re.fullmatch, so they
-# are held to the small grammar upstream DF11 configs use (literals, `\.`, `\d`, `\w`, classes
-# such as `[0-9]`, `+`/`*`/`?`, `|` and plain groups), with a cap on every kind of backtracking
-# choice point. Group names are at most 256 characters, so two unbounded quantifiers cost at most
+# are held to the small grammar upstream DF11 configs use (literals, `\.` and a bare `.`, which
+# the 0.2.0 configs of Qwen3-4B and FLUX.1-dev/schnell leave unescaped, `\d`, `\w`, classes such
+# as `[0-9]`, `+`/`*`/`?`, `|` and plain groups), with a cap on every kind of backtracking choice
+# point. Group names are at most 256 characters, so two unbounded quantifiers cost at most
 # ~256^2 steps per match; optional parts and alternation branches each double the worst case.
 _QUANTIFIED_GROUP = re.compile(r"\)[*+{]")
-_PATTERN_TOKEN = re.compile(r"\\[.dw]|[A-Za-z0-9_\-\[\]()|*+?]")
+_PATTERN_TOKEN = re.compile(r"\\[.dw]|[A-Za-z0-9_.\-\[\]()|*+?]")
 MAX_UNBOUNDED_QUANTIFIERS = 2
 MAX_OPTIONAL_QUANTIFIERS = 2
 MAX_ALTERNATIONS = 4
