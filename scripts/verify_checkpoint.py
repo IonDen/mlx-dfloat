@@ -38,7 +38,7 @@ try:
     from mlx_dfloat.errors import DFloatError
     from mlx_dfloat.format import open_checkpoint
     from mlx_dfloat.reference import decode_matrices
-except ImportError as exc:  # a broken environment is a tool error (2), never a mismatch (1)
+except Exception as exc:  # a broken environment (no Metal, bad install) is 2, never a mismatch (1)
     print(
         f"error: cannot import the project modules ({exc}); run from a synced checkout",
         file=sys.stderr,

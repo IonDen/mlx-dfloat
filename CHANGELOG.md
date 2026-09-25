@@ -16,4 +16,5 @@ All notable changes to this project are documented here. The format follows
   its BF16 bit patterns, bit for bit, and raises `DFloatResourceError` when a decode would exceed its memory budget.
   Two scripts in the repository check a conversion against the original BF16 weights: one decodes a whole local
   checkpoint, the other samples a few groups of a Hugging Face repo over range requests. They exit 0 when every
-  compared value matches, 1 on a real mismatch, and 2 on any other error.
+  compared value matches, 1 on a real mismatch, 2 on any other error, and 70 or 71 when the memory or wall-clock
+  watchdog aborts the run.

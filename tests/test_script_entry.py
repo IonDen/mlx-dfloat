@@ -31,11 +31,13 @@ def test_running_the_script_file_directly_starts(script):
 
 
 @pytest.mark.parametrize("script", SCRIPTS)
-def test_a_project_import_failure_exits_2_not_1(script, tmp_path):
-    # A broken environment is a tool error (exit 2), never the bit-mismatch exit code 1.
+@pytest.mark.parametrize("error", ["ImportError", "RuntimeError", "OSError"])
+def test_a_project_import_failure_exits_2_not_1(script, error, tmp_path):
+    # A broken environment is a tool error (exit 2), never the bit-mismatch exit code 1. Importing
+    # mlx.core on a host without Metal raises RuntimeError or OSError, not only ImportError.
     shadow = tmp_path / "mlx_dfloat"
     shadow.mkdir()
-    (shadow / "__init__.py").write_text('raise ImportError("simulated broken install")\n')
+    (shadow / "__init__.py").write_text(f'raise {error}("simulated broken install")\n')
     env = {**os.environ, "PYTHONPATH": str(tmp_path)}
     result = _run([script, "--help"], env=env)
     assert result.returncode == 2, result.stderr[-800:]

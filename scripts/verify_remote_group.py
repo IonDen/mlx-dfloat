@@ -53,7 +53,7 @@ try:
         max_elements_per_block,
         split_matrices,
     )
-except ImportError as exc:  # a broken environment is a tool error (2), never a mismatch (1)
+except Exception as exc:  # a broken environment (no Metal, bad install) is 2, never a mismatch (1)
     print(
         f"error: cannot import the project modules ({exc}); run from a synced checkout",
         file=sys.stderr,
@@ -384,18 +384,26 @@ def main(
     parser.add_argument("--wall-budget", type=float, default=3 * 3600.0)
     args = parser.parse_args(argv)
     mode = "structural-only" if args.structural_only else "parity"
+    if args.out.is_dir():
+        print(f"error: --out {args.out} is a directory; name the result file", file=sys.stderr)
+        return 2
     run_dir = args.out.parent
-    run_dir.mkdir(parents=True, exist_ok=True)
-    # Neither a previous result nor a previous abort artifact may pass for this run's outcome;
-    # move them aside rather than deleting them.
-    if args.out.exists():
-        args.out.replace(args.out.with_name(f"{args.out.stem}.previous.json"))
-    if (run_dir / "abort.json").exists():
-        (run_dir / "abort.json").replace(run_dir / "abort.previous.json")
-    caps = list(install_memory_caps())
-    mx.set_cache_limit(0)
-    watchdog = Watchdog(run_dir, ceiling=default_ceiling(), budget=args.wall_budget).start()
     try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        # Neither a previous result nor a previous abort artifact may pass for this run's
+        # outcome; move them aside rather than deleting them.
+        if args.out.exists():
+            args.out.replace(args.out.with_name(f"{args.out.stem}.previous.json"))
+        if (run_dir / "abort.json").exists():
+            (run_dir / "abort.json").replace(run_dir / "abort.previous.json")
+    except OSError as exc:  # an unusable output location is a tool error, never a mismatch
+        print(f"error: cannot prepare the output location {run_dir}: {exc}", file=sys.stderr)
+        return 2
+    watchdog: Watchdog | None = None
+    try:
+        caps = list(install_memory_caps())
+        mx.set_cache_limit(0)
+        watchdog = Watchdog(run_dir, ceiling=default_ceiling(), budget=args.wall_budget).start()
         api = HfApi()
         df11_rev = args.df11_revision or api.model_info(args.df11_repo).sha
         df11 = factory(args.df11_repo, df11_rev, "")
@@ -453,7 +461,8 @@ def main(
         print("error: see traceback", file=sys.stderr)
         return 2
     finally:
-        watchdog.stop()
+        if watchdog is not None:
+            watchdog.stop()
 
 
 if __name__ == "__main__":

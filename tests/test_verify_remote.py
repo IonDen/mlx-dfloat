@@ -587,3 +587,26 @@ def test_main_stops_the_watchdog_before_writing_the_result(tmp_path, monkeypatch
     assert main(_argv(df11, bf16, out), source_factory=_local_factory) == 0
     assert seen[0] is False
     assert out.exists()
+
+
+def test_an_unusable_output_path_exits_2_not_1(tmp_path, capsys):
+    # Bug caught: the output-directory setup running outside main's error handling, so an OSError
+    # (here: the --out parent is a regular file) escapes as exit 1, the bit-mismatch kill signal.
+    df11, bf16, _ = _pair(tmp_path, False)
+    blocker = tmp_path / "a_file"
+    blocker.write_text("not a directory")
+    assert main(_argv(df11, bf16, blocker / "RESULT.json"), source_factory=_local_factory) == 2
+    assert "error:" in capsys.readouterr().err
+
+
+def test_an_existing_directory_as_out_is_refused_and_left_alone(tmp_path, capsys):
+    # Bug caught: `args.out.replace(...)` renaming a directory the user named as --out to
+    # `<name>.previous.json`.
+    df11, bf16, _ = _pair(tmp_path, False)
+    target = tmp_path / "results"
+    target.mkdir()
+    (target / "keep.txt").write_text("x")
+    assert main(_argv(df11, bf16, target), source_factory=_local_factory) == 2
+    assert (target / "keep.txt").read_text() == "x"
+    assert not (tmp_path / "results.previous.json").exists()
+    assert "is a directory" in capsys.readouterr().err
