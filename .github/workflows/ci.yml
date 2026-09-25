@@ -18,7 +18,7 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy
-      - run: uv run pytest --cov=mlx_dfloat --cov-report=term-missing --cov-fail-under=85
+      - run: uv run pytest --cov=mlx_dfloat --cov=scripts --cov-report=term-missing --cov-fail-under=85
   build:
     # Same action the release workflow uses, so a distribution that would fail at tag time
     # (e.g. a build-backend metadata version newer than the bundled twine) fails on the PR.
