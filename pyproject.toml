@@ -95,8 +95,8 @@ convention = "google"
 "tests/**/*.py" = ["D", "ANN", "S101"]
 "tests/_upstream/*.py" = ["E741", "N806", "SIM", "PERF", "B", "RUF", "UP", "C4", "RET", "FURB", "D", "ANN"]
 # _upstream_get_luts_verbatim is a literal upstream copy embedded for differential testing
-# (see its docstring); these codes fire only inside it and are not part of the brief's ignore
-# list for tests/_upstream/*.py, so they are scoped narrowly to this one file instead.
+# (see its docstring); these codes fire only inside it and are not among the ignored rules for
+# tests/_upstream/*.py, so they are scoped narrowly to this one file instead.
 "tests/test_upstream_encoder.py" = ["B007", "FURB116", "RUF100"]
 
 [tool.ruff.format]
