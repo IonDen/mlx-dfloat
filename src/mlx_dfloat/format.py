@@ -1,7 +1,9 @@
 """DFloat11 checkpoint format: config, per-group arrays, validation, discovery."""
 
 import json
+import os
 import re
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 
+from mlx_dfloat._safetensors import TensorInfo, read_array, read_header
 from mlx_dfloat.errors import DFloatFormatError
 
 SUPPORTED_VERSIONS: frozenset[str] = frozenset({"0.2.0", "0.3.1", "0.3.2", "0.5.0"})
@@ -203,3 +206,152 @@ def validate_group_arrays(arrays: GroupArrays, *, name: str) -> None:
         raise DFloatFormatError(
             f"{name}: split_positions must be strictly increasing inside (0, {n})"
         )
+
+
+GROUP_FIELDS: tuple[str, ...] = (
+    "encoded_exponent",
+    "sign_mantissa",
+    "luts",
+    "gaps",
+    "output_positions",
+    "split_positions",
+)
+GROUP_FIELD_TYPES: Mapping[str, tuple[str, int]] = {
+    "encoded_exponent": ("U8", 1),
+    "sign_mantissa": ("U8", 1),
+    "luts": ("U8", 2),
+    "gaps": ("U8", 1),
+    "output_positions": ("U8", 1),
+    "split_positions": ("I64", 1),
+}
+GROUP_NAME = re.compile(r"[A-Za-z0-9_.\-]{1,256}")
+
+
+def validate_group_name(name: str) -> None:
+    """Refuse group names that could escape a directory or blow up regex matching."""
+    if not GROUP_NAME.fullmatch(name) or ".." in name:
+        raise DFloatFormatError(f"unsafe group name {name[:80]!r}")
+
+
+def matrix_names_for(group: str, pattern_dict: Mapping[str, tuple[str, ...]]) -> tuple[str, ...]:
+    """Names of the weight matrices a group decodes into, in concatenation order.
+
+    Raises:
+        DFloatFormatError: No pattern, or more than one pattern, fully matches the group name.
+    """
+    matches = [subs for pattern, subs in pattern_dict.items() if re.fullmatch(pattern, group)]
+    if not matches:
+        raise DFloatFormatError(f"group {group!r}: no pattern in pattern_dict matches it")
+    if len(matches) > 1:
+        raise DFloatFormatError(
+            f"group {group!r}: more than one pattern in pattern_dict matches it"
+        )
+    subs = matches[0]
+    if not subs:
+        return (f"{group}.weight",)
+    return tuple(f"{group}.{sub}.weight" for sub in subs)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DF11Group:
+    """One compressed group: where its six tensors live and which matrices it decodes into."""
+
+    name: str
+    matrix_names: tuple[str, ...]
+    path: Path
+    tensors: Mapping[str, TensorInfo]
+
+    def load(self) -> GroupArrays:
+        """Memory-map the group's tensors (dtypes checked at discovery) and validate them."""
+        raw = {field: read_array(self.path, self.tensors[field]) for field in GROUP_FIELDS}
+        positions = np.ascontiguousarray(raw["output_positions"])
+        if positions.size % 4:
+            raise DFloatFormatError(
+                f"{self.name}: output_positions byte length is not a multiple of 4"
+            )
+        arrays = GroupArrays(
+            encoded_exponent=np.asarray(raw["encoded_exponent"]),
+            sign_mantissa=np.asarray(raw["sign_mantissa"]),
+            luts=np.asarray(raw["luts"]),
+            gaps=np.asarray(raw["gaps"]),
+            output_positions=positions.view("<u4").astype(np.uint32),
+            split_positions=np.asarray(raw["split_positions"]),
+        )
+        validate_group_arrays(arrays, name=self.name)
+        return arrays
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DF11Checkpoint:
+    """A DF11 model directory: its config, compressed groups, and uncompressed extra tensors."""
+
+    root: Path
+    config: DF11Config
+    groups: Mapping[str, DF11Group]
+    extras: Mapping[str, tuple[Path, TensorInfo]]
+
+
+def _regular_file(path: Path) -> bool:
+    try:
+        return stat.S_ISREG(path.stat().st_mode)  # follows symlinks: HF blobs are regular files
+    except OSError:
+        return False
+
+
+def open_checkpoint(path: str | os.PathLike[str]) -> DF11Checkpoint:
+    """Discover the groups and extras of a DF11 checkpoint directory, reading headers only.
+
+    Raises:
+        DFloatFormatError: The config is unusable; a shard is not a regular file; a group name is
+            unsafe, a group is incomplete, split across files, or has wrong dtypes/ranks; a tensor
+            name appears in two files; or a group's matrix count disagrees with its pattern.
+    """
+    root = Path(path).expanduser()
+    config = read_df11_config(root)
+    owner: dict[str, Path] = {}
+    headers: dict[Path, dict[str, TensorInfo]] = {}
+    for file in sorted(root.glob("*.safetensors")):
+        if not _regular_file(file):
+            raise DFloatFormatError(f"{file.name}: not a regular file")
+        header = read_header(file)
+        headers[file] = header
+        for name in header:
+            if name in owner:
+                raise DFloatFormatError(
+                    f"tensor {name!r} appears in both {owner[name].name} and {file.name}"
+                )
+            owner[name] = file
+    group_names = sorted({n.rsplit(".", 1)[0] for n in owner if n.endswith(".encoded_exponent")})
+    groups: dict[str, DF11Group] = {}
+    claimed: set[str] = set()
+    for group in group_names:
+        validate_group_name(group)
+        home = owner[f"{group}.encoded_exponent"]
+        tensors: dict[str, TensorInfo] = {}
+        for field in GROUP_FIELDS:
+            full = f"{group}.{field}"
+            if full not in owner:
+                raise DFloatFormatError(f"group {group!r}: missing {field}")
+            if owner[full] != home:
+                raise DFloatFormatError(f"group {group!r}: its tensors are split across files")
+            info = headers[home][full]
+            want_dtype, want_rank = GROUP_FIELD_TYPES[field]
+            if info.dtype != want_dtype:
+                raise DFloatFormatError(
+                    f"group {group!r}: {field} has dtype {info.dtype}, expected {want_dtype}"
+                )
+            if len(info.shape) != want_rank:
+                raise DFloatFormatError(
+                    f"group {group!r}: {field} has rank {len(info.shape)}, expected {want_rank}"
+                )
+            tensors[field] = info
+            claimed.add(full)
+        names = matrix_names_for(group, config.pattern_dict)
+        n_matrices = tensors["split_positions"].shape[0] + 1
+        if n_matrices != len(names):
+            raise DFloatFormatError(
+                f"group {group!r}: holds {n_matrices} matrices but its pattern names {len(names)}"
+            )
+        groups[group] = DF11Group(name=group, matrix_names=names, path=home, tensors=tensors)
+    extras = {n: (f, headers[f][n]) for n, f in owner.items() if n not in claimed}
+    return DF11Checkpoint(root=root, config=config, groups=groups, extras=extras)
