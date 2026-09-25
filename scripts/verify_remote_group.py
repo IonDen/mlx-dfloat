@@ -16,6 +16,7 @@ import re
 import struct
 import sys
 import traceback
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
@@ -149,28 +150,39 @@ def independent_header(src: RangeSource, path: str) -> tuple[dict, int]:
 def df11_index(src: RangeSource) -> dict[str, tuple[str, dict]]:
     """Group name -> (file, parsed header), for every DF11 group; built once.
 
-    A shard whose header cannot be parsed (short read, corrupt bytes) contributes no groups
-    rather than aborting the whole index: the caller sees the group as missing and
-    ``verify_group`` reports it as an ``error`` record, not a crash.
+    Fails closed: a shard that cannot be read or parsed raises rather than being silently
+    dropped, because dropping a shard changes which groups ``first``/``last``/``max-block``/
+    ``max-code`` resolve to and can turn a corrupt checkpoint into a false pass. When a
+    ``*.safetensors.index.json`` is present, every shard it names must also be present and
+    parse; a group name appearing in more than one shard is refused as ambiguous.
+
+    Raises:
+        DFloatError: A shard's header is malformed.
+        VerifyError: A shard is missing, short, or a group name is duplicated across shards.
     """
+    names = src.files()
+    listed_shards: set[str] = set()
+    for name in names:
+        if name.endswith(".safetensors.index.json"):
+            weight_map = json.loads(src.text(name))["weight_map"]
+            shards = set(weight_map.values())
+            missing = shards - set(names)
+            if missing:
+                raise VerifyError(f"{name}: shard(s) {sorted(missing)!r} not found")
+            listed_shards |= shards
+    shard_names = sorted({n for n in names if n.endswith(".safetensors")} | listed_shards)
     index: dict[str, tuple[str, dict]] = {}
-    for name in src.files():
-        if not name.endswith(".safetensors"):
-            continue
-        try:
-            length = _header_length(src, name)
-            header = parse_header(
-                src.read(name, 8, length),
-                data_start=8 + length,
-                file_size=src.size(name),
-                source=name,
-            )
-        except (DFloatError, VerifyError):
-            continue
+    for name in shard_names:
+        length = _header_length(src, name)
+        header = parse_header(
+            src.read(name, 8, length), data_start=8 + length, file_size=src.size(name), source=name
+        )
         for tensor in header:
             if tensor.endswith(".encoded_exponent"):
                 group = tensor.rsplit(".", 1)[0]
                 validate_group_name(group)
+                if group in index:
+                    raise VerifyError(f"duplicate group {group!r} in {index[group][0]} and {name}")
                 index[group] = (name, header)
     return index
 
@@ -246,7 +258,7 @@ def verify_group(
     bindex: dict[str, str],
 ) -> dict:
     """Decode one group and compare each matrix with its BF16 original (if a source is given)."""
-    record: dict = {"group": group, "matrices": []}
+    record: dict = {"group": group, "matrices": [], "max_code_length": None, "n_blocks": None}
     try:
         file, header = dindex[group]
         record["file"] = file
@@ -262,11 +274,14 @@ def verify_group(
                 for n, p in zip(names, parts, strict=True)
             ]
             return record
+        header_cache: dict[str, tuple[dict, int]] = {}
         for name, got in zip(names, parts, strict=True):
             shard = bindex.get(name)
             if shard is None:
                 raise VerifyError(f"no original for {name}")
-            bheader, base = independent_header(bf16, shard)
+            if shard not in header_cache:
+                header_cache[shard] = independent_header(bf16, shard)
+            bheader, base = header_cache[shard]
             meta = bheader[name]
             if meta["dtype"] != "BF16":
                 raise VerifyError(f"original {name} is {meta['dtype']}, not BF16")
@@ -281,8 +296,21 @@ def verify_group(
     return record
 
 
-def main(argv: list[str] | None = None) -> int:
-    """CLI entry point; any failure other than a real mismatch exits 2."""
+def main(
+    argv: list[str] | None = None,
+    *,
+    source_factory: Callable[[str, str, str], RangeSource] | None = None,
+) -> int:
+    """CLI entry point; any failure other than a real mismatch exits 2.
+
+    ``source_factory(repo, revision, subdir)`` builds the ``RangeSource`` for the DF11 and BF16
+    repos (subdir is always ``""`` for the DF11 side); it defaults to :class:`HfRangeSource`.
+    Tests pass a factory that returns :class:`LocalRangeSource` over on-disk fixtures with
+    explicit ``--df11-revision``/``--bf16-revision``, so no network is touched.
+    """
+    factory = source_factory or (
+        lambda repo, revision, subdir: HfRangeSource(repo, revision, subdir)
+    )
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -291,23 +319,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bf16-repo")
     parser.add_argument("--bf16-revision")
     parser.add_argument("--bf16-subdir", default="")
+    parser.add_argument(
+        "--structural-only",
+        action="store_true",
+        help="decode and validate structure only; no BF16 comparison",
+    )
     parser.add_argument("--groups", default="first,last,max-block,max-code")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--wall-budget", type=float, default=3 * 3600.0)
     args = parser.parse_args(argv)
+    if not args.bf16_repo and not args.structural_only:
+        print("error: either --bf16-repo or --structural-only is required", file=sys.stderr)
+        return 2
+    mode = "structural-only" if args.structural_only else "parity"
     install_memory_caps()
     watchdog = Watchdog(args.out.parent, ceiling=default_ceiling(), budget=args.wall_budget).start()
     try:
         api = HfApi()
         df11_rev = args.df11_revision or api.model_info(args.df11_repo).sha
-        df11 = HfRangeSource(args.df11_repo, df11_rev)
+        df11 = factory(args.df11_repo, df11_rev, "")
         config = parse_df11_config(
             json.loads(df11.text("config.json"))["dfloat11_config"], source="config.json"
         )
         bf16, bf16_rev, bindex = None, None, {}
-        if args.bf16_repo:
+        if mode == "parity":
             bf16_rev = args.bf16_revision or api.model_info(args.bf16_repo).sha
-            bf16 = HfRangeSource(args.bf16_repo, bf16_rev, args.bf16_subdir)
+            bf16 = factory(args.bf16_repo, bf16_rev, args.bf16_subdir)
             bindex = bf16_index(bf16)
         dindex = df11_index(df11)
         stats = {}
@@ -334,6 +371,7 @@ def main(argv: list[str] | None = None) -> int:
                     "df11_revision": df11_rev,
                     "bf16_repo": args.bf16_repo,
                     "bf16_revision": bf16_rev,
+                    "mode": mode,
                     "groups": records,
                 },
                 indent=1,
