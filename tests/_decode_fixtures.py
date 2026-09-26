@@ -1,11 +1,15 @@
 """Builders for MxGroup / decode-backend tests: compress bits with the vendored upstream encoder."""
 
+from pathlib import Path
+
 import numpy as np
 from tests._df11_fixtures import codec_for
 from tests._upstream.dfloat11_encoder import encode_weights, exponent_counter
 
 from mlx_dfloat import reference
 from mlx_dfloat.format import GroupArrays
+
+_SLICE_FIXTURE = Path(__file__).parent / "fixtures" / "upstream" / "qwen3_4b_layer0_4blocks.npz"
 
 
 def encoder_group(bits, *splits):
@@ -47,6 +51,48 @@ def short_form_group():
         2,
         [0, 32768],
     ), "fixture drifted"
+    return arrays, bits
+
+
+def slice_group():
+    """The committed Qwen3-4B layer-0 slice: 16,392 bytes truncated mid-block (5 blocks, 4 launched
+    thread-groups, real 27-bit codes and 5 LUT rows). Loads
+    tests/fixtures/upstream/qwen3_4b_layer0_4blocks.npz exactly as tests/test_upstream_slice.py does."""
+    data = np.load(_SLICE_FIXTURE)
+    arrays = GroupArrays(
+        encoded_exponent=data["encoded_exponent"],
+        sign_mantissa=data["sign_mantissa"],
+        luts=data["luts"],
+        gaps=data["gaps"],
+        output_positions=data["output_positions"].astype(np.uint32),
+        split_positions=data["split_positions"],
+    )
+    return arrays, data["expected_bf16"]
+
+
+def fibonacci_group():
+    """32-bit codes across a four-level LUT chain: copies the construction of
+    tests/test_reference_roundtrip.py::test_32_bit_codes_and_four_level_chains_roundtrip."""
+    counter = {}
+    a, b = 1, 1
+    for exp in range(100, 140):
+        counter[exp] = a
+        a, b = b, a + b
+    codec, table, luts = codec_for(counter)
+    lengths = {k: v[0] for k, v in table.items() if isinstance(k, int)}
+    rare = sorted(lengths, key=lengths.get, reverse=True)[:6]
+    rng = np.random.default_rng(3)
+    exps = rng.choice([*rare, max(counter, key=counter.get)], size=6000).astype(np.uint16)
+    bits = (exps << 7) | (rng.integers(0, 65536, size=6000, dtype=np.uint16) & 0x807F)
+    encoded, other, positions, gaps, split = encode_weights([bits], codec, 8, 512)
+    arrays = GroupArrays(
+        encoded_exponent=encoded,
+        sign_mantissa=other,
+        luts=luts,
+        gaps=gaps,
+        output_positions=positions,
+        split_positions=split,
+    )
     return arrays, bits
 
 
