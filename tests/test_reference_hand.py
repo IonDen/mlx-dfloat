@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
+from tests._decode_fixtures import _arrays, _h1_luts, _h2_rows, _h3, _h4, _lens
 
 from mlx_dfloat.errors import DFloatFormatError, DFloatResourceError
-from mlx_dfloat.format import GroupArrays
 from mlx_dfloat.reference import (
     decode_group,
     estimate_decode_bytes,
@@ -11,47 +11,6 @@ from mlx_dfloat.reference import (
     split_matrices,
     thread_gaps,
 )
-
-
-def _arrays(encoded, sign_mantissa, luts, gaps, positions, split=()):
-    return GroupArrays(
-        encoded_exponent=np.array(encoded, np.uint8),
-        sign_mantissa=np.array(sign_mantissa, np.uint8),
-        luts=luts,
-        gaps=np.asarray(gaps, np.uint8),
-        output_positions=np.array(positions, np.uint32),
-        split_positions=np.array(split, np.int64),
-    )
-
-
-def _lens(pairs):
-    lens = np.zeros(256, np.uint8)
-    for sym, bits in pairs:
-        lens[sym] = bits
-    return lens
-
-
-def _h1_luts():
-    # H1: 127 '0', 126 '10', 128 '110', EOF '111' (EOF's range inherits 128, as upstream).
-    row0 = np.zeros(256, np.uint8)
-    row0[0:128], row0[128:192], row0[192:256] = 127, 126, 128
-    return np.stack([row0, _lens([(126, 2), (127, 1), (128, 3)])])
-
-
-def _h2_rows(pointer_row_value):
-    row0 = np.zeros(256, np.uint8)
-    row0[0:128], row0[128:192], row0[192:224], row0[224:240] = 127, 126, 125, 124
-    row0[240:248], row0[248:252], row0[252:254], row0[254], row0[255] = (
-        123,
-        122,
-        121,
-        120,
-        pointer_row_value,
-    )
-    tail = np.zeros(256, np.uint8)
-    tail[0:128], tail[128:256] = 119, 118
-    lens = _lens(zip(range(127, 117, -1), range(1, 11), strict=True))
-    return row0, tail, lens
 
 
 def test_h1_single_level_lut():
@@ -80,44 +39,12 @@ def test_pointer_240_reaches_row_16_of_an_18_row_table():
     assert decode_group(arrays).tolist() == [0x3B01, 0xBB81, 0x3F80]
 
 
-def _h3():
-    # 23 x '110' (exponent 128) + EOF: DB 6D B6 DB 6D B6 DB 6D B7. Symbol 22 starts at bit 66 ->
-    # thread 1's gap is 2: gaps bytes 0x00, 0x80.
-    gaps = np.zeros(320, np.uint8)
-    gaps[1] = 0x80
-    return [0xDB, 0x6D, 0xB6, 0xDB, 0x6D, 0xB6, 0xDB, 0x6D, 0xB7], gaps
-
-
 def test_h3_code_straddling_a_64_bit_chunk_and_nonzero_gap():
     # sm[i] = i makes every output distinct: out[i] = 128<<7 | i = 0x4000 + i.
     encoded, gaps = _h3()
     assert decode_group(_arrays(encoded, list(range(23)), _h1_luts(), gaps, [0, 23])).tolist() == [
         0x4000 + i for i in range(23)
     ]
-
-
-def _h4():
-    # Unary codebook: exponent 128-L has code '1'*(L-1)+'0' for L = 1..32; EOF = '1'*32.
-    # Rows: '' / '1'*8 / '1'*16 / '1'*24 -> pointers 255, 254, 253; the 32-bit code needs all 4 levels.
-    rows = np.zeros((4, 256), np.uint8)
-    for level in range(4):
-        for k in range(8):  # code ends in this byte after k ones: byte starts with k ones then 0
-            lo, hi = 256 - (1 << (8 - k)), 256 - (1 << (7 - k))
-            rows[level, lo:hi] = 128 - (8 * level + k + 1)
-        rows[level, 255] = 255 - level if level < 3 else 96  # last row: EOF inherits 96
-    lens = _lens((128 - length, length) for length in range(1, 33))
-    luts = np.vstack([rows, lens])
-    # Data: 63 x exponent 127 (1 bit, bits 0..62), then exponent 96 (32 bits) at 63..94, then 96
-    # again at 95..126, then EOF's first bit at 127. Thread 1's first code starts at 95 -> gap 31.
-    encoded = [0x00] * 7 + [0x01, 0xFF, 0xFF, 0xFF, 0xFD, 0xFF, 0xFF, 0xFF, 0xFD]
-    gaps = np.zeros(320, np.uint8)
-    gaps[0], gaps[1] = 0x07, 0xC0  # 5-bit fields 00000, 11111
-    sm = [i % 128 for i in range(63)] + [0x85, 0x7F]
-    expected = [0x3F80 | (i % 128) for i in range(63)] + [
-        0x8000 | (96 << 7) | 0x05,
-        (96 << 7) | 0x7F,
-    ]
-    return _arrays(encoded, sm, luts, gaps, [0, 65]), expected
 
 
 def test_h4_32_bit_code_four_level_chain_and_gap_31():

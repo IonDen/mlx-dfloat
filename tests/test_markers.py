@@ -58,11 +58,9 @@ def test_metal_marker_skips_elsewhere():
 def test_metal_marker_collection_succeeds():
     # Bug caught: a typo in the collection hook (e.g. `_metal_marker_action_TYPO`) that crashes
     # `pytest_collection_modifyitems` outright. Confirmed empirically: that specific crash exits
-    # 3 (INTERNALERROR), traceback pointing at the bad name. pytest's own exit-code contract
-    # makes 0 unreachable here: no `metal`-marked test exists yet (Task 3 adds the first one), so
-    # a *working* hook still deselects everything and pytest exits 5 ("no tests collected") —
-    # never 0. Assert 5, not 0, so this test can actually go green today; once Task 3 lands,
-    # change this to assert 0 and that at least one `metal` item is listed.
+    # 3 (INTERNALERROR), traceback pointing at the bad name. `tests/test_decode_parity.py` is
+    # marked `metal`, so a working hook collects at least that file and pytest exits 0; a hook
+    # that deselected everything would exit 5 ("no tests collected") and fail here too.
     result = subprocess.run(
         [
             sys.executable,
@@ -81,4 +79,5 @@ def test_metal_marker_collection_succeeds():
         timeout=120,
         check=False,
     )
-    assert result.returncode == 5, result.stdout[-2000:] + result.stderr[-2000:]
+    assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-2000:]
+    assert "test_decode_parity.py" in result.stdout
