@@ -15,7 +15,8 @@ import platform
 import re
 import statistics
 import subprocess
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
@@ -132,6 +133,33 @@ def ramp_should_stop(seconds: float, k: int, n_launch: int, min_seconds: float =
     the next, larger step; one that long measures throughput.
     """
     return seconds >= min_seconds or k >= n_launch
+
+
+def calibration_rate(step_rates: Sequence[float]) -> float:
+    """The calibration rate: the last ramp step's, the longest dispatch and so the one measuring throughput.
+
+    Raises:
+        ValueError: The ramp recorded no step.
+    """
+    if not step_rates:
+        raise ValueError("the calibration ramp recorded no step")
+    return step_rates[-1]
+
+
+def time_second_of_two(
+    fn: Callable[[], object], *, clock: Callable[[], float] = time.perf_counter
+) -> tuple[float, float]:
+    """Run ``fn`` twice and return (first, second) durations; only the second is a measurement.
+
+    The first run absorbs a one-off cost such as a Metal pipeline compile for a new kernel
+    signature, and is returned so it stays visible in the record.
+    """
+    t0 = clock()
+    fn()
+    first = clock() - t0
+    t1 = clock()
+    fn()
+    return first, clock() - t1
 
 
 def projected_bytes(positions: Sequence[int], k: int) -> int:

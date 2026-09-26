@@ -6,7 +6,8 @@ full-group dispatch, the per-dispatch guard projects that dispatch's time from `
 without it, from a calibration ramp: dispatches of the first k blocks for k = 1, 2, 4, 8, ...,
 each projected at the previous step's rate through the same guard before it runs, until a step
 takes at least 10 ms (long enough to measure throughput, not launch latency) or covers the whole
-group. The last step's rate, slowest requested variant, is the calibration rate. Each variant
+group. Each step runs twice per variant and times only the second run, so a pipeline compile
+never lands in a rate. The last step's rate (slowest requested variant) is the calibration rate. Each variant
 that passes parity then
 gets one warm-up and ``--reps`` timed decodes, each ending in ``mx.eval``. A variant that fails
 parity gets no timing: a wrong kernel's speed means nothing.
@@ -51,6 +52,7 @@ try:
     from scripts._bench_common import (
         Timing,
         bench_exit_code,
+        calibration_rate,
         gbps,
         kill_equivalent_throughput,
         per_dispatch_guard,
@@ -59,6 +61,7 @@ try:
         ramp_next_k,
         ramp_should_stop,
         resume_key_diff,
+        time_second_of_two,
         write_json_atomic,
     )
     from scripts._watchdog import Watchdog, default_ceiling, phys_footprint
@@ -97,41 +100,50 @@ def _run_metal(group: MxGroup, variant: str) -> None:
     mx.eval(res.bits, res.status)
 
 
-def _calibrate(group: MxGroup, variants: list[str]) -> tuple[float, list[dict[str, float]]]:
+def _calibrate(group: MxGroup, variants: list[str]) -> tuple[float, list[dict[str, object]]]:
     """Decode rate (bytes/s) from a guarded ramp of block prefixes; returns it and the steps.
 
     Each step dispatches the first ``k`` blocks (``positions[:k+1]`` over the full arrays, so the
-    kernel launches ``k`` threadgroups) once untimed and once timed per variant, and keeps the
-    slowest variant's rate. Every step after the first is projected at the previous step's rate
-    through ``per_dispatch_guard`` before it runs.
+    kernel launches ``k`` threadgroups) twice per variant and times only the second dispatch: the
+    first absorbs a pipeline compile, which a prefix that changes MLX's buffer binding (small
+    inputs are bound as ``constant``) pays once. Both timings are recorded per variant, so a
+    compile stays visible. A step's rate is its slowest variant's; every step after the first is
+    projected at the previous step's rate through ``per_dispatch_guard`` before it runs, and the
+    calibration rate is the last step's (``calibration_rate``).
 
     Raises:
         RuntimeError: The guard refuses a ramp step.
     """
     positions = np.array(group.positions).astype(np.int64)
-    steps: list[dict[str, float]] = []
-    rate: float | None = None
+    steps: list[dict[str, object]] = []
+    rates: list[float] = []
     k: int | None = 1
     while k is not None:
         bytes_k = projected_bytes(positions, k)
-        if rate is not None:
-            per_dispatch_guard(bytes_k, rate)
+        if rates:
+            per_dispatch_guard(bytes_k, rates[-1])
         prefix = dataclasses.replace(
             group, positions=group.positions[: k + 1], intervals=group.intervals[:k], n_launch=k
         )
-        seconds = 0.0
-        rates = []
-        for variant in variants:
-            _run_metal(prefix, variant)  # the first dispatch of this shape
-            t = _timed(partial(_run_metal, prefix, variant))
-            seconds = max(seconds, t)
-            rates.append(bytes_k / t)
-        rate = min(rates)
-        steps.append({"k": k, "bytes": bytes_k, "seconds": seconds, "rate_bps": rate})
-        print(f"  ramp k={k}: {bytes_k} bytes in {seconds * 1e3:.3f} ms -> {rate / 1e9:.3f} GB/s")
+        timings = {v: time_second_of_two(partial(_run_metal, prefix, v)) for v in variants}
+        seconds = max(timed for _, timed in timings.values())
+        rates.append(bytes_k / seconds)
+        steps.append(
+            {
+                "k": k,
+                "bytes": bytes_k,
+                "first_ms": {v: first * 1e3 for v, (first, _) in timings.items()},
+                "timed_ms": {v: timed * 1e3 for v, (_, timed) in timings.items()},
+                "rate_bps": rates[-1],
+            }
+        )
+        firsts = ", ".join(f"{v} {f * 1e3:.3f}" for v, (f, _) in timings.items())
+        print(
+            f"  ramp k={k}: {bytes_k} bytes in {seconds * 1e3:.3f} ms (first: {firsts} ms) "
+            f"-> {rates[-1] / 1e9:.3f} GB/s"
+        )
         k = None if ramp_should_stop(seconds, k, group.n_launch) else ramp_next_k(k, group.n_launch)
-    assert rate is not None  # the first step always runs
-    return rate, steps
+    return calibration_rate(rates), steps
 
 
 def bench_group(

@@ -7,6 +7,7 @@ from scripts import _bench_common as bc
 from scripts._bench_common import (
     Timing,
     bench_exit_code,
+    calibration_rate,
     crosscheck_band,
     gbps,
     kill_equivalent_throughput,
@@ -19,6 +20,7 @@ from scripts._bench_common import (
     ramp_next_k,
     ramp_should_stop,
     resume_key_diff,
+    time_second_of_two,
     write_json_atomic,
 )
 
@@ -341,3 +343,26 @@ def test_resume_key_diff_refuses_a_file_without_a_key(stored):
 def test_resume_key_diff_names_a_field_the_current_run_does_not_have():
     # Bug caught: a stored key with an extra field (written by a different bench) accepted.
     assert resume_key_diff({**_KEY, "decoder": "metal"}, _KEY) == ["decoder"]
+
+
+def test_calibration_rate_is_the_last_steps_rate():
+    # The last step is the longest dispatch, the one that measures throughput; an earlier step is
+    # launch latency, or paid a pipeline compile. Bug caught: min or mean in place of the last.
+    assert calibration_rate([0.038e9, 0.117e9, 0.008e9, 1.3e9]) == 1.3e9
+
+
+def test_calibration_rate_refuses_an_empty_ramp():
+    # Bug caught: an IndexError (or a silent 0) when no step ran, instead of a named refusal.
+    with pytest.raises(ValueError, match="ramp"):
+        calibration_rate([])
+
+
+def test_time_second_of_two_runs_twice_and_times_only_the_second():
+    # A fake clock: the first call pays an 11 ms "compile", the second 0.3 ms.
+    ticks = iter([0.0, 0.011, 0.011, 0.0113])
+    calls = []
+    first, timed = time_second_of_two(lambda: calls.append(1), clock=lambda: next(ticks))
+    # Bug caught: timing the first dispatch (the compile lands in the rate), or running it once.
+    assert len(calls) == 2
+    assert first == pytest.approx(0.011)
+    assert timed == pytest.approx(0.0003)
