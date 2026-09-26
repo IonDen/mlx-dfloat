@@ -2,25 +2,55 @@
 
 Run [DFloat11](https://github.com/LeanModels/DFloat11) checkpoints on a Mac with [MLX](https://github.com/ml-explore/mlx).
 
-DFloat11 is lossless compression for BF16 model weights. It entropy-codes the 8 exponent bits of every weight and
-keeps the sign and mantissa as they are. The DFloat11 authors report models at about 70% of their BF16 size, with
-output that is bit-for-bit the same as the original ([paper](https://arxiv.org/abs/2504.11651)). Their decoder runs
-on NVIDIA GPUs only. This project is an independent reader and decoder for Apple Silicon: the weights stay
-compressed in memory and are decoded on the GPU right before they are used.
+DFloat11 is lossless compression for BF16 model weights. Each weight is 16 bits. DFloat11 stores the 8 exponent bits
+as a short variable-length code, the same idea a zip file uses, and keeps the other 8 bits (the sign and the
+fraction) exactly as they are. The DFloat11 authors report models at about 70% of their BF16 size with output that is
+bit for bit the same as the original.[^size] Their decoder runs on NVIDIA GPUs only. This project is an independent
+reader and decoder for Apple Silicon. Once decoding is implemented, the weights will stay compressed in memory and be
+decoded on the GPU right before they are used.
 
-Why that matters on a Mac: unified memory is the limit. A BF16 FLUX.1-dev transformer is about 24 GB. On a 32 GB
-machine that is more than the GPU can comfortably hold. Lossless compression gets it under the line without the
-quality trade-off of 4-bit or 8-bit quantization.
+```
+one BF16 weight, 16 bits:    s   eeeeeeee   mmmmmmm
+                             |   |          |
+                             |   exponent: replaced by a variable-length code   (compressed)
+                             sign + fraction: kept as one raw byte              (stored as is)
+```
+
+Why that matters on a Mac: unified memory is the limit. The BF16 FLUX.1-dev transformer is about 24 GB,[^flux] more
+than the GPU on a 32 GB machine can comfortably hold. At 70% it should come in under that line, and unlike 4-bit or
+8-bit quantization it changes nothing in the output. Whether it really fits on a given Mac is something this project
+has to measure, and the first measured number will be published here.
 
 ## Status
 
-Pre-alpha. Nothing to install yet, and not on PyPI. The package is a skeleton. The first two milestones decide
-whether the project goes ahead:
+Pre-alpha. Nothing to install yet, and not on PyPI. Two milestones decide whether the project goes ahead:
 
-1. A bit-exact reference decoder for published DFloat11 checkpoints.
-2. A Metal decode kernel that is fast enough to run inside an image-generation step.
+1. A bit-exact reference decoder for published DFloat11 checkpoints. **Done.** Every compressed tensor of Qwen3-4B,
+   and sampled blocks of FLUX.1-schnell, FLUX.1-Krea-dev, Qwen-Image-Edit and Qwen-Image-Edit-2509, decode to
+   exactly the BF16 originals. That covers all four published versions of the checkpoint format.
+2. A Metal decode kernel fast enough to run inside an image-generation step. Not started.
 
-If either one fails, the repository will say so and why.
+If the second milestone fails, the repository will say so and why.
+
+## Try it
+
+There is nothing to install, but the parity check runs from a checkout. It compares a published DFloat11 repo with
+its BF16 original over HTTP range reads, so it fetches only the blocks it checks instead of the whole model:
+
+```
+uv sync --group dev
+uv run python -m scripts.verify_remote_group \
+  --df11-repo DFloat11/FLUX.1-schnell-DF11 \
+  --bf16-repo black-forest-labs/FLUX.1-schnell --bf16-subdir transformer \
+  --groups max-code --out result.json
+```
+
+A few gigabytes move over the network, so expect a few minutes. The script exits 0 when every compared value
+matches, 1 on a real mismatch, and 2 on any other problem such as a repo it cannot read. It runs under a memory
+watchdog and stops itself with exit 70 or 71 if it gets close to the machine's memory or to its time limit. For a
+checkpoint that is already on disk, `scripts/verify_checkpoint.py` (run the same way, with `--df11` and `--bf16`
+directories) checks every tensor and writes one result file per group, so an interrupted run resumes where it
+stopped.
 
 ## Relationship to DFloat11
 
@@ -31,3 +61,9 @@ Dynamic-Length Float* ([arXiv:2504.11651](https://arxiv.org/abs/2504.11651)).
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+[^size]: Reported in the DFloat11 paper ([arXiv:2504.11651](https://arxiv.org/abs/2504.11651)). The exponent bits of
+    trained weights are far from uniformly distributed, which is what makes them compressible; the exact ratio
+    depends on the model and is slightly different for each one.
+[^flux]: The FLUX.1-dev transformer has about 12 billion parameters. In BF16 each takes 2 bytes, so about 24 GB for
+    the weights alone, before activations and before the text encoders.

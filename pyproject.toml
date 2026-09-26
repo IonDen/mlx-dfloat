@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mlx-dfloat"
-description = "Run DFloat11 losslessly compressed BF16 models on Apple Silicon with MLX: about 30% less memory, bit-identical output"
+description = "Run DFloat11 losslessly compressed BF16 models on Apple Silicon with MLX: bit-identical output at roughly 70% of BF16 memory, as the DFloat11 authors report"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
