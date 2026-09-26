@@ -1,3 +1,4 @@
+import mlx.core as mx
 import numpy as np
 import pytest
 from hypothesis import HealthCheck, example, given, settings
@@ -72,6 +73,38 @@ def test_warmup_failure_becomes_a_backend_error(monkeypatch):
     )
     with pytest.raises(DFloatBackendError, match="boom"):
         _metal_decode.ensure_pipeline(force_direct=True)
+
+
+def test_warmup_prefills_its_output_so_an_unwritten_element_cannot_pass(monkeypatch):
+    # Bug caught: the warm-up dispatching with init_value=None, so a recycled buffer that already holds the
+    # expected bits (the allocator reuses the 3-element buffer between warm-ups) hides a kernel that skips a write.
+    monkeypatch.setattr(_metal_decode, "_PIPELINES", {})
+    real = _metal_decode._dispatch
+    seen = []
+
+    def recording(group, **kwargs):
+        seen.append(kwargs["init_value"])
+        return real(group, **kwargs)
+
+    monkeypatch.setattr(_metal_decode, "_dispatch", recording)
+    _metal_decode.ensure_pipeline(force_direct=True)
+    _metal_decode.ensure_pipeline(force_direct=False)
+    assert seen == [0, 0]
+
+
+@pytest.mark.parametrize(("force_direct", "status_word"), [(False, 8), (True, 0)])
+def test_warmup_refuses_the_wrong_write_path(monkeypatch, force_direct, status_word):
+    # Bug caught: a staged instantiation silently running direct (or the reverse) passing its warm-up because
+    # only the error bits are checked; the 3-element warm-up group must run staged unless forced direct.
+    monkeypatch.setattr(_metal_decode, "_PIPELINES", {})
+    good = mx.array([0x3F00, 0xBF80, 0x407F], dtype=mx.uint16)
+    monkeypatch.setattr(
+        _metal_decode,
+        "_dispatch",
+        lambda *a, **k: (good, mx.array([status_word], dtype=mx.uint32)),
+    )
+    with pytest.raises(DFloatBackendError, match="path"):
+        _metal_decode.ensure_pipeline(force_direct=force_direct)
 
 
 @pytest.mark.parametrize("force_direct", PATHS)

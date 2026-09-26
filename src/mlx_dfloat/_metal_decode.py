@@ -16,7 +16,8 @@ THREADGROUP_BYTES_STAGED = 2 * CAP + _SCRATCH_BYTES  # 32,580 < 32,768
 THREADGROUP_BYTES_DIRECT = 2 + _SCRATCH_BYTES  # 198
 
 _KERNEL: Any | None = None
-_PIPELINES: dict[tuple[bool, bool], bool] = {}  # (force_direct, poison_buf) -> warmed
+# (force_direct, poison_buf, unguarded_gap_read) -> warmed
+_PIPELINES: dict[tuple[bool, bool, bool], bool] = {}
 
 _SOURCE = r"""
     const uint t = thread_position_in_threadgroup.x;
@@ -45,7 +46,7 @@ _SOURCE = r"""
     const uint gbyte = gbit >> 3;
     const uint gsh = gbit & 7u;
     const uint g0 = (uint)gaps[gbyte];
-    const uint g1 = (gsh > 3u) ? (uint)gaps[gbyte + 1u] : 0u;
+    const uint g1 = (UNGUARDED_GAP_READ || gsh > 3u) ? (uint)gaps[gbyte + 1u] : 0u;
     const uint gap = (((g0 << 8) | g1) >> (11u - gsh)) & 31u;
 
     ulong w = 0;
@@ -159,7 +160,12 @@ def _build_kernel() -> Any:
 
 
 def _dispatch(
-    group: MxGroup, *, force_direct: bool, poison_buf: bool, init_value: int | None
+    group: MxGroup,
+    *,
+    force_direct: bool,
+    poison_buf: bool,
+    init_value: int | None,
+    unguarded_gap_read: bool = False,
 ) -> tuple[mx.array, mx.array]:
     out, status = _build_kernel()(
         inputs=[
@@ -169,7 +175,12 @@ def _dispatch(
             group.gaps,
             group.positions,
         ],
-        template=[("CAP", CAP), ("FORCE_DIRECT", force_direct), ("POISON_BUF", poison_buf)],
+        template=[
+            ("CAP", CAP),
+            ("FORCE_DIRECT", force_direct),
+            ("POISON_BUF", poison_buf),
+            ("UNGUARDED_GAP_READ", unguarded_gap_read),
+        ],
         grid=(THREADS * group.n_launch, 1, 1),
         threadgroup=(THREADS, 1, 1),
         output_shapes=[(group.n_elements,), (group.n_launch,)],
@@ -195,31 +206,46 @@ def _warmup_group() -> MxGroup:
     ).to_mx(name="warmup")
 
 
-def ensure_pipeline(*, force_direct: bool, poison_buf: bool = False) -> None:
+def ensure_pipeline(
+    *, force_direct: bool, poison_buf: bool = False, unguarded_gap_read: bool = False
+) -> None:
     """Compile and dispatch one tiny group for this instantiation, alone.
 
     Each distinct template tuple is its own JIT compile, so each is warmed once and the result
-    is cached in `_PIPELINES`.
+    is cached in `_PIPELINES`. The warm-up output is prefilled with 0, which none of the expected
+    words equals, so an element the kernel fails to write cannot pass on recycled memory. The
+    3-element warm-up group must run staged unless `force_direct` is set, so the status word's
+    path bit is checked too. `unguarded_gap_read` is a test-only mutant (see `decode`).
 
     Raises:
         DFloatBackendError: Metal is unavailable, the kernel fails to compile or dispatch here
-            (a pipeline ceiling below 512 threads, a driver refusal), or the warm-up group
-            decodes to the wrong bits.
+            (a pipeline ceiling below 512 threads, a driver refusal), the warm-up group
+            decodes to the wrong bits, or it runs on the wrong write path.
     """
-    key = (force_direct, poison_buf)
+    key = (force_direct, poison_buf, unguarded_gap_read)
     if _PIPELINES.get(key):
         return
     if not mx.metal.is_available():
         raise DFloatBackendError("Metal is not available on this machine")
     try:
         out, status = _dispatch(
-            _warmup_group(), force_direct=force_direct, poison_buf=poison_buf, init_value=None
+            _warmup_group(),
+            force_direct=force_direct,
+            poison_buf=poison_buf,
+            init_value=0,
+            unguarded_gap_read=unguarded_gap_read,
         )
         mx.eval(out, status)
     except Exception as exc:  # compile error, pipeline ceiling below 512, driver refusal
         raise DFloatBackendError(f"the Metal decode kernel cannot run here: {exc}") from exc
-    if np.array(out).tolist() != [0x3F00, 0xBF80, 0x407F] or int(np.array(status)[0]) & 7:
+    word = int(np.array(status)[0])
+    if np.array(out).tolist() != [0x3F00, 0xBF80, 0x407F] or word & 7:
         raise DFloatBackendError("the Metal decode kernel produced wrong bits on the warm-up group")
+    if (word & 8) != (8 if force_direct else 0):
+        want = "direct" if force_direct else "staged"
+        raise DFloatBackendError(
+            f"the Metal decode kernel took the wrong write path on the warm-up group (want {want})"
+        )
     _PIPELINES[key] = True
 
 
@@ -239,19 +265,29 @@ def decode(
     force_direct: bool = False,
     _init_value: int | None = None,
     _poison_buf: bool = False,
+    _unguarded_gap_read: bool = False,
 ) -> DecodeResult:
     """Lazy Metal decode of one group.
 
     `_init_value` and `_poison_buf` are test-only poisons for the write-once tests: they prefill
     the output and the staging buffer so an unwritten element cannot pass as a correct one.
+    `_unguarded_gap_read` is a test-only mutant for the shader-validation test: it drops the
+    guard on the second `gaps` byte, so the last thread of a full group reads one byte past
+    `gaps` (the value is shifted out, so the bits stay correct).
 
     Raises:
         DFloatBackendError: The kernel instantiation cannot be warmed up here (see
             `ensure_pipeline`).
     """
-    ensure_pipeline(force_direct=force_direct, poison_buf=_poison_buf)
+    ensure_pipeline(
+        force_direct=force_direct, poison_buf=_poison_buf, unguarded_gap_read=_unguarded_gap_read
+    )
     out, status = _dispatch(
-        group, force_direct=force_direct, poison_buf=_poison_buf, init_value=_init_value
+        group,
+        force_direct=force_direct,
+        poison_buf=_poison_buf,
+        init_value=_init_value,
+        unguarded_gap_read=_unguarded_gap_read,
     )
     direct = group.n_launch if force_direct else int(np.count_nonzero(group.intervals > CAP))
     return DecodeResult(
