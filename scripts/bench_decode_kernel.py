@@ -6,8 +6,9 @@ full-group dispatch, the per-dispatch guard projects that dispatch's time from `
 without it, from a calibration ramp: dispatches of the first k blocks for k = 1, 2, 4, 8, ...,
 each projected at the previous step's rate through the same guard before it runs, until a step
 takes at least 10 ms (long enough to measure throughput, not launch latency) or covers the whole
-group. Each step runs twice per variant and times only the second run, so a pipeline compile
-never lands in a rate. The last step's rate (slowest requested variant) is the calibration rate. Each variant
+group, unless that step's rate fell below the previous step's (a transient slow dispatch). Each
+step runs once untimed and then keeps the fastest of three timed runs per variant, so neither a
+pipeline compile nor a one-off slow dispatch sets a rate. The last step's rate (slowest requested variant) is the calibration rate. Each variant
 that passes parity then
 gets one warm-up and ``--reps`` timed decodes, each ending in ``mx.eval``. A variant that fails
 parity gets no timing: a wrong kernel's speed means nothing.
@@ -61,7 +62,7 @@ try:
         ramp_next_k,
         ramp_should_stop,
         resume_key_diff,
-        time_second_of_two,
+        time_first_then_min,
         write_json_atomic,
     )
     from scripts._watchdog import Watchdog, default_ceiling, phys_footprint
@@ -104,12 +105,13 @@ def _calibrate(group: MxGroup, variants: list[str]) -> tuple[float, list[dict[st
     """Decode rate (bytes/s) from a guarded ramp of block prefixes; returns it and the steps.
 
     Each step dispatches the first ``k`` blocks (``positions[:k+1]`` over the full arrays, so the
-    kernel launches ``k`` threadgroups) twice per variant and times only the second dispatch: the
-    first absorbs a pipeline compile, which a prefix that changes MLX's buffer binding (small
-    inputs are bound as ``constant``) pays once. Both timings are recorded per variant, so a
-    compile stays visible. A step's rate is its slowest variant's; every step after the first is
-    projected at the previous step's rate through ``per_dispatch_guard`` before it runs, and the
-    calibration rate is the last step's (``calibration_rate``).
+    kernel launches ``k`` threadgroups) once untimed and then three times per variant, and keeps
+    the fastest of the three (``time_first_then_min``): the first run absorbs a pipeline compile
+    for a new buffer binding, and the minimum filters a transient slow dispatch. Both timings are
+    recorded per variant. A step's rate is its slowest variant's; every step after the first is
+    projected at the previous step's rate through ``per_dispatch_guard`` before it runs. A step
+    of 10 ms or more ends the ramp only if its rate did not fall below the previous step's
+    (``ramp_should_stop``). The calibration rate is the last step's (``calibration_rate``).
 
     Raises:
         RuntimeError: The guard refuses a ramp step.
@@ -125,7 +127,7 @@ def _calibrate(group: MxGroup, variants: list[str]) -> tuple[float, list[dict[st
         prefix = dataclasses.replace(
             group, positions=group.positions[: k + 1], intervals=group.intervals[:k], n_launch=k
         )
-        timings = {v: time_second_of_two(partial(_run_metal, prefix, v)) for v in variants}
+        timings = {v: time_first_then_min(partial(_run_metal, prefix, v)) for v in variants}
         seconds = max(timed for _, timed in timings.values())
         rates.append(bytes_k / seconds)
         steps.append(
@@ -142,7 +144,9 @@ def _calibrate(group: MxGroup, variants: list[str]) -> tuple[float, list[dict[st
             f"  ramp k={k}: {bytes_k} bytes in {seconds * 1e3:.3f} ms (first: {firsts} ms) "
             f"-> {rates[-1] / 1e9:.3f} GB/s"
         )
-        k = None if ramp_should_stop(seconds, k, group.n_launch) else ramp_next_k(k, group.n_launch)
+        prev_rate = rates[-2] if len(rates) > 1 else None
+        stop = ramp_should_stop(seconds, k, group.n_launch, rate=rates[-1], prev_rate=prev_rate)
+        k = None if stop else ramp_next_k(k, group.n_launch)
     return calibration_rate(rates), steps
 
 

@@ -126,13 +126,27 @@ def ramp_next_k(k: int, n_launch: int) -> int | None:
     return min(2 * k, n_launch)
 
 
-def ramp_should_stop(seconds: float, k: int, n_launch: int, min_seconds: float = 0.01) -> bool:
-    """Stop the ramp once a step ran ``min_seconds`` or more, or the whole group was dispatched.
+def ramp_should_stop(
+    seconds: float,
+    k: int,
+    n_launch: int,
+    min_seconds: float = 0.01,
+    *,
+    rate: float | None = None,
+    prev_rate: float | None = None,
+) -> bool:
+    """Stop the ramp once the whole group was dispatched, or a step measured throughput.
 
-    A step that short is dominated by launch latency, so its rate is kept only as the guard for
-    the next, larger step; one that long measures throughput.
+    A step shorter than ``min_seconds`` is dominated by launch latency, so its rate is kept only
+    as the guard for the next, larger step. A step that long measures throughput unless its
+    ``rate`` fell below the previous step's ``prev_rate``: a larger dispatch should never decode at a lower rate,
+    so a drop marks a transient slow dispatch, and the ramp goes on to re-measure.
     """
-    return seconds >= min_seconds or k >= n_launch
+    if k >= n_launch:
+        return True
+    if seconds < min_seconds:
+        return False
+    return rate is None or prev_rate is None or rate >= prev_rate
 
 
 def calibration_rate(step_rates: Sequence[float]) -> float:
@@ -146,20 +160,23 @@ def calibration_rate(step_rates: Sequence[float]) -> float:
     return step_rates[-1]
 
 
-def time_second_of_two(
-    fn: Callable[[], object], *, clock: Callable[[], float] = time.perf_counter
+def time_first_then_min(
+    fn: Callable[[], object], *, n: int = 3, clock: Callable[[], float] = time.perf_counter
 ) -> tuple[float, float]:
-    """Run ``fn`` twice and return (first, second) durations; only the second is a measurement.
+    """Run ``fn`` once untimed, then ``n`` times; return (first run, fastest of the ``n``).
 
-    The first run absorbs a one-off cost such as a Metal pipeline compile for a new kernel
-    signature, and is returned so it stays visible in the record.
+    The first run absorbs a one-off cost such as a Metal pipeline compile, and is returned so it
+    stays visible. The minimum filters a transient slow dispatch: a spike only ever adds time.
     """
     t0 = clock()
     fn()
     first = clock() - t0
-    t1 = clock()
-    fn()
-    return first, clock() - t1
+    runs = []
+    for _ in range(n):
+        t0 = clock()
+        fn()
+        runs.append(clock() - t0)
+    return first, min(runs)
 
 
 def projected_bytes(positions: Sequence[int], k: int) -> int:

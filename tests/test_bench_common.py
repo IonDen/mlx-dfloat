@@ -20,7 +20,7 @@ from scripts._bench_common import (
     ramp_next_k,
     ramp_should_stop,
     resume_key_diff,
-    time_second_of_two,
+    time_first_then_min,
     write_json_atomic,
 )
 
@@ -357,12 +357,50 @@ def test_calibration_rate_refuses_an_empty_ramp():
         calibration_rate([])
 
 
-def test_time_second_of_two_runs_twice_and_times_only_the_second():
-    # A fake clock: the first call pays an 11 ms "compile", the second 0.3 ms.
-    ticks = iter([0.0, 0.011, 0.011, 0.0113])
+def _fake_clock(durations):
+    """A clock whose consecutive (start, end) reads are `durations` apart."""
+    ticks, now = [], 0.0
+    for d in durations:
+        ticks += [now, now + d]
+        now += d + 1.0  # a gap between runs that must never land in a duration
+    it = iter(ticks)
+    return lambda: next(it)
+
+
+def test_time_first_then_min_times_n_runs_after_the_first_and_keeps_the_fastest():
+    # First run: an 11 ms one-off; then three timed runs, the middle one fastest.
     calls = []
-    first, timed = time_second_of_two(lambda: calls.append(1), clock=lambda: next(ticks))
-    # Bug caught: timing the first dispatch (the compile lands in the rate), or running it once.
-    assert len(calls) == 2
+    first, best = time_first_then_min(
+        lambda: calls.append(1), clock=_fake_clock([0.011, 0.0005, 0.0003, 0.0007])
+    )
+    # Bug caught: mean (0.5 ms) or last (0.7 ms) in place of min, the first run counted, or N wrong.
+    assert len(calls) == 1 + 3
     assert first == pytest.approx(0.011)
-    assert timed == pytest.approx(0.0003)
+    assert best == pytest.approx(0.0003)
+
+
+def test_time_first_then_min_honours_n():
+    # Bug caught: N hard-coded to 3.
+    calls = []
+    _, best = time_first_then_min(
+        lambda: calls.append(1), n=5, clock=_fake_clock([0.01, 0.9, 0.8, 0.7, 0.6, 0.2])
+    )
+    assert len(calls) == 6
+    assert best == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize(
+    ("seconds", "k", "rate", "prev_rate", "stop"),
+    [
+        (0.02, 4, 0.008e9, 0.117e9, False),  # long but the rate collapsed: a transient, re-measure
+        (0.02, 4, 1.2e9, 1.0e9, True),  # long and the rate held: throughput measured
+        (0.02, 4, 1.0e9, 1.0e9, True),  # equal to the previous rate counts as held
+        (0.0001, 27, 0.001e9, 1.0e9, True),  # the whole group dispatched: stop regardless ...
+        (0.02, 27, 0.001e9, 1.0e9, True),  # ... even when that last, long step's rate fell
+        (0.02, 1, 0.5e9, None, True),  # the first step has no previous rate to compare with
+    ],
+)
+def test_ramp_should_stop_ignores_a_long_step_whose_rate_fell(seconds, k, rate, prev_rate, stop):
+    # Bug caught: one transient slow dispatch ending the ramp with a collapsed rate (the guard then
+    # refuses the group), `<=` in place of `<`, or the n_launch stop depending on the rate.
+    assert ramp_should_stop(seconds, k, 27, rate=rate, prev_rate=prev_rate) is stop
