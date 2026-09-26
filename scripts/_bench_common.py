@@ -1,7 +1,8 @@
 """The unit-tested helpers behind the bench and parity scripts.
 
 The arithmetic (timings, overhead, throughput, the kill line and the cross-check band, the
-per-dispatch guard, exit codes) is pure, so the numbers these scripts act on can be checked
+per-dispatch guard, the calibration ramp's decisions, the resume-key comparison, exit codes) is
+pure, so the numbers these scripts act on can be checked
 without a GPU. ``provenance`` and ``write_json_atomic`` are the two helpers with side effects:
 one reads the machine state a result is recorded against, the other writes a result so a crash
 never leaves a half-written file.
@@ -14,6 +15,7 @@ import platform
 import re
 import statistics
 import subprocess
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
@@ -114,6 +116,39 @@ def bench_exit_code(*, mismatched: int, errors: int) -> int:
     if mismatched:
         return 1
     return 2 if errors else 0
+
+
+def ramp_next_k(k: int, n_launch: int) -> int | None:
+    """The next calibration prefix length: ``k`` doubled, capped at ``n_launch``; None when done."""
+    if k >= n_launch:
+        return None
+    return min(2 * k, n_launch)
+
+
+def ramp_should_stop(seconds: float, k: int, n_launch: int, min_seconds: float = 0.01) -> bool:
+    """Stop the ramp once a step ran ``min_seconds`` or more, or the whole group was dispatched.
+
+    A step that short is dominated by launch latency, so its rate is kept only as the guard for
+    the next, larger step; one that long measures throughput.
+    """
+    return seconds >= min_seconds or k >= n_launch
+
+
+def projected_bytes(positions: Sequence[int], k: int) -> int:
+    """Bytes a dispatch of the first ``k`` blocks writes: 2 per element in ``positions[0:k+1]``."""
+    return 2 * (int(positions[k]) - int(positions[0]))
+
+
+def resume_key_diff(stored: object, current: Mapping[str, object]) -> list[str]:
+    """The key fields in which a stored bench file differs from this run; empty when it may resume.
+
+    A stored value that is not a key mapping (absent, or from an older or foreign file) never
+    matches: ``["key"]``. Otherwise every field present in either key and unequal is named, sorted
+    (an empty stored key names every current field).
+    """
+    if not isinstance(stored, Mapping):
+        return ["key"]
+    return sorted(f for f in set(stored) | set(current) if stored.get(f) != current.get(f))
 
 
 def write_json_atomic(path: Path, payload: dict[str, object]) -> None:

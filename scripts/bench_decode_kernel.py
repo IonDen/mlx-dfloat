@@ -2,8 +2,12 @@
 
 For each selected group: load it, decode it with the NumPy reference, and check every requested
 Metal variant against those bits (``view(uint16)`` equality, never a tolerance). Before the first
-full-group dispatch, the per-dispatch guard projects that dispatch's time from ``--rate-from``, or
-from a calibration dispatch of the group's first block alone. Each variant that passes parity then
+full-group dispatch, the per-dispatch guard projects that dispatch's time from ``--rate-from``, or,
+without it, from a calibration ramp: dispatches of the first k blocks for k = 1, 2, 4, 8, ...,
+each projected at the previous step's rate through the same guard before it runs, until a step
+takes at least 10 ms (long enough to measure throughput, not launch latency) or covers the whole
+group. The last step's rate, slowest requested variant, is the calibration rate. Each variant
+that passes parity then
 gets one warm-up and ``--reps`` timed decodes, each ending in ``mx.eval``. A variant that fails
 parity gets no timing: a wrong kernel's speed means nothing.
 
@@ -12,7 +16,9 @@ path: blocks that fit the threadgroup buffer are staged, the rest go direct) and
 (the NumPy decoder's own time, for scale).
 
 Results go to ``--out`` atomically after every group, so an interrupted run resumes by skipping
-groups already in the file's ``groups`` map. The top-level ``gbps`` is the slowest Metal median
+groups already in the file's ``groups`` map. The file carries a run ``key`` (resolved checkpoint
+path, variants, reps, source hash, mlx version); resuming into a file whose key differs, or that
+has none, exits 2 and asks for a fresh ``--out``, so different runs never mix. The top-level ``gbps`` is the slowest Metal median
 over every recorded group, the conservative rate ``verify_checkpoint --rate-from`` reads.
 ``--t-step S`` also reports the kill-equivalent throughput for the whole checkpoint's bytes per
 step and whether each Metal variant's aggregate throughput clears it.
@@ -48,11 +54,15 @@ try:
         gbps,
         kill_equivalent_throughput,
         per_dispatch_guard,
+        projected_bytes,
         provenance,
+        ramp_next_k,
+        ramp_should_stop,
+        resume_key_diff,
         write_json_atomic,
     )
     from scripts._watchdog import Watchdog, default_ceiling, phys_footprint
-    from scripts.verify_checkpoint import VerifyError, natural_key, rate_from
+    from scripts.verify_checkpoint import VerifyError, natural_key, rate_from, source_hash
 
     from mlx_dfloat import _metal_decode
     from mlx_dfloat._memory_caps import install_memory_caps
@@ -87,22 +97,41 @@ def _run_metal(group: MxGroup, variant: str) -> None:
     mx.eval(res.bits, res.status)
 
 
-def _calibrate(group: MxGroup, variants: list[str]) -> float:
-    """Bytes per second from one dispatch of the group's first block, slowest requested variant.
+def _calibrate(group: MxGroup, variants: list[str]) -> tuple[float, list[dict[str, float]]]:
+    """Decode rate (bytes/s) from a guarded ramp of block prefixes; returns it and the steps.
 
-    ``positions[:2]`` launches a single threadgroup over the full arrays, so only block 0 is
-    decoded; its output bytes over the dispatch time (launch overhead included) under-estimates
-    the full-group rate, which errs toward refusing a long dispatch.
+    Each step dispatches the first ``k`` blocks (``positions[:k+1]`` over the full arrays, so the
+    kernel launches ``k`` threadgroups) once untimed and once timed per variant, and keeps the
+    slowest variant's rate. Every step after the first is projected at the previous step's rate
+    through ``per_dispatch_guard`` before it runs.
+
+    Raises:
+        RuntimeError: The guard refuses a ramp step.
     """
-    one = dataclasses.replace(
-        group, positions=group.positions[:2], intervals=group.intervals[:1], n_launch=1
-    )
-    bytes_out = 2 * int(group.intervals[0])
-    rates = []
-    for variant in variants:
-        _run_metal(one, variant)  # the first dispatch of this shape
-        rates.append(bytes_out / _timed(partial(_run_metal, one, variant)))
-    return min(rates)
+    positions = np.array(group.positions).astype(np.int64)
+    steps: list[dict[str, float]] = []
+    rate: float | None = None
+    k: int | None = 1
+    while k is not None:
+        bytes_k = projected_bytes(positions, k)
+        if rate is not None:
+            per_dispatch_guard(bytes_k, rate)
+        prefix = dataclasses.replace(
+            group, positions=group.positions[: k + 1], intervals=group.intervals[:k], n_launch=k
+        )
+        seconds = 0.0
+        rates = []
+        for variant in variants:
+            _run_metal(prefix, variant)  # the first dispatch of this shape
+            t = _timed(partial(_run_metal, prefix, variant))
+            seconds = max(seconds, t)
+            rates.append(bytes_k / t)
+        rate = min(rates)
+        steps.append({"k": k, "bytes": bytes_k, "seconds": seconds, "rate_bps": rate})
+        print(f"  ramp k={k}: {bytes_k} bytes in {seconds * 1e3:.3f} ms -> {rate / 1e9:.3f} GB/s")
+        k = None if ramp_should_stop(seconds, k, group.n_launch) else ramp_next_k(k, group.n_launch)
+    assert rate is not None  # the first step always runs
+    return rate, steps
 
 
 def bench_group(
@@ -111,7 +140,7 @@ def bench_group(
     """Parity-check, then time, every requested variant on one group.
 
     Raises:
-        BenchError: The per-dispatch guard refuses the group at the measured rate.
+        BenchError: The per-dispatch guard refuses a calibration step or the group.
         DFloatError: A block's status word reports an error, or the reference finds the group
             structurally invalid.
     """
@@ -127,10 +156,13 @@ def bench_group(
         "direct_blocks": int(np.count_nonzero(group.intervals > _metal_decode.CAP)),
     }
     if metal:
-        source = "rate-from" if rate_bps is not None else "calibration"
-        rate = rate_bps if rate_bps is not None else _calibrate(group, metal)
-        record["guard"] = {"rate_bps": rate, "source": source}
         try:
+            if rate_bps is not None:
+                rate, guard = rate_bps, {"rate_bps": rate_bps, "source": "rate-from"}
+            else:
+                rate, ramp = _calibrate(group, metal)
+                guard = {"rate_bps": rate, "source": "calibration", "ramp": ramp}
+            record["guard"] = guard
             per_dispatch_guard(bytes_out, rate)
         except RuntimeError as exc:
             raise BenchError(str(exc)) from exc
@@ -163,9 +195,15 @@ def bench_group(
     return record
 
 
-def _load_existing(path: Path) -> dict[str, Any]:
+def _load_existing(path: Path, key: dict[str, object]) -> dict[str, Any]:
+    """The bench file to resume, or a fresh one carrying ``key``.
+
+    Raises:
+        VerifyError: The file is unreadable, has no groups map, or was written by a run whose
+            key differs from ``key`` (or carries none).
+    """
     if not path.exists():
-        return {"groups": {}}
+        return {"key": key, "groups": {}}
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
@@ -173,6 +211,12 @@ def _load_existing(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict) or not isinstance(data.get("groups"), dict):
         raise VerifyError(
             f"--out {path}: not a bench JSON with a groups map; refusing to overwrite"
+        )
+    diff = resume_key_diff(data.get("key"), key)
+    if diff:
+        raise VerifyError(
+            f"--out {path} was written by a different run (differs in: {', '.join(diff)}); "
+            "use a fresh --out"
         )
     return data
 
@@ -240,8 +284,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--wall-budget", type=float, default=2 * 3600.0)
     parser.add_argument("--t-step", type=float, help="seconds per denoising step (kill line)")
     args = parser.parse_args(argv)
-    variants = [v for v in args.variants.split(",") if v]
-    unknown = sorted(set(variants) - set(VARIANTS))
+    requested = {v for v in args.variants.split(",") if v}
+    variants = [v for v in VARIANTS if v in requested]  # canonical order, for the resume key
+    unknown = sorted(requested - set(VARIANTS))
     if unknown or not variants or args.reps < 1:
         print(f"error: bad --variants {args.variants!r} or --reps {args.reps}", file=sys.stderr)
         return 2
@@ -254,7 +299,14 @@ def main(argv: list[str] | None = None) -> int:
             print("error: the Metal backend cannot run here", file=sys.stderr)
             return 2
         rate_bps = rate_from(args.rate_from) if args.rate_from else None
-        data = _load_existing(args.out)
+        key: dict[str, object] = {
+            "df11": str(args.df11.resolve()),
+            "variants": variants,
+            "reps": args.reps,
+            "source_hash": source_hash(),
+            "mlx": mx.__version__,
+        }
+        data = _load_existing(args.out, key)
         groups: dict[str, dict] = data["groups"]
         ckpt = open_checkpoint(args.df11)
         selected = sorted({g for g in args.groups.split(",") if g}, key=natural_key)
@@ -277,6 +329,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             watchdog.peak_footprint = 0  # per-group peak from here on
             t0 = time.monotonic()
+            print(f"{name}:")
             try:
                 group = load_group_mx(ckpt.groups[name])
                 record = bench_group(group, variants=variants, reps=args.reps, rate_bps=rate_bps)

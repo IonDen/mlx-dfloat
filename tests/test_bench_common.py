@@ -14,7 +14,11 @@ from scripts._bench_common import (
     parity_conditions,
     parse_pmset,
     per_dispatch_guard,
+    projected_bytes,
     provenance,
+    ramp_next_k,
+    ramp_should_stop,
+    resume_key_diff,
     write_json_atomic,
 )
 
@@ -250,3 +254,90 @@ def test_provenance_records_no_mflux_when_absent(monkeypatch):
 
     monkeypatch.setattr(bc.metadata, "version", missing)
     assert provenance()["mflux"] is None
+
+
+# --- calibration ramp ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("k", "n_launch", "want"),
+    [(1, 27, 2), (2, 27, 4), (16, 27, 27), (27, 27, None), (1, 1, None)],
+)
+def test_ramp_next_k_doubles_and_stops_at_n_launch(k, n_launch, want):
+    # Bug caught: a ramp that overshoots n_launch (32 blocks of a 27-block group), steps linearly,
+    # or never reports that it is done.
+    assert ramp_next_k(k, n_launch) == want
+
+
+@pytest.mark.parametrize(
+    ("seconds", "k", "n_launch", "stop"),
+    [
+        (0.0099, 4, 27, False),  # just under the minimum step time: keep ramping
+        (0.01, 4, 27, True),  # exactly the minimum: long enough to measure throughput
+        (0.0011, 27, 27, True),  # the whole group already dispatched
+    ],
+)
+def test_ramp_should_stop_at_the_minimum_time_or_the_whole_group(seconds, k, n_launch, stop):
+    # Bug caught: a ramp that never stops (min_seconds ignored or `>` in place of `>=`), or one
+    # that keeps ramping after the whole group has been dispatched.
+    assert ramp_should_stop(seconds, k, n_launch) is stop
+
+
+def test_ramp_should_stop_honours_a_custom_minimum():
+    # Bug caught: the min_seconds argument ignored in favour of the default.
+    assert ramp_should_stop(0.02, 1, 27, min_seconds=0.05) is False
+
+
+@pytest.mark.parametrize(("k", "want"), [(1, 2 * 7393), (2, 2 * 14780), (3, 2 * 22000)])
+def test_projected_bytes_is_two_bytes_per_element_of_the_first_k_blocks(k, want):
+    # Bug caught: projecting one block instead of k (a step that skips the guard in effect), an
+    # off-by-one (positions[k - 1]), or elements counted as bytes.
+    assert projected_bytes([0, 7393, 14780, 22000], k) == want
+
+
+def test_projected_bytes_counts_from_the_first_position():
+    # Bug caught: counting from 0 when the prefix's first position is not 0.
+    assert projected_bytes([100, 300, 700], 2) == 2 * 600
+
+
+# --- resume key ---------------------------------------------------------------------------------
+
+_KEY = {
+    "df11": "/models/qwen3-4b-df11",
+    "variants": ["direct", "staged"],
+    "reps": 5,
+    "source_hash": "a" * 64,
+    "mlx": "0.32.2",
+}
+
+
+def test_resume_key_diff_is_empty_for_the_same_run():
+    # Bug caught: a resume refused even when nothing changed.
+    assert resume_key_diff(dict(_KEY), _KEY) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "other"),
+    [
+        ("df11", "/models/flux-krea-df11"),
+        ("variants", ["staged"]),
+        ("reps", 3),
+        ("source_hash", "b" * 64),
+        ("mlx", "0.33.0"),
+    ],
+)
+def test_resume_key_diff_names_each_changed_field(field, other):
+    # Bug caught: one field left out of the comparison, so results from another checkpoint,
+    # variant set, rep count, kernel source or mlx version mix into one file.
+    assert resume_key_diff({**_KEY, field: other}, _KEY) == [field]
+
+
+@pytest.mark.parametrize("stored", [None, "not a key", {}])
+def test_resume_key_diff_refuses_a_file_without_a_key(stored):
+    # Bug caught: an unkeyed (older or foreign) bench file treated as resumable.
+    assert resume_key_diff(stored, _KEY) != []
+
+
+def test_resume_key_diff_names_a_field_the_current_run_does_not_have():
+    # Bug caught: a stored key with an extra field (written by a different bench) accepted.
+    assert resume_key_diff({**_KEY, "decoder": "metal"}, _KEY) == ["decoder"]
