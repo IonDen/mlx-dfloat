@@ -23,7 +23,6 @@ import json
 import math
 import re
 import stat
-import subprocess
 import sys
 import time
 import traceback
@@ -38,7 +37,7 @@ try:
     import mlx.core as mx
     import numpy as np
     import psutil
-    from scripts._bench_common import per_dispatch_guard
+    from scripts._bench_common import git_state, per_dispatch_guard, write_json_atomic
     from scripts._watchdog import Watchdog, default_ceiling
 
     from mlx_dfloat._memory_caps import install_memory_caps
@@ -138,29 +137,13 @@ def run_key(
     *, df11_revision: str, bf16_revision: str, mode: str, decoder: str = "reference"
 ) -> dict[str, str]:
     """Everything that must be unchanged for a stored result to be reused."""
-    try:
-        sha = subprocess.run(
-            ["git", "-C", str(_REPO), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        dirty = subprocess.run(
-            ["git", "-C", str(_REPO), "status", "--porcelain", "--", "src", "scripts"],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        git = sha + ("-dirty" if dirty else "")
-    except (OSError, subprocess.CalledProcessError):
-        git = "unknown"
     return {
         "df11_revision": df11_revision,
         "bf16_revision": bf16_revision,
         "mode": mode,
         "decoder": decoder,
         "source": source_hash(),
-        "git": git,
+        "git": git_state(),
         "mlx": mx.__version__,
     }
 
@@ -223,10 +206,8 @@ def _safe_filename(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.\-]", "_", name) + ".json"
 
 
-def _write_atomic(path: Path, obj: object) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(obj, indent=1))
-    tmp.replace(path)
+def _write_atomic(path: Path, obj: dict[str, object]) -> None:
+    write_json_atomic(path, obj)
 
 
 def _stored(path: Path, key: dict[str, str], matrix_names: tuple[str, ...]) -> dict | None:
