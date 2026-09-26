@@ -327,7 +327,12 @@ def test_success_summary_records_partial_and_selected_groups(tmp_path, pair):
 
 @pytest.mark.parametrize(
     "edited",
-    ["src/mlx_dfloat/sub/deep.py", "scripts/_watchdog.py", "scripts/verify_checkpoint.py"],
+    [
+        "src/mlx_dfloat/sub/deep.py",
+        "scripts/_watchdog.py",
+        "scripts/verify_checkpoint.py",
+        "scripts/_bench_common.py",
+    ],
 )
 def test_source_hash_covers_package_watchdog_and_script(tmp_path, monkeypatch, edited):
     # Bug caught: hashing only src/mlx_dfloat/*.py (top level) lets an edit to a subpackage,
@@ -336,7 +341,7 @@ def test_source_hash_covers_package_watchdog_and_script(tmp_path, monkeypatch, e
     for rel in ["src/mlx_dfloat/format.py", *[e for e in [edited] if e.endswith(".py")]]:
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / rel).write_text(f"# {rel}\n")
-    for rel in ["scripts/_watchdog.py", "scripts/verify_checkpoint.py"]:
+    for rel in ["scripts/_watchdog.py", "scripts/verify_checkpoint.py", "scripts/_bench_common.py"]:
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / rel).write_text(f"# {rel}\n")
     monkeypatch.setattr(vc, "_SRC", tmp_path / "src" / "mlx_dfloat")
@@ -534,3 +539,184 @@ def test_summary_records_the_installed_memory_caps(tmp_path, pair, monkeypatch):
     assert _summary(out)["memory_caps_gb"] == [7, 9]
     assert verify(df11, bf16, out, key=KEY, groups=["nope"]) == 2
     assert _summary(out)["memory_caps_gb"] == [7, 9]
+
+
+# --- the Metal decoder (--decoder metal) --------------------------------------------------------
+
+
+def _metal_argv(df11, out, *extra):
+    return ["--df11", str(df11), "--out", str(out), "--decoder", "metal", "--no-watchdog", *extra]
+
+
+@pytest.mark.parametrize(
+    ("bf16_given", "decoder", "mode"),
+    [
+        (True, "reference", "parity"),
+        (True, "metal", "parity"),
+        (False, "metal", "kernel-vs-reference"),
+        (False, "reference", "structural-only"),
+    ],
+)
+def test_run_mode_picks_the_comparison_from_bf16_and_decoder(bf16_given, decoder, mode):
+    # Bug caught: a Metal run with no BF16 falling back to structural-only (no oracle at all), or a
+    # Metal run with BF16 compared against the reference instead of the originals.
+    assert vc.run_mode(bf16_given=bf16_given, decoder=decoder) == mode
+
+
+@pytest.mark.metal
+def test_metal_decoder_runs_once_per_group_and_matches_the_bf16_original(
+    pair, tmp_path, monkeypatch
+):
+    # Bug caught: --decoder metal silently decoding with the reference.
+    calls = []
+    real = vc._decode_with_metal
+    monkeypatch.setattr(
+        vc, "_decode_with_metal", lambda group, **kw: calls.append(group.name) or real(group, **kw)
+    )
+    df11, bf16, _ = pair
+    out = tmp_path / "o"
+    rc = main(_metal_argv(df11, out, "--bf16", str(bf16)))
+    summary = _summary(out)
+    assert rc == 0
+    assert summary["mismatched"] == 0
+    assert summary["key"]["decoder"] == "metal"
+    assert summary["key"]["mode"] == "parity"
+    assert summary["compared"] == 6
+    assert sorted(calls) == sorted(summary["selected_groups"])
+    record = json.loads((out / "groups" / "blocks.0.json").read_text())
+    assert record["decoder"] == "metal"
+    assert {"max_elements_per_block", "direct_blocks"} <= record.keys()
+    assert record["max_elements_per_block"] == 100  # one 4096-byte block holds the whole group
+    assert record["direct_blocks"] == 0
+
+
+@pytest.mark.metal
+def test_metal_without_bf16_compares_against_the_reference(pair, tmp_path):
+    # Bug caught: a structural-only exit 0 hiding a kernel-vs-oracle divergence when no BF16 is
+    # available.
+    out = tmp_path / "o"
+    rc = main(_metal_argv(pair[0], out))
+    summary = _summary(out)
+    assert rc == 0
+    assert summary["key"]["mode"] == "kernel-vs-reference"
+    assert summary["compared"] == summary["expected"] == 6
+
+
+@pytest.mark.metal
+def test_a_kernel_bit_flip_is_exit_1(pair, tmp_path, monkeypatch):
+    # Bug caught: a kernel-vs-reference mismatch reported as 2 instead of the kill signal 1.
+    real = vc._decode_with_metal
+
+    def flipped(group, **kw):
+        bits = real(group, **kw)
+        first = next(k for k in bits if k != "__meta__")
+        bits[first] = bits[first].copy()
+        bits[first][0] ^= 1
+        return bits
+
+    monkeypatch.setattr(vc, "_decode_with_metal", flipped)
+    out = tmp_path / "o"
+    assert main(_metal_argv(pair[0], out)) == 1
+    record = json.loads((out / "groups" / "blocks.0.json").read_text())
+    assert record["status"] == "mismatch"
+    assert record["matrices"][0]["name"] == "blocks.0.q.weight"
+    assert record["matrices"][0]["first_mismatch_index"] == 0
+    assert record["matrices"][1]["equal"] is True
+
+
+@pytest.mark.metal
+def test_a_nonzero_kernel_status_is_exit_2_not_1(pair, tmp_path, monkeypatch):
+    # Bug caught: a corrupt group's status surfacing as the bit-mismatch kill signal.
+    from mlx_dfloat.errors import DFloatFormatError
+
+    def refuse(group, **kw):
+        raise DFloatFormatError("blocks.0: block 0: thread chain broken")
+
+    monkeypatch.setattr(vc, "_decode_with_metal", refuse)
+    out = tmp_path / "o"
+    assert main(_metal_argv(pair[0], out)) == 2
+    assert _summary(out)["error"].startswith("blocks.0: ")
+
+
+@pytest.mark.metal
+def test_metal_on_a_corrupt_group_with_bf16_is_exit_2_not_1(pair, tmp_path):
+    # Bug caught: a corrupt group reaching the compare (the kernel's garbage against the real
+    # original) and reading as a false kill signal instead of the format error it is.
+    df11, bf16, _ = pair
+    _corrupt_gaps(df11, "blocks.1")
+    out = tmp_path / "o"
+    assert main(_metal_argv(df11, out, "--bf16", str(bf16))) == 2
+    summary = _summary(out)
+    assert summary["error"].startswith("blocks.1: ")
+    assert summary["mismatched"] == 0
+
+
+def test_metal_absent_is_exit_2(pair, tmp_path, monkeypatch, capsys):
+    # Bug caught: --decoder metal on a machine without the kernel quietly running something else.
+    monkeypatch.setattr(vc, "available_backends", lambda: ("reference",))
+    out = tmp_path / "o"
+    assert main(_metal_argv(pair[0], out)) == 2
+    assert "metal" in capsys.readouterr().err
+    assert not (out / "summary.json").exists()
+
+
+def _rate_file(tmp_path, payload):
+    path = tmp_path / "bench.json"
+    path.write_text(json.dumps(payload))
+    return path
+
+
+@pytest.mark.metal
+@pytest.mark.parametrize(
+    ("gbps", "code"),
+    # Each group decodes 100 elements = 200 bytes out; the per-dispatch limit is 0.25 s.
+    [(1e-6, 0), (7e-7, 2)],  # 1000 B/s -> 0.2 s passes; 700 B/s -> 0.29 s is refused
+)
+def test_rate_from_converts_gbps_and_guards_each_dispatch(pair, tmp_path, gbps, code):
+    # Bug caught: --rate-from read in the wrong unit (GB/s taken as B/s, or 1e6 for 1e9), or the
+    # guard's refusal escaping as a crash with no summary.
+    out = tmp_path / "o"
+    rate = _rate_file(tmp_path, {"gbps": gbps, "other": "ignored"})
+    assert main(_metal_argv(pair[0], out, "--rate-from", str(rate))) == code
+    summary = _summary(out)
+    assert summary["exit_code"] == code
+    if code:
+        assert "blocks.0" in summary["error"]
+        assert "0.25" in summary["error"]
+
+
+@pytest.mark.parametrize("payload", [{}, {"gbps": "fast"}, {"gbps": 0}, {"gbps": -1.0}, [1.0]])
+def test_rate_from_without_a_positive_gbps_is_exit_2(pair, tmp_path, monkeypatch, payload, capsys):
+    # Bug caught: a bench JSON with no usable rate silently disabling the per-dispatch guard.
+    monkeypatch.setattr(vc, "available_backends", lambda: ("reference", "metal"))
+    out = tmp_path / "o"
+    rate = _rate_file(tmp_path, payload)
+    assert main(_metal_argv(pair[0], out, "--rate-from", str(rate))) == 2
+    assert "gbps" in capsys.readouterr().err
+    assert not (out / "summary.json").exists()
+
+
+def test_compare_arrays_records_the_first_mismatch_and_refuses_a_size_mismatch():
+    # Bug caught: an in-memory compare that reports only equal/unequal (no index), or that
+    # counts a length difference as a bit mismatch (exit 1) instead of an error (exit 2).
+    a = np.array([1, 2, 3, 4], np.uint16)
+    records = vc._compare_arrays({"m": a, "n": a}, {"m": np.array([1, 2, 9, 4], np.uint16), "n": a})
+    assert records == [
+        {"name": "m", "n": 4, "equal": False, "first_mismatch_index": 2},
+        {"name": "n", "n": 4, "equal": True, "first_mismatch_index": None},
+    ]
+    with pytest.raises(vc.VerifyError, match="decoded 4 elements, oracle has 3"):
+        vc._compare_arrays({"m": a}, {"m": a[:3]})
+
+
+@pytest.mark.parametrize("text", [None, "{not json"])
+def test_rate_from_an_unreadable_bench_json_is_exit_2(pair, tmp_path, monkeypatch, capsys, text):
+    # Bug caught: a missing or truncated bench JSON crashing out with a traceback (or running with
+    # no guard) instead of a clear refusal before any decode.
+    monkeypatch.setattr(vc, "available_backends", lambda: ("reference", "metal"))
+    rate = tmp_path / "bench.json"
+    if text is not None:
+        rate.write_text(text)
+    out = tmp_path / "o"
+    assert main(_metal_argv(pair[0], out, "--rate-from", str(rate))) == 2
+    assert "cannot read the bench JSON" in capsys.readouterr().err

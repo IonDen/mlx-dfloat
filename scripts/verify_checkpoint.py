@@ -4,16 +4,23 @@ Operational script, not a test; run it directly. Results are written per group, 
 they finish, and resumed only when the run key (revisions, mode, decoder, source hash, git, mlx)
 is unchanged.
 
+Modes: ``parity`` (``--bf16`` given: every decoded matrix against its BF16 original),
+``kernel-vs-reference`` (``--decoder metal`` without ``--bf16``: the Metal kernel against the
+NumPy reference decoder) and ``structural-only`` (the reference decoder without ``--bf16``).
+
 Usage (from the repository root of a synced checkout):
     uv run python -m scripts.verify_checkpoint --df11 DIR [--bf16 DIR] --out DIR \
-        [--df11-revision SHA] [--bf16-revision SHA] [--groups a,b] [--ignore-original NAME ...]
-``uv run python scripts/verify_checkpoint.py ...`` works too.
+        [--df11-revision SHA] [--bf16-revision SHA] [--groups a,b] [--ignore-original NAME ...] \
+        [--decoder {reference,metal}] [--rate-from BENCH_JSON]
+``uv run python scripts/verify_checkpoint.py ...`` works too. ``--rate-from`` takes a bench JSON
+whose top-level ``gbps`` sets the per-dispatch guard for ``--decoder metal``.
 Exit codes: 0 equal and complete, 1 mismatch, 2 error/coverage, 70/71 watchdog abort.
 """
 
 import argparse
 import hashlib
 import json
+import math
 import re
 import stat
 import subprocess
@@ -31,12 +38,14 @@ try:
     import mlx.core as mx
     import numpy as np
     import psutil
+    from scripts._bench_common import per_dispatch_guard
     from scripts._watchdog import Watchdog, default_ceiling
 
     from mlx_dfloat._memory_caps import install_memory_caps
     from mlx_dfloat._safetensors import read_array
+    from mlx_dfloat.decode import available_backends, check, decode_group, split_matrices
     from mlx_dfloat.errors import DFloatError
-    from mlx_dfloat.format import open_checkpoint
+    from mlx_dfloat.format import DF11Group, load_group_mx, open_checkpoint
     from mlx_dfloat.reference import decode_matrices
 except Exception as exc:  # a broken environment (no Metal, bad install) is 2, never a mismatch (1)
     print(
@@ -75,19 +84,54 @@ def revision_from_path(path: Path) -> str:
 
 
 def source_hash() -> str:
-    """sha256 over every package source file plus this script and the watchdog module.
+    """sha256 over every package source file plus this script and the helpers it imports.
 
     Recurses through ``src/mlx_dfloat`` (not just its top level) and also covers
-    ``scripts/verify_checkpoint.py`` and ``scripts/_watchdog.py`` themselves, so an edit to the
-    parity script or its watchdog invalidates a stored result too, not just an edit to the package.
+    ``scripts/verify_checkpoint.py``, ``scripts/_watchdog.py`` and ``scripts/_bench_common.py``,
+    so an edit to the parity script or its helpers invalidates a stored result too, not just an
+    edit to the package.
     """
     files = sorted(_SRC.rglob("*.py")) + sorted(
-        [_SCRIPTS / "_watchdog.py", _SCRIPTS / "verify_checkpoint.py"]
+        [
+            _SCRIPTS / "_watchdog.py",
+            _SCRIPTS / "verify_checkpoint.py",
+            _SCRIPTS / "_bench_common.py",
+        ]
     )
     digest = hashlib.sha256()
     for file in files:
         digest.update(str(file.relative_to(_REPO)).encode() + b"\0" + file.read_bytes())
     return digest.hexdigest()
+
+
+def run_mode(*, bf16_given: bool, decoder: str) -> str:
+    """What each decoded matrix is compared against.
+
+    ``parity`` compares with the BF16 originals whenever they are given; without them the Metal
+    decoder is compared with the reference decoder (``kernel-vs-reference``), and the reference
+    decoder only checks its own structure (``structural-only``).
+    """
+    if bf16_given:
+        return "parity"
+    return "kernel-vs-reference" if decoder == "metal" else "structural-only"
+
+
+def rate_from(path: Path) -> float:
+    """Decode throughput in bytes per second, from a bench JSON's top-level ``gbps``.
+
+    Raises:
+        VerifyError: The file is unreadable, or ``gbps`` is absent, not a number, or not positive.
+    """
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise VerifyError(f"--rate-from {path}: cannot read the bench JSON: {exc}") from exc
+    gbps = data.get("gbps") if isinstance(data, dict) else None
+    if isinstance(gbps, bool) or not isinstance(gbps, int | float):
+        raise VerifyError(f"--rate-from {path}: no numeric top-level gbps")
+    if not (math.isfinite(gbps) and gbps > 0):
+        raise VerifyError(f"--rate-from {path}: gbps must be positive and finite, got {gbps}")
+    return float(gbps) * 1e9
 
 
 def run_key(
@@ -238,6 +282,51 @@ def _compare(
     return records, missing
 
 
+def _compare_arrays(decoded: dict[str, np.ndarray], oracle: dict[str, np.ndarray]) -> list[dict]:
+    """Compare decoded matrices with in-memory oracle bits, in ``decoded`` order.
+
+    Raises:
+        VerifyError: A matrix's element count differs from its oracle's (a format problem, not a
+            bit mismatch).
+    """
+    records = []
+    for matrix, got in decoded.items():
+        want = oracle[matrix]
+        if got.size != want.size:
+            raise VerifyError(f"{matrix}: decoded {got.size} elements, oracle has {want.size}")
+        equal = bool(np.array_equal(got, want))
+        first = int(np.flatnonzero(got != want)[0]) if not equal else None
+        records.append(
+            {"name": matrix, "n": int(got.size), "equal": equal, "first_mismatch_index": first}
+        )
+    return records
+
+
+def _decode_with_metal(group: DF11Group, *, rate_bps: float | None = None) -> dict[str, np.ndarray]:
+    """Decode one group with the Metal kernel; a ``"__meta__"`` entry carries its path counts.
+
+    ``__meta__`` is ``[max_elements_per_block, direct_blocks]``; ``verify`` moves it into the
+    group record.
+
+    Raises:
+        DFloatFormatError: A block's status word reports an error (via ``check``).
+        VerifyError: ``rate_bps`` projects the single dispatch past the per-dispatch limit.
+    """
+    g = load_group_mx(group)
+    if rate_bps is not None:
+        try:
+            per_dispatch_guard(2 * g.n_elements, rate_bps)
+        except RuntimeError as exc:  # a refusal to run, so exit 2 with a summary, never a crash
+            raise VerifyError(str(exc)) from exc
+    res = decode_group(g, backend="metal")
+    check(res, name=group.name)
+    mx.eval(res.bits, res.status)
+    parts = split_matrices(res.bits, g.split_positions)
+    decoded = dict(zip(group.matrix_names, (np.array(p) for p in parts), strict=True))
+    decoded["__meta__"] = np.array([g.max_elements_per_block, res.direct_blocks])
+    return decoded
+
+
 def verify(
     df11_root: Path,
     bf16_root: Path | None,
@@ -247,11 +336,16 @@ def verify(
     groups: list[str] | None = None,
     ignore_originals: tuple[str, ...] = (),
     watchdog: Stoppable | None = None,
+    decoder: str = "reference",
+    rate_bps: float | None = None,
 ) -> int:
-    """Run parity (or structural-only decoding) and return the exit code.
+    """Run parity, kernel-vs-reference or structural-only decoding and return the exit code.
 
-    ``watchdog`` is stopped before summary.json is written, so no abort can follow the verdict.
+    The mode follows ``run_mode``. ``rate_bps`` (bytes per second) turns on the per-dispatch
+    guard for ``decoder="metal"``. ``watchdog`` is stopped before summary.json is written, so no
+    abort can follow the verdict.
     """
+    mode = run_mode(bf16_given=bf16_root is not None, decoder=decoder)
     caps = list(install_memory_caps())
     mx.set_cache_limit(0)
     started = time.monotonic()
@@ -315,23 +409,34 @@ def verify(
         stored = _stored(result_path, key, matrix_names)
         if stored is None:
             t0 = time.monotonic()
+            meta: dict[str, int] = {}
+            group_missing: list[str] = []
             try:
-                decoded = decode_matrices(ckpt.groups[name])
-                if bf16_root is None:
+                if decoder == "metal":
+                    decoded = _decode_with_metal(ckpt.groups[name], rate_bps=rate_bps)
+                    max_epb, direct = (int(v) for v in decoded.pop("__meta__"))
+                    meta = {"max_elements_per_block": max_epb, "direct_blocks": direct}
+                else:
+                    decoded = decode_matrices(ckpt.groups[name])
+                if mode == "structural-only":
                     records = [
                         {"name": n, "n": int(v.size), "equal": True, "first_mismatch_index": None}
                         for n, v in decoded.items()
                     ]
                     status = "structural-ok"
-                    group_missing: list[str] = []
                 else:
-                    records, group_missing = _compare(decoded, originals)
+                    if mode == "kernel-vs-reference":
+                        records = _compare_arrays(decoded, decode_matrices(ckpt.groups[name]))
+                    else:
+                        records, group_missing = _compare(decoded, originals)
                     status = "equal" if all(r["equal"] for r in records) else "mismatch"
             except (DFloatError, VerifyError) as exc:
                 return _error_summary(f"{name}: {exc}")
             stored = {
                 "key": key,
                 "status": status,
+                "decoder": decoder,
+                **meta,
                 "seconds": time.monotonic() - t0,
                 "rss": int(psutil.Process().memory_info().rss),
                 "matrices": records,
@@ -402,13 +507,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bf16-revision")
     parser.add_argument("--groups", help="comma-separated group names (default: all)")
     parser.add_argument("--ignore-original", action="append", default=[])
-    parser.add_argument("--decoder", choices=["reference"], default="reference")
+    parser.add_argument("--decoder", choices=["reference", "metal"], default="reference")
+    parser.add_argument(
+        "--rate-from",
+        type=Path,
+        help="bench JSON whose top-level gbps sets the per-dispatch guard (--decoder metal)",
+    )
     parser.add_argument("--wall-budget", type=float, default=6 * 3600.0)
     parser.add_argument("--no-watchdog", action="store_true", help="tests only")
     args = parser.parse_args(argv)
     watchdog = None
     try:
-        mode = "parity" if args.bf16 else "structural-only"
+        if args.decoder == "metal" and "metal" not in available_backends():
+            print("error: --decoder metal: the Metal backend cannot run here", file=sys.stderr)
+            return EXIT_ERROR
+        try:
+            rate_bps = rate_from(args.rate_from) if args.rate_from else None
+        except VerifyError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+        mode = run_mode(bf16_given=args.bf16 is not None, decoder=args.decoder)
         key = run_key(
             df11_revision=args.df11_revision or revision_from_path(args.df11),
             bf16_revision=args.bf16_revision
@@ -434,6 +552,8 @@ def main(argv: list[str] | None = None) -> int:
             groups=groups,
             ignore_originals=tuple(args.ignore_original),
             watchdog=watchdog,
+            decoder=args.decoder,
+            rate_bps=rate_bps,
         )
     except Exception:
         traceback.print_exc()
