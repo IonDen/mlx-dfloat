@@ -62,17 +62,42 @@ def test_install_memory_caps_noop_when_no_working_set(monkeypatch):
     assert _memory_caps.install_memory_caps() == (0, 0)
 
 
-def test_install_memory_caps_swallows_set_limit_failure(monkeypatch):
-    # A Metal-less device (e.g. CI) returns (0, 0) and never crashes.
+def _boom(_limit):
+    raise RuntimeError("metal unavailable")
+
+
+def _healthy_device(monkeypatch):
     monkeypatch.setattr(
         _memory_caps.mx, "device_info", lambda: {"max_recommended_working_set_size": 25 * 1024**3}
     )
 
-    def _boom(_limit):
-        raise RuntimeError("metal unavailable")
 
+def test_install_memory_caps_swallows_set_limit_failure(monkeypatch):
+    # A Metal-less device (e.g. CI) returns (0, 0) and never crashes.
+    _healthy_device(monkeypatch)
     monkeypatch.setattr(_memory_caps.mx, "set_wired_limit", _boom)
+    monkeypatch.setattr(_memory_caps.mx, "set_memory_limit", _boom)
     assert _memory_caps.install_memory_caps() == (0, 0)
+
+
+def test_a_failed_wired_cap_still_installs_the_memory_cap(monkeypatch):
+    # Bug caught: one try block around both calls skips set_memory_limit when set_wired_limit
+    # raises, and reports (0, 0) although the memory cap could have been applied.
+    _healthy_device(monkeypatch)
+    seen: dict[str, int] = {}
+    monkeypatch.setattr(_memory_caps.mx, "set_wired_limit", _boom)
+    monkeypatch.setattr(
+        _memory_caps.mx, "set_memory_limit", lambda b: seen.__setitem__("memory", b)
+    )
+    assert _memory_caps.install_memory_caps() == (0, 22)
+    assert seen == {"memory": 22 * 1024**3}
+
+
+def test_a_failed_memory_cap_reports_only_the_wired_cap(monkeypatch):
+    _healthy_device(monkeypatch)
+    monkeypatch.setattr(_memory_caps.mx, "set_wired_limit", lambda _b: None)
+    monkeypatch.setattr(_memory_caps.mx, "set_memory_limit", _boom)
+    assert _memory_caps.install_memory_caps() == (20, 0)
 
 
 def test_install_memory_caps_pushes_strict_byte_caps_on_healthy_device(monkeypatch):

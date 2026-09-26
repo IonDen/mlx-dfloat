@@ -1,0 +1,14 @@
+The file dfloat11_encoder.py in this directory is derived from dfloat11_utils.py of
+https://github.com/LeanModels/DFloat11 at commit 457733886c, Copyright 2025 Tianyi Zhang,
+licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0).
+Modifications: torch replaced by NumPy; tqdm and print calls removed; exponent_counter added;
+and one semantic addition: get_luts initialises its row accumulator (curr_val = 0) before the
+first row. Upstream leaves it undefined, so it raises UnboundLocalError whenever the EOF symbol
+gets the all-zeros code (common for small synthetic codebooks; never seen in published
+checkpoints). With the seed, those EOF byte ranges map to exponent 0. Whether that is a
+length-0 (invalid) code or a real one depends on the codebook (it is real when exponent 0
+occurs in the data). Either way it can only be read in the padding tail after the data, and
+the decoder discards it. On every codebook where upstream's get_luts does not raise, the
+seeded copy's output is byte-identical to upstream's (pinned by a differential test). The
+cross-row carry of curr_val ("stale accumulator") is kept exactly as upstream.
+Used only to build test fixtures; not part of the mlx-dfloat package.

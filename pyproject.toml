@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mlx-dfloat"
-description = "Run DFloat11 losslessly compressed BF16 models on Apple Silicon with MLX: about 30% less memory, bit-identical output"
+description = "Run DFloat11 losslessly compressed BF16 models on Apple Silicon with MLX: bit-identical output at roughly 70% of BF16 memory, as the DFloat11 authors report"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -41,7 +41,13 @@ Issues = "https://github.com/IonDen/mlx-dfloat/issues"
 Changelog = "https://github.com/IonDen/mlx-dfloat/blob/main/CHANGELOG.md"
 
 [dependency-groups]
-test = ["pytest>=8.3", "pytest-cov>=5.0", "hypothesis>=6.130"]
+test = [
+    "pytest>=8.3",
+    "pytest-cov>=5.0",
+    "hypothesis>=6.130",
+    "dahuffman==0.4.2",
+    "psutil>=6",
+]
 typecheck = ["mypy>=1.13"]
 lint = ["ruff>=0.7"]
 dev = [
@@ -87,6 +93,11 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["D", "ANN", "S101"]
+"tests/_upstream/*.py" = ["E741", "N806", "SIM", "PERF", "B", "RUF", "UP", "C4", "RET", "FURB", "D", "ANN"]
+# _upstream_get_luts_verbatim is a literal upstream copy embedded for differential testing
+# (see its docstring); these codes fire only inside it and are not among the ignored rules for
+# tests/_upstream/*.py, so they are scoped narrowly to this one file instead.
+"tests/test_upstream_encoder.py" = ["B007", "FURB116", "RUF100"]
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -121,7 +132,7 @@ markers = [
 
 [tool.coverage.run]
 branch = true
-source = ["mlx_dfloat"]
+source = ["mlx_dfloat", "scripts"]
 parallel = true
 omit = ["src/mlx_dfloat/_version.py"]
 

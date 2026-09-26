@@ -1,0 +1,536 @@
+import json
+import threading
+
+import mlx.core as mx
+import numpy as np
+import pytest
+import scripts.verify_checkpoint as vc
+from scripts.verify_checkpoint import main, run_key, verify
+from tests._df11_fixtures import random_bf16, write_bf16_original, write_checkpoint
+
+KEY = {
+    "df11_revision": "a" * 40,
+    "bf16_revision": "b" * 40,
+    "mode": "parity",
+    "decoder": "reference",
+    "source": "x",
+    "git": "y",
+    "mlx": "z",
+}
+SKEY = {**KEY, "mode": "structural-only"}
+NORM = np.array([0x3F80], np.uint16)
+
+
+@pytest.fixture
+def pair(tmp_path):
+    rng = np.random.default_rng(7)
+    mats = {f"blocks.{i}": [random_bf16(rng, (6, 10)), random_bf16(rng, (4, 10))] for i in range(3)}
+    df11 = write_checkpoint(
+        tmp_path / "df11",
+        groups=mats,
+        pattern=r"blocks\.\d+",
+        sub_paths=("q", "k"),
+        extras={"norm.weight": NORM},
+    )
+    originals = {"norm.weight": NORM}
+    for g, (q, k) in mats.items():
+        originals[f"{g}.q.weight"], originals[f"{g}.k.weight"] = q, k
+    return df11, write_bf16_original(tmp_path / "bf16", originals), originals
+
+
+def _summary(out):
+    return json.loads((out / "summary.json").read_text())
+
+
+def _corrupt_gaps(df11, group):
+    shard = df11 / f"{group.replace('.', '_')}.safetensors"
+    data = mx.load(str(shard))
+    mx.eval(data)
+    gaps = np.array(data[f"{group}.gaps"])
+    gaps[0] ^= 0xFF  # thread continuity breaks -> DFloatFormatError while decoding this group
+    data[f"{group}.gaps"] = mx.array(gaps)
+    mx.save_safetensors(str(shard), data)
+
+
+def _count_decodes(monkeypatch):
+    calls = []
+    real = vc.decode_matrices
+    monkeypatch.setattr(
+        vc, "decode_matrices", lambda g, **kw: calls.append(g.name) or real(g, **kw)
+    )
+    return calls
+
+
+def _hf_symlinked_layout(dest, tensors):
+    """A snapshots/<sha>/ dir whose *.safetensors shard files are symlinks into a sibling blobs/ dir.
+
+    Mirrors the real Hugging Face cache layout: ``<repo>/snapshots/<revision>/<shard>`` is a
+    symlink into ``<repo>/blobs/<hash>``.
+    """
+    staging = write_bf16_original(dest / "_staging", tensors)
+    snapshot = dest / "snapshots" / ("c" * 40)
+    blobs = dest / "blobs"
+    snapshot.mkdir(parents=True)
+    blobs.mkdir(parents=True)
+    for path in sorted(staging.iterdir()):
+        if path.suffix == ".safetensors":
+            blob = blobs / f"{path.stem}.blob"
+            blob.write_bytes(path.read_bytes())
+            (snapshot / path.name).symlink_to(blob)
+        else:
+            (snapshot / path.name).write_bytes(path.read_bytes())
+    return snapshot
+
+
+def test_equal_pair_exits_0_and_records_every_matrix(tmp_path, pair):
+    df11, bf16, _ = pair
+    out = tmp_path / "out"
+    assert verify(df11, bf16, out, key=KEY) == 0
+    results = [json.loads(p.read_text()) for p in sorted((out / "groups").glob("*.json"))]
+    assert [len(r["matrices"]) for r in results] == [2, 2, 2]
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["compared"] == 6
+    assert summary["extras_compared"] == 1
+
+
+def test_one_flipped_bit_exits_1(tmp_path, pair):
+    df11, _, originals = pair
+    bad = dict(originals)
+    flipped = bad["blocks.1.k.weight"].copy()
+    flipped.flat[17] ^= 0x0001
+    bad["blocks.1.k.weight"] = flipped
+    out = tmp_path / "out"
+    assert verify(df11, write_bf16_original(tmp_path / "bad", bad), out, key=KEY) == 1
+    mismatch = [
+        m
+        for m in json.loads((out / "groups" / "blocks.1.json").read_text())["matrices"]
+        if not m["equal"]
+    ]
+    assert [(m["name"], m["first_mismatch_index"]) for m in mismatch] == [("blocks.1.k.weight", 17)]
+
+
+def test_flipped_extra_exits_1(tmp_path, pair):
+    df11, _, originals = pair
+    bad = {**originals, "norm.weight": NORM ^ np.uint16(1)}
+    assert verify(df11, write_bf16_original(tmp_path / "bad", bad), tmp_path / "out", key=KEY) == 1
+
+
+def test_an_extra_size_mismatch_is_an_error_not_a_mismatch(tmp_path, pair):
+    # Bug caught: an extra whose element count differs from its same-named original goes through
+    # `np.array_equal` (False for mismatched shapes) and is counted as a bit mismatch (exit 1)
+    # instead of the mapping/format problem it actually is (exit 2), same bug as `_compare`'s
+    # matrix-size check above but on the extras path.
+    df11, _, originals = pair
+    bad = dict(originals)
+    bad["norm.weight"] = np.concatenate([NORM, NORM])
+    assert verify(df11, write_bf16_original(tmp_path / "bad", bad), tmp_path / "out", key=KEY) == 2
+
+
+def test_verify_with_an_empty_groups_list_is_an_error(tmp_path, pair):
+    # Bug caught: `groups or ckpt.groups` treats `[]` the same as `None` (falls back to every
+    # group) while `groups is None` (used to gate the coverage check) is False for `[]`, so an
+    # empty list silently runs the full checkpoint with the coverage check disabled.
+    df11, bf16, _ = pair
+    assert verify(df11, bf16, tmp_path / "out", key=KEY, groups=[]) == 2
+
+
+def test_a_size_mismatch_is_an_error_not_a_mismatch(tmp_path, pair):
+    # Bug caught: treating a size mismatch (a mapping/format problem) as `equal=False` reports it
+    # as a bit mismatch (exit 1) instead of the tool error it actually is (exit 2).
+    df11, _, originals = pair
+    bad = dict(originals)
+    bad["blocks.1.k.weight"] = bad["blocks.1.k.weight"].reshape(-1)[:-1]
+    assert verify(df11, write_bf16_original(tmp_path / "bad", bad), tmp_path / "out", key=KEY) == 2
+
+
+def test_extra_with_a_non_bf16_dtype_and_a_same_named_original_is_an_error(tmp_path, pair):
+    # Bug caught: silently skipping an extra whose dtype isn't BF16 lets a mismatched-dtype extra
+    # count as "covered" even though it was never bit-compared against its original.
+    df11, bf16, _ = pair
+    mx.save_safetensors(
+        str(df11 / "model.safetensors"), {"norm.weight": mx.zeros((1,), mx.float32)}
+    )
+    assert verify(df11, bf16, tmp_path / "out", key=KEY) == 2
+
+
+def test_extra_without_a_matching_original_does_not_block_success(tmp_path):
+    rng = np.random.default_rng(11)
+    mats = {"blocks.0": [random_bf16(rng, (4, 4)), random_bf16(rng, (4, 4))]}
+    df11 = write_checkpoint(
+        tmp_path / "df11",
+        groups=mats,
+        pattern=r"blocks\.\d+",
+        sub_paths=("q", "k"),
+        extras={"norm.weight": NORM, "scale.weight": np.array([0x3F80], np.uint16)},
+    )
+    q, k = mats["blocks.0"]
+    originals = {"norm.weight": NORM, "blocks.0.q.weight": q, "blocks.0.k.weight": k}
+    bf16 = write_bf16_original(tmp_path / "bf16", originals)
+    out = tmp_path / "out"
+    assert verify(df11, bf16, out, key=KEY) == 0
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["extras_compared"] == 1
+
+
+def test_original_without_a_group_is_a_coverage_failure_unless_ignored(tmp_path, pair):
+    df11, _, originals = pair
+    more = write_bf16_original(
+        tmp_path / "more", {**originals, "lm_head.weight": np.zeros((2, 2), np.uint16)}
+    )
+    assert verify(df11, more, tmp_path / "o1", key=KEY) == 2
+    assert verify(df11, more, tmp_path / "o2", key=KEY, ignore_originals=("lm_head.weight",)) == 0
+
+
+def test_missing_original_is_a_coverage_failure(tmp_path, pair):
+    df11, _, originals = pair
+    fewer = write_bf16_original(
+        tmp_path / "less", {k: v for k, v in originals.items() if k != "blocks.2.q.weight"}
+    )
+    assert verify(df11, fewer, tmp_path / "out", key=KEY) == 2
+
+
+def test_non_bf16_original_is_an_error_not_a_mismatch(tmp_path, pair):
+    df11, _, originals = pair
+    f32 = write_bf16_original(tmp_path / "f32", originals, dtype=mx.float32)
+    assert verify(df11, f32, tmp_path / "out", key=KEY) == 2
+
+
+def test_truncated_original_shard_is_an_error_not_a_mismatch(tmp_path, pair):
+    df11, bf16, _ = pair
+    shard = bf16 / "model-00001-of-00002.safetensors"
+    shard.write_bytes(shard.read_bytes()[:-20])
+    assert verify(df11, bf16, tmp_path / "out", key=KEY) == 2
+    # The first group with an original in the truncated shard is the one that fails.
+    error = _summary(tmp_path / "out")["error"]
+    assert error.startswith("blocks.0: cannot load originals from model-00001-of-00002"), error
+
+
+def test_shard_path_escaping_the_directory_is_refused(tmp_path, pair):
+    df11, bf16, _ = pair
+    index = bf16 / "model.safetensors.index.json"
+    data = json.loads(index.read_text())
+    data["weight_map"]["blocks.0.q.weight"] = "../elsewhere.safetensors"
+    index.write_text(json.dumps(data))
+    assert verify(df11, bf16, tmp_path / "out", key=KEY) == 2
+    assert "unsafe shard name '../elsewhere.safetensors'" in _summary(tmp_path / "out")["error"]
+
+
+def test_hf_cache_shard_symlinks_into_a_sibling_blobs_dir_are_followed(tmp_path, pair):
+    # Bug caught: rejecting a shard whose resolved parent differs from `root` (the real HF cache
+    # layout, where every shard is a symlink into ../../blobs/<hash>) instead of following it.
+    df11, _, originals = pair
+    hf_root = _hf_symlinked_layout(tmp_path / "hf", originals)
+    assert verify(df11, hf_root, tmp_path / "out", key=KEY) == 0
+
+
+def test_resume_skips_only_results_with_the_same_key(tmp_path, pair, monkeypatch):
+    df11, bf16, _ = pair
+    out = tmp_path / "out"
+    assert verify(df11, bf16, out, key=KEY) == 0
+    calls = _count_decodes(monkeypatch)
+    assert verify(df11, bf16, out, key=KEY) == 0
+    assert calls == []
+    assert verify(df11, bf16, out, key={**KEY, "source": "changed"}) == 0
+    assert sorted(calls) == ["blocks.0", "blocks.1", "blocks.2"]
+
+
+def test_resumed_mismatch_stays_a_mismatch(tmp_path, pair, monkeypatch):
+    df11, _, originals = pair
+    bad = dict(originals)
+    bad["blocks.0.q.weight"] = bad["blocks.0.q.weight"] ^ np.uint16(0x8000)
+    bf16 = write_bf16_original(tmp_path / "bad", bad)
+    out = tmp_path / "out"
+    assert verify(df11, bf16, out, key=KEY) == 1
+    calls = _count_decodes(monkeypatch)
+    assert verify(df11, bf16, out, key=KEY) == 1
+    assert calls == []
+
+
+def test_structural_results_are_never_reused_as_parity(tmp_path, pair):
+    df11, _, originals = pair
+    out = tmp_path / "out"
+    assert verify(df11, None, out, key=SKEY) == 0
+    bad = {k: (v ^ np.uint16(1) if k.endswith(".q.weight") else v) for k, v in originals.items()}
+    assert verify(df11, write_bf16_original(tmp_path / "bad", bad), out, key=KEY) == 1
+
+
+def test_unparsable_result_file_is_recomputed(tmp_path, pair, monkeypatch):
+    df11, bf16, _ = pair
+    out = tmp_path / "out"
+    verify(df11, bf16, out, key=KEY)
+    (out / "groups" / "blocks.1.json").write_text("{truncated")
+    calls = _count_decodes(monkeypatch)
+    assert verify(df11, bf16, out, key=KEY) == 0
+    assert calls == ["blocks.1"]
+
+
+def test_unknown_revision_disables_resume(tmp_path, pair, monkeypatch):
+    df11, bf16, _ = pair
+    out = tmp_path / "out"
+    key = {**KEY, "df11_revision": "unknown"}
+    assert verify(df11, bf16, out, key=key) == 0
+    calls = _count_decodes(monkeypatch)
+    verify(df11, bf16, out, key=key)
+    assert len(calls) == 3
+
+
+def test_structural_only_passes_on_a_good_checkpoint_and_fails_on_a_corrupt_one(tmp_path, pair):
+    df11, _, _ = pair
+    assert verify(df11, None, tmp_path / "o1", key=SKEY) == 0
+    shard = df11 / "blocks_1.safetensors"
+    data = mx.load(str(shard))
+    mx.eval(data)
+    gaps = np.array(data["blocks.1.gaps"])
+    gaps[0] ^= 0xFF  # corrupt the first thread gaps -> continuity / structure breaks
+    data["blocks.1.gaps"] = mx.array(gaps)
+    mx.save_safetensors(str(shard), data)
+    assert verify(df11, None, tmp_path / "o2", key=SKEY) == 2
+    assert _summary(tmp_path / "o2")["error"].startswith("blocks.1: ")
+
+
+def test_checkpoint_with_zero_groups_is_an_error_in_both_modes(tmp_path):
+    root = tmp_path / "empty"
+    root.mkdir()
+    config = {
+        "dfloat11_config": {
+            "version": "0.5.0",
+            "threads_per_block": [512],
+            "bytes_per_thread": 8,
+            "pattern_dict": {r"blocks\.\d+": ["q", "k"]},
+        }
+    }
+    (root / "config.json").write_text(json.dumps(config))
+    assert verify(root, None, tmp_path / "o1", key=SKEY) == 2
+    assert verify(root, root, tmp_path / "o2", key=KEY) == 2
+
+
+def test_summary_json_reports_exit_code_2_on_an_early_error(tmp_path, pair):
+    # Bug caught: only writing summary.json on the success path leaves a stale (or absent)
+    # summary.json behind after a run that errors early, misleading anything reading it.
+    df11, bf16, _ = pair
+    out = tmp_path / "out"
+    assert verify(df11, bf16, out, key=KEY) == 0
+    assert verify(df11, bf16, out, key=KEY, groups=["nope"]) == 2
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["exit_code"] == 2
+    assert "error" in summary
+
+
+def test_success_summary_records_partial_and_selected_groups(tmp_path, pair):
+    df11, bf16, _ = pair
+    out = tmp_path / "out"
+    assert verify(df11, bf16, out, key=KEY, groups=["blocks.0", "blocks.1"]) == 0
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["partial"] is True
+    assert summary["selected_groups"] == ["blocks.0", "blocks.1"]
+
+
+@pytest.mark.parametrize(
+    "edited",
+    ["src/mlx_dfloat/sub/deep.py", "scripts/_watchdog.py", "scripts/verify_checkpoint.py"],
+)
+def test_source_hash_covers_package_watchdog_and_script(tmp_path, monkeypatch, edited):
+    # Bug caught: hashing only src/mlx_dfloat/*.py (top level) lets an edit to a subpackage,
+    # verify_checkpoint.py or _watchdog.py go unnoticed, so a stale resumed result is reused.
+    # Runs on a throwaway copy: the tracked files are never touched.
+    for rel in ["src/mlx_dfloat/format.py", *[e for e in [edited] if e.endswith(".py")]]:
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(f"# {rel}\n")
+    for rel in ["scripts/_watchdog.py", "scripts/verify_checkpoint.py"]:
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(f"# {rel}\n")
+    monkeypatch.setattr(vc, "_SRC", tmp_path / "src" / "mlx_dfloat")
+    monkeypatch.setattr(vc, "_SCRIPTS", tmp_path / "scripts")
+    monkeypatch.setattr(vc, "_REPO", tmp_path)
+    before = vc.source_hash()
+    (tmp_path / edited).write_text("# edited\n")
+    assert vc.source_hash() != before
+
+
+def test_resume_recomputes_when_stored_matrix_names_do_not_match_the_group(
+    tmp_path, pair, monkeypatch
+):
+    # Bug caught: trusting a stored result whose matrix names no longer match the group's current
+    # matrix_names (e.g. after a pattern_dict rename) silently reuses data for the wrong matrices.
+    df11, bf16, _ = pair
+    out = tmp_path / "out"
+    assert verify(df11, bf16, out, key=KEY) == 0
+    path = out / "groups" / "blocks.1.json"
+    stored = json.loads(path.read_text())
+    stored["matrices"][0]["name"] = "blocks.1.renamed.weight"
+    path.write_text(json.dumps(stored))
+    calls = _count_decodes(monkeypatch)
+    assert verify(df11, bf16, out, key=KEY) == 0
+    assert calls == ["blocks.1"]
+
+
+def test_resumed_run_still_detects_a_missing_original(tmp_path, pair, monkeypatch):
+    # Bug caught: not persisting the per-group `missing` list means a resumed run (which skips
+    # decoding) forgets the coverage gap the first run found, and wrongly reports success.
+    df11, _, originals = pair
+    fewer = write_bf16_original(
+        tmp_path / "less", {k: v for k, v in originals.items() if k != "blocks.2.q.weight"}
+    )
+    out = tmp_path / "out"
+    assert verify(df11, fewer, out, key=KEY) == 2
+    calls = _count_decodes(monkeypatch)
+    assert verify(df11, fewer, out, key=KEY) == 2
+    assert calls == []
+    summary = json.loads((out / "summary.json").read_text())
+    assert "blocks.2.q.weight" in summary["missing_originals"]
+
+
+def test_a_mismatch_and_a_coverage_gap_together_the_mismatch_wins(tmp_path, pair):
+    df11, _, originals = pair
+    bad = dict(originals)
+    bad["blocks.0.q.weight"] = bad["blocks.0.q.weight"] ^ np.uint16(0x8000)
+    del bad["blocks.2.q.weight"]
+    bf16 = write_bf16_original(tmp_path / "bad", bad)
+    assert verify(df11, bf16, tmp_path / "out", key=KEY) == 1
+
+
+def test_cli_runs_the_real_watchdog_and_cleans_up_its_thread(tmp_path, pair):
+    df11, bf16, _ = pair
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "abort.json").write_text('{"reason": "stale"}')
+    baseline = threading.active_count()
+    argv = [
+        "--df11",
+        str(df11),
+        "--bf16",
+        str(bf16),
+        "--out",
+        str(out),
+        "--df11-revision",
+        "a" * 40,
+        "--bf16-revision",
+        "b" * 40,
+        "--wall-budget",
+        "3600",
+    ]
+    assert main(argv) == 0
+    assert threading.active_count() == baseline
+    assert (out / "abort.previous.json").read_text() == '{"reason": "stale"}'
+    assert not (out / "abort.json").exists()
+
+
+def test_main_returns_2_on_an_unexpected_exception(tmp_path, pair, monkeypatch):
+    df11, bf16, _ = pair
+
+    def _boom(**_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(vc, "run_key", _boom)
+    argv = [
+        "--df11",
+        str(df11),
+        "--bf16",
+        str(bf16),
+        "--out",
+        str(tmp_path / "o"),
+        "--df11-revision",
+        "a" * 40,
+        "--bf16-revision",
+        "b" * 40,
+        "--no-watchdog",
+    ]
+    assert main(argv) == 2
+
+
+def test_unknown_group_name_via_cli_exits_2(tmp_path, pair):
+    df11, bf16, _ = pair
+    argv = [
+        "--df11",
+        str(df11),
+        "--bf16",
+        str(bf16),
+        "--out",
+        str(tmp_path / "o"),
+        "--groups",
+        "nope",
+        "--df11-revision",
+        "a" * 40,
+        "--bf16-revision",
+        "b" * 40,
+        "--no-watchdog",
+    ]
+    assert main(argv) == 2
+
+
+def test_run_key_hashes_sources_and_records_mode():
+    key = run_key(df11_revision="r1", bf16_revision="r2", mode="parity")
+    assert key["mode"] == "parity"
+    assert len(key["source"]) == 64
+
+
+def test_index_without_weight_map_is_an_error_with_a_summary(tmp_path, pair):
+    # Bug caught: json.loads(...)["weight_map"] raising KeyError past verify's except tuple exits
+    # 2 through main's catch-all with NO summary.json (the previous one was already moved aside).
+    df11, bf16, _ = pair
+    (bf16 / "model.safetensors.index.json").write_text(json.dumps({"metadata": {}}))
+    out = tmp_path / "out"
+    assert verify(df11, bf16, out, key=KEY) == 2
+    assert "weight_map" in _summary(out)["error"]
+
+
+@pytest.mark.parametrize(
+    "index", [[1, 2], {"weight_map": ["a"]}, {"weight_map": {"blocks.0.q.weight": 7}}]
+)
+def test_malformed_index_shapes_are_errors_with_a_summary(tmp_path, pair, index):
+    df11, bf16, _ = pair
+    (bf16 / "model.safetensors.index.json").write_text(json.dumps(index))
+    out = tmp_path / "out"
+    assert verify(df11, bf16, out, key=KEY) == 2
+    assert _summary(out)["exit_code"] == 2
+
+
+def test_an_error_after_a_mismatch_keeps_exit_2_but_records_the_mismatch(tmp_path, pair):
+    # Bug caught: the error summary for a later group dropping `mismatched`/`compared`, so a real
+    # bit mismatch already found (the kill signal) is visible only in that group's own JSON.
+    df11, _, originals = pair
+    bad = dict(originals)
+    bad["blocks.0.q.weight"] = bad["blocks.0.q.weight"] ^ np.uint16(0x8000)
+    bf16 = write_bf16_original(tmp_path / "bad", bad)
+    _corrupt_gaps(df11, "blocks.1")
+    out = tmp_path / "out"
+    assert verify(df11, bf16, out, key=KEY) == 2
+    summary = _summary(out)
+    assert summary["error"].startswith("blocks.1: ")
+    assert summary["mismatched"] == 1
+    assert summary["compared"] == 2
+
+
+class _StopProbe:
+    """A watchdog stand-in that records whether summary.json already existed when stopped."""
+
+    def __init__(self, out):
+        self._out = out
+        self.summary_existed_at_stop = None
+
+    def stop(self):
+        self.summary_existed_at_stop = (self._out / "summary.json").exists()
+
+
+@pytest.mark.parametrize("groups", [None, ["nope"]])
+def test_the_watchdog_is_stopped_before_the_summary_is_written(tmp_path, pair, groups):
+    # Bug caught: stopping the watchdog only after verify() returns leaves a window in which a
+    # verdict fires after summary.json already says the run passed (or failed) cleanly.
+    df11, bf16, _ = pair
+    out = tmp_path / "out"
+    probe = _StopProbe(out)
+    verify(df11, bf16, out, key=KEY, groups=groups, watchdog=probe)
+    assert probe.summary_existed_at_stop is False
+    assert (out / "summary.json").exists()
+
+
+def test_summary_records_the_installed_memory_caps(tmp_path, pair, monkeypatch):
+    # Bug caught: a cap that failed to install (see install_memory_caps) leaves no trace in the
+    # run's own record.
+    monkeypatch.setattr(vc, "install_memory_caps", lambda: (7, 9))
+    df11, bf16, _ = pair
+    out = tmp_path / "out"
+    assert verify(df11, bf16, out, key=KEY) == 0
+    assert _summary(out)["memory_caps_gb"] == [7, 9]
+    assert verify(df11, bf16, out, key=KEY, groups=["nope"]) == 2
+    assert _summary(out)["memory_caps_gb"] == [7, 9]

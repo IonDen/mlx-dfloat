@@ -1,0 +1,19 @@
+{
+  "df11_repo": "DFloat11/Qwen3-4B-DF11",
+  "df11_revision": "618eddad93ca71dacf56cef22e69c5968357dd6e",
+  "df11_file": "model_layers_0.safetensors",
+  "bf16_repo": "Qwen/Qwen3-4B",
+  "bf16_revision": "1cfa9a7208912126459214e8b04321603b3df60c",
+  "bf16_file": "model-00001-of-00003.safetensors",
+  "group": "model.layers.0",
+  "matrix": "model.layers.0.self_attn.q_proj.weight",
+  "n_blocks": 4,
+  "n_elements": 46096,
+  "n_bytes": 16392,
+  "max_code_length": 27,
+  "lut_rows": 5,
+  "max_gap": 11,
+  "npz_sha256": "48f3a1fed75736441184fe10547d505ebea7de94621eee706ff3363c8cdf667a",
+  "license": "Qwen3-4B is Apache-2.0; the DFloat11 checkpoint is derived from it",
+  "note": "4 thread-blocks + 8 lookahead bytes (load-bearing); output_positions[4] = n_elements"
+}
