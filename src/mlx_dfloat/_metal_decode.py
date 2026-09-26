@@ -12,8 +12,21 @@ from mlx_dfloat.format import GroupArrays, MxGroup
 THREADS = 512
 CAP = 16192
 _SCRATCH_BYTES = 4 * (16 + 16 + 1 + 16)
-THREADGROUP_BYTES_STAGED = 2 * CAP + _SCRATCH_BYTES  # 32,580 < 32,768
-THREADGROUP_BYTES_DIRECT = 2 + _SCRATCH_BYTES  # 198
+
+
+def _metal_static_bytes(declared: int) -> int:
+    """The static threadgroup memory Metal reserves for ``declared`` bytes of arrays.
+
+    Metal reports ``staticThreadgroupMemoryLength`` at 16-byte granularity (measured with
+    standalone compiles: 196 -> 208, 192 -> 192; mlx 0.32.2, macOS 27.0, M1 Max).
+    """
+    return -(-declared // 16) * 16
+
+
+THREADGROUP_BYTES_STAGED = _metal_static_bytes(
+    2 * CAP + _SCRATCH_BYTES
+)  # 32,580 -> 32,592 < 32,768
+THREADGROUP_BYTES_DIRECT = _metal_static_bytes(2 + _SCRATCH_BYTES)  # 198 -> 208
 
 _KERNEL: Any | None = None
 # (force_direct, poison_buf, unguarded_gap_read) -> warmed
