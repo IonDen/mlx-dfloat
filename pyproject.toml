@@ -47,9 +47,14 @@ test = [
     "hypothesis>=6.130",
     "dahuffman==0.4.2",
     "psutil>=6",
+    "pyyaml>=6",
 ]
 typecheck = ["mypy>=1.13"]
 lint = ["ruff>=0.7"]
+bench = [
+  "mflux>=0.20,<0.21; sys_platform == 'darwin'",
+  "pyobjc-framework-Metal>=10; sys_platform == 'darwin'",
+]
 dev = [
   { include-group = "test" },
   { include-group = "typecheck" },
@@ -126,15 +131,27 @@ filterwarnings = [
   'ignore::DeprecationWarning:mlx\..*',
 ]
 markers = [
-  "slow: real-weights decode or Metal kernel test (opt in with --run-slow)",
+  "slow: real-weights decode (opt in with --run-slow)",
   "network: test requires network access (opt in with --run-network)",
+  "metal: dispatches the Metal decode kernel (runs on Apple Silicon, skips elsewhere)",
 ]
 
 [tool.coverage.run]
 branch = true
 source = ["mlx_dfloat", "scripts"]
 parallel = true
-omit = ["src/mlx_dfloat/_version.py"]
+omit = [
+  "src/mlx_dfloat/_version.py",
+  # Measurement glue that needs mflux, PyObjC or a GPU run; its pure logic is in scripts/_bench_common.py and
+  # scripts/_flux_rig.py, which are unit-tested.
+  "scripts/bench_decode_kernel.py",
+  "scripts/bench_flux_step.py",
+  "scripts/bench_control_validation.py",
+  "scripts/encode_prompt.py",
+  "scripts/regpressure.py",
+  "scripts/ci_metal_probe.py",
+  "scripts/flux_rig_smoke.py",
+]
 
 [tool.coverage.report]
 exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "@overload", "raise NotImplementedError"]
