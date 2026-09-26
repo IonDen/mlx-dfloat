@@ -8,11 +8,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+import mlx.core as mx
 import numpy as np
 import numpy.typing as npt
 
 from mlx_dfloat._safetensors import TensorInfo, read_array, read_header, short_repr
-from mlx_dfloat.errors import DFloatFormatError
+from mlx_dfloat.errors import DFloatBackendError, DFloatFormatError
 
 SUPPORTED_VERSIONS: frozenset[str] = frozenset({"0.2.0", "0.3.1", "0.3.2", "0.5.0"})
 THREADS_PER_BLOCK = 512
@@ -35,6 +36,7 @@ _PATTERN_TOKEN = re.compile(r"\\[.dw]|[A-Za-z0-9_.\-\[\]()|*+?]")
 MAX_UNBOUNDED_QUANTIFIERS = 2
 MAX_OPTIONAL_QUANTIFIERS = 2
 MAX_ALTERNATIONS = 4
+MAX_ARRAY_ELEMENTS = 2**31 - 1  # Metal shape buffers and grid sizes are int32
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -171,6 +173,29 @@ def n_blocks_for(n_bytes: int) -> int:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class MxGroup:
+    """One compressed group as evaluated MLX arrays, plus its host-side metadata.
+
+    A decode backend (the Metal kernel, the reference-decode capability) reads this metadata
+    without a device sync.
+    """
+
+    name: str
+    encoded_exponent: mx.array  # uint8[n_bytes]
+    sign_mantissa: mx.array  # uint8[n_elements]
+    luts: mx.array  # uint8[n_luts, 256]
+    gaps: mx.array  # uint8, as stored (320 * n_blocks bytes)
+    positions: mx.array  # uint32[n_launch + 1], as stored
+    intervals: npt.NDArray[np.int64]  # host: np.diff(positions), for path counting without a sync
+    n_elements: int
+    n_bytes: int
+    n_luts: int
+    n_launch: int  # len(positions) - 1
+    max_elements_per_block: int
+    split_positions: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class GroupArrays:
     """The six arrays stored for one compressed group, in decoder-ready dtypes."""
 
@@ -200,6 +225,43 @@ class GroupArrays:
     def n_threads(self) -> int:
         """Total decode threads (512 per block)."""
         return self.n_blocks * THREADS_PER_BLOCK
+
+    def to_mx(self, *, name: str = "<group>") -> MxGroup:
+        """Validate, copy into MLX arrays, evaluate, and compute host metadata once.
+
+        Raises:
+            DFloatFormatError: The arrays fail the structural checks in ``validate_group_arrays``.
+            DFloatBackendError: The byte or element count exceeds the int32 bound the Metal
+                backend's shape buffers and grid sizes use.
+        """
+        validate_group_arrays(self, name=name)
+        for label, size in (("bytes", self.n_bytes), ("elements", self.n_elements)):
+            if size > MAX_ARRAY_ELEMENTS:
+                raise DFloatBackendError(
+                    f"{name}: {size} {label} exceeds 2^31-1; the Metal backend uses int32 sizes"
+                )
+        positions = self.output_positions.astype(np.uint32)
+        arrays = {
+            "encoded_exponent": mx.array(np.ascontiguousarray(self.encoded_exponent)),
+            "sign_mantissa": mx.array(np.ascontiguousarray(self.sign_mantissa)),
+            "luts": mx.array(np.ascontiguousarray(self.luts)),
+            "gaps": mx.array(np.ascontiguousarray(self.gaps)),
+            "positions": mx.array(positions),
+        }
+        mx.eval(*arrays.values())
+        positions_i64 = positions.astype(np.int64)
+        intervals = np.diff(positions_i64)
+        return MxGroup(
+            name=name,
+            **arrays,
+            intervals=intervals,
+            n_elements=self.n_elements,
+            n_bytes=self.n_bytes,
+            n_luts=int(self.luts.shape[0]),
+            n_launch=int(positions.size - 1),
+            max_elements_per_block=int(intervals.max()),
+            split_positions=tuple(int(s) for s in self.split_positions),
+        )
 
 
 def validate_group_arrays(arrays: GroupArrays, *, name: str) -> None:
@@ -317,6 +379,11 @@ class DF11Group:
         )
         validate_group_arrays(arrays, name=self.name)
         return arrays
+
+
+def load_group_mx(group: DF11Group) -> MxGroup:
+    """Load one group through the bounds-checked reader and hand it to the backends as MLX arrays."""
+    return group.load().to_mx(name=group.name)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

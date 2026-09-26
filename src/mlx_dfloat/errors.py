@@ -13,4 +13,8 @@ class DFloatResourceError(DFloatError, MemoryError):
     """A decode would need more memory than the configured budget allows."""
 
 
-__all__ = ["DFloatError", "DFloatFormatError", "DFloatResourceError"]
+class DFloatBackendError(DFloatError):
+    """A decode backend is unavailable here or its kernel cannot run."""
+
+
+__all__ = ["DFloatBackendError", "DFloatError", "DFloatFormatError", "DFloatResourceError"]
