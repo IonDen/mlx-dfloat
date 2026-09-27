@@ -144,6 +144,8 @@ def test_seam_refuses_a_provider_dict_that_does_not_match_the_block():
 
 
 def test_seam_refuses_an_unknown_eval_policy():
+    # Bug caught: a typo'd policy string (e.g. "depth3") silently falling through with no
+    # evaluation at all, instead of being refused before the first block runs.
     tf = FakeSeamTransformer(Recorder(), n_double=1, n_single=0)
     shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
     with pytest.raises(DFloatIntegrationError, match="depth3"):
@@ -244,14 +246,27 @@ def test_none_policy_never_evaluates(monkeypatch):
 
 def test_seam_refuses_a_weight_of_the_right_size_but_wrong_shape():
     # Bug caught: a transposed (in, out) weight reaching the matmul, which raises a shape error
-    # naming nothing useful, or silently computing garbage when in == out.
+    # naming nothing useful, or silently computing garbage when in == out. The provider here does
+    # not self-validate (unlike ResidentProvider), so only the seam's own guard can catch this.
+    class WrongShape:
+        launches = 0
+        launching = False
+        policies = EVAL_POLICIES
+
+        def weights_for(self, block_name, shapes):
+            weights = {k: mx.zeros(v, dtype=mx.bfloat16) for k, v in shapes.items()}
+            weights["norm1.linear"] = mx.zeros((4, 24), dtype=mx.bfloat16)  # (24, 4) expected
+            return weights
+
+        def verify(self):
+            pass
+
+        def reset(self):
+            pass
+
     tf = FakeSeamTransformer(Recorder(), n_double=1, n_single=0)
     shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
-    dicts = resident_dicts(shapes)
-    dicts["transformer_blocks.0"]["norm1.linear"] = mx.zeros(
-        (4, 24), dtype=mx.bfloat16
-    )  # (24, 4) expected
-    tf.attach(ResidentProvider(dicts), shapes)
+    tf.attach(WrongShape(), shapes)
     with pytest.raises(DFloatIntegrationError, match=r"norm1\.linear: weight has shape \(4, 24\)"):
         tf(*inputs())
     assert all(w.size == 0 for w in all_block_weights(tf))
