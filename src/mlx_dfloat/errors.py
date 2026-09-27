@@ -17,4 +17,14 @@ class DFloatBackendError(DFloatError):
     """A decode backend is unavailable here or its kernel cannot run."""
 
 
-__all__ = ["DFloatBackendError", "DFloatError", "DFloatFormatError", "DFloatResourceError"]
+class DFloatIntegrationError(DFloatError, RuntimeError):
+    """A block-seam or name-map invariant failed: a name outside the map, a missing or extra layer, a shape mismatch."""
+
+
+__all__ = [
+    "DFloatBackendError",
+    "DFloatError",
+    "DFloatFormatError",
+    "DFloatIntegrationError",
+    "DFloatResourceError",
+]

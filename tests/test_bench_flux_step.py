@@ -642,10 +642,10 @@ def _fake_rig(rng, *, n_double=2, n_single=2):
     """A fake transformer's shapes, one real DF11 group per block, a ckpt-shaped view of their names."""
     from types import SimpleNamespace
 
-    from tests.test_flux_rig import FakeTransformer, Recorder, _df11_groups
+    from tests._flux_fakes import FakeTransformer, Recorder, df11_groups
 
     shapes = install_placeholders(FakeTransformer(Recorder(), n_double=n_double, n_single=n_single))
-    groups, names, source = _df11_groups(shapes, rng)
+    groups, names, source = df11_groups(shapes, rng)
     ckpt = SimpleNamespace(groups={n: SimpleNamespace(matrix_names=names[n]) for n in names})
     return ckpt, groups, shapes, source
 
