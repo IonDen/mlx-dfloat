@@ -651,6 +651,45 @@ def test_metal_on_a_corrupt_group_with_bf16_is_exit_2_not_1(pair, tmp_path):
     assert summary["mismatched"] == 0
 
 
+@pytest.mark.parametrize("exc", [RuntimeError("boom"), ValueError("zip() argument 2 is shorter")])
+def test_a_runtime_or_value_error_inside_a_group_decode_is_exit_2_with_a_summary(
+    pair, tmp_path, monkeypatch, exc
+):
+    # Bug caught: the group loop catching only DFloatError and VerifyError, so a Metal command-buffer
+    # failure at mx.eval (RuntimeError) or a zip(strict=True) mismatch (ValueError) escapes to main's
+    # catch-all: exit 2, but no summary.json, and the previous one is already moved aside.
+    monkeypatch.setattr(vc, "available_backends", lambda: ("reference", "metal"))
+
+    def boom(group, **kw):
+        raise exc
+
+    monkeypatch.setattr(vc, "_decode_with_metal", boom)
+    out = tmp_path / "o"
+    assert main(_metal_argv(pair[0], out)) == 2
+    summary = _summary(out)
+    assert summary["exit_code"] == 2
+    assert summary["error"] == f"blocks.0: {exc}"
+
+
+def test_main_installs_the_memory_caps_before_probing_the_metal_backend(
+    pair, tmp_path, monkeypatch
+):
+    # Bug caught: available_backends() (the kernel warm-up, the first GPU work of the process) running
+    # before install_memory_caps(), so the warm-up dispatches with no wired cap in place.
+    order = []
+    monkeypatch.setattr(vc, "install_memory_caps", lambda: order.append("caps") or (7, 9))
+    monkeypatch.setattr(
+        vc, "available_backends", lambda: order.append("backends") or ("reference", "metal")
+    )
+    monkeypatch.setattr(
+        vc,
+        "_decode_with_metal",
+        lambda group, **kw: {**vc.decode_matrices(group), "__meta__": np.array([100, 0])},
+    )
+    assert main(_metal_argv(pair[0], tmp_path / "o")) == 0
+    assert order[:2] == ["caps", "backends"]
+
+
 def test_metal_absent_is_exit_2(pair, tmp_path, monkeypatch, capsys):
     # Bug caught: --decoder metal on a machine without the kernel quietly running something else.
     monkeypatch.setattr(vc, "available_backends", lambda: ("reference",))
@@ -676,7 +715,7 @@ def test_rate_from_converts_gbps_and_guards_each_dispatch(pair, tmp_path, gbps, 
     # Bug caught: --rate-from read in the wrong unit (GB/s taken as B/s, or 1e6 for 1e9), or the
     # guard's refusal escaping as a crash with no summary.
     out = tmp_path / "o"
-    rate = _rate_file(tmp_path, {"gbps": gbps, "other": "ignored"})
+    rate = _rate_file(tmp_path, {"gbps": gbps, "exit_code": 0, "other": "ignored"})
     assert main(_metal_argv(pair[0], out, "--rate-from", str(rate))) == code
     summary = _summary(out)
     assert summary["exit_code"] == code
@@ -685,7 +724,16 @@ def test_rate_from_converts_gbps_and_guards_each_dispatch(pair, tmp_path, gbps, 
         assert "0.25" in summary["error"]
 
 
-@pytest.mark.parametrize("payload", [{}, {"gbps": "fast"}, {"gbps": 0}, {"gbps": -1.0}, [1.0]])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"exit_code": 0},
+        {"gbps": "fast", "exit_code": 0},
+        {"gbps": 0, "exit_code": 0},
+        {"gbps": -1.0, "exit_code": 0},
+        [1.0],
+    ],
+)
 def test_rate_from_without_a_positive_gbps_is_exit_2(pair, tmp_path, monkeypatch, payload, capsys):
     # Bug caught: a bench JSON with no usable rate silently disabling the per-dispatch guard.
     monkeypatch.setattr(vc, "available_backends", lambda: ("reference", "metal"))
@@ -693,6 +741,20 @@ def test_rate_from_without_a_positive_gbps_is_exit_2(pair, tmp_path, monkeypatch
     rate = _rate_file(tmp_path, payload)
     assert main(_metal_argv(pair[0], out, "--rate-from", str(rate))) == 2
     assert "gbps" in capsys.readouterr().err
+    assert not (out / "summary.json").exists()
+
+
+@pytest.mark.parametrize(
+    "payload", [{"gbps": 10.0, "exit_code": 1}, {"gbps": 10.0, "exit_code": 2}, {"gbps": 10.0}]
+)
+def test_rate_from_refuses_a_bench_that_did_not_pass(pair, tmp_path, monkeypatch, payload, capsys):
+    # Bug caught: a bench JSON whose kernel failed parity (exit 1), errored (exit 2) or never recorded
+    # a verdict sizing the per-dispatch guard with a rate a wrong kernel produced.
+    monkeypatch.setattr(vc, "available_backends", lambda: ("reference", "metal"))
+    out = tmp_path / "o"
+    rate = _rate_file(tmp_path, payload)
+    assert main(_metal_argv(pair[0], out, "--rate-from", str(rate))) == 2
+    assert "exit_code" in capsys.readouterr().err
     assert not (out / "summary.json").exists()
 
 

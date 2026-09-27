@@ -57,6 +57,7 @@ try:
         calibration_rate,
         gbps,
         kill_equivalent_throughput,
+        move_stale_abort_aside,
         per_dispatch_guard,
         projected_bytes,
         provenance,
@@ -332,9 +333,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: unknown or empty --groups: {missing or selected}", file=sys.stderr)
             return 2
         args.out.parent.mkdir(parents=True, exist_ok=True)
-        abort_path = args.out.parent / "abort.json"
-        if abort_path.exists():
-            abort_path.replace(args.out.parent / "abort.previous.json")
+        move_stale_abort_aside(args.out.parent)
         watchdog = Watchdog(
             args.out.parent, ceiling=default_ceiling(), budget=args.wall_budget
         ).start()

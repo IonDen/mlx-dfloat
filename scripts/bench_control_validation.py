@@ -63,6 +63,7 @@ try:
         ResidentProvider,
         WeightProvider,
         build_transformer,
+        decode_resident,
         load_resident_set,
     )
     from scripts._watchdog import Watchdog
@@ -88,7 +89,7 @@ except Exception as exc:  # a broken environment is a tool error (2)
 # bf16 and control, the pair the verdict compares, run back to back.
 MODES: tuple[str, ...] = ("bf16", "control", "df11")
 POLICY = "per-block"
-MAX_DOUBLE, MAX_SINGLE = 19, 38  # FLUX.1's depth
+MAX_DOUBLE, MAX_SINGLE = step_bench.N_DOUBLE, step_bench.N_SINGLE  # FLUX.1's depth
 
 
 # --- pure parts (unit-tested without mflux) ---------------------------------------------------------
@@ -317,24 +318,25 @@ def current_key(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def make_provider(
-    mode: str, ckpt: DF11Checkpoint, resident: Mapping[str, Any], shapes: Mapping[str, Any]
+    mode: str,
+    ckpt: DF11Checkpoint,
+    resident: Mapping[str, Any],
+    shapes: Mapping[str, Any],
+    *,
+    decode: step_bench.Decode | None = None,
 ) -> WeightProvider:
     """The mode's provider.
 
-    ``bf16`` decodes every group once with the Metal backend, evaluating block by block (one lazy
-    eval over all of them would allocate every decode up front), and keeps the dicts resident;
-    ``control`` and ``df11`` are the step bench's providers.
+    ``bf16`` decodes every group once, evaluating block by block (``decode_resident``), and keeps
+    the dicts resident; ``control`` and ``df11`` are the step bench's providers. ``decode`` is the
+    Metal backend by default; tests inject a counting reference decode.
     """
     if mode != "bf16":
-        return step_bench.make_provider(mode, ckpt, resident, shapes)
-    decoder = DF11Provider(resident, {n: ckpt.groups[n].matrix_names for n in shapes})
-    per_block: dict[str, dict[str, mx.array]] = {}
-    for name in shapes:
-        weights = decoder.weights_for(name, shapes[name])
-        mx.eval(weights)
-        per_block[name] = weights
-    decoder.verify()
-    return ResidentProvider(per_block)
+        return step_bench.make_provider(mode, ckpt, resident, shapes, decode=decode)
+    decoder = DF11Provider(
+        resident, {n: ckpt.groups[n].matrix_names for n in shapes}, decode=decode
+    )
+    return ResidentProvider(decode_resident(decoder, dict(shapes)))
 
 
 def run_mode(
@@ -372,6 +374,7 @@ def run_mode(
         warmup=args.warmup,
         steps=args.steps,
         per_step=expected_launches(mode, n_double=args.double, n_single=args.single, steps=1),
+        compressed_loaded=step_bench.compressed_set_loaded(resident, shapes),
         limits_recorded=limits_recorded,
         watchdog=watchdog,
         label=mode,

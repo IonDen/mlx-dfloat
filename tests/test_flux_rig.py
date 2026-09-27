@@ -469,7 +469,6 @@ def test_seam_refuses_a_provider_dict_that_does_not_match_the_block():
     class Partial:
         launches = 0
         launching = False
-        groups_evaluated = True
 
         def weights_for(self, block_name, shapes):
             return {k: mx.zeros(v, dtype=mx.bfloat16) for k, v in list(shapes.items())[:-1]}
@@ -497,7 +496,6 @@ class _Launching:
 
     launches = 0
     launching = True
-    groups_evaluated = True
 
     def weights_for(self, block_name, shapes):
         self.launches += 1
@@ -575,7 +573,6 @@ def test_df11_provider_decodes_each_block_once_into_bit_exact_views():
         return decode_group(group, backend="reference")
 
     provider = DF11Provider(groups, names, decode=counting_decode)
-    assert provider.groups_evaluated is True
     assert provider.launching is True
     tf.attach(provider, shapes, eval_policy="per-block")
     mx.eval(tf(*_inputs()))
@@ -624,6 +621,49 @@ def test_df11_provider_with_the_metal_backend_feeds_the_seam_bit_exact_weights()
     assert all(w.size == 0 for w in _all_block_weights(tf))
 
 
+def test_decode_resident_evaluates_each_block_before_decoding_the_next(monkeypatch):
+    # Bug caught: one lazy eval over every block's decode (all decoded groups allocated at once: the
+    # run-ahead the per-block eval exists to prevent), a block decoded twice, or the deferred status
+    # words never checked.
+    tf = FakeTransformer(Recorder(), n_double=2, n_single=1)
+    shapes = install_placeholders(tf)
+    groups, names, source = _df11_groups(shapes, np.random.default_rng(12))
+    calls, evals = [], []
+
+    def counting_decode(group: MxGroup):
+        calls.append(group.name)
+        return decode_group(group, backend="reference")
+
+    real_eval = rig._eval
+    monkeypatch.setattr(rig, "_eval", lambda x: (evals.append(("eval", len(calls))), real_eval(x)))
+    provider = DF11Provider(groups, names, decode=counting_decode)
+    per_block = rig.decode_resident(provider, shapes)
+    # The k-th eval happens after exactly k decodes: block k is evaluated before block k+1 is decoded.
+    assert evals == [("eval", 1), ("eval", 2), ("eval", 3)]
+    assert calls == list(shapes)
+    assert provider.pending == []
+    for block_name in shapes:
+        want = source[block_name][f"{block_name}.attn.to_q.weight"]
+        assert np.array_equal(np.array(per_block[block_name]["attn.to_q"].view(mx.uint16)), want)
+
+
+def test_decode_resident_raises_on_a_flagged_block(monkeypatch):
+    # Bug caught: resident dicts built from a decode whose status reports an error, with nobody reading it.
+    tf = FakeTransformer(Recorder(), n_double=1, n_single=0)
+    shapes = install_placeholders(tf)
+    groups, names, _source = _df11_groups(shapes, np.random.default_rng(13))
+    bad_status = mx.array([STATUS_INVALID_CODE], dtype=mx.uint32)
+    provider = DF11Provider(
+        groups,
+        names,
+        decode=lambda g: dataclasses.replace(
+            decode_group(g, backend="reference"), status=bad_status
+        ),
+    )
+    with pytest.raises(DFloatFormatError, match=r"transformer_blocks\.0: block 0: invalid code"):
+        rig.decode_resident(provider, shapes)
+
+
 def test_df11_provider_refuses_a_matrix_whose_size_does_not_match_the_shape():
     # Bug caught: a checkpoint/model mismatch (wrong n_single, a different FLUX variant) surfacing
     # as a reshape error inside MLX instead of a named refusal.
@@ -667,7 +707,6 @@ def test_reuse_and_resident_providers_never_launch_and_return_matching_shapes():
 
     resident = ResidentProvider(_resident_dicts(shapes))
     assert resident.launches == 0
-    assert resident.groups_evaluated is True
     with pytest.raises(RigError, match=r"transformer_blocks\.9"):
         resident.weights_for("transformer_blocks.9", shapes["transformer_blocks.0"])
 

@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
     import mlx.core as mx
-    from scripts._bench_common import provenance, write_json_atomic
+    from scripts._bench_common import move_stale_abort_aside, provenance, write_json_atomic
     from scripts._flux_rig import (
         EVAL_POLICIES,
         FLUX_CACHE_LIMIT,
@@ -42,10 +42,11 @@ try:
         ResidentProvider,
         RigError,
         build_transformer,
+        decode_resident,
         load_resident_set,
     )
     from scripts._watchdog import Watchdog, default_ceiling, phys_footprint
-    from scripts.bench_flux_step import GUIDANCE
+    from scripts.bench_flux_step import GUIDANCE, N_DOUBLE, N_SINGLE
 
     from mlx_dfloat._memory_caps import install_memory_caps
     from mlx_dfloat.format import open_checkpoint
@@ -84,7 +85,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--wall-budget", type=float, default=900.0, help="seconds before the watchdog aborts"
     )
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if not (1 <= args.double <= N_DOUBLE and 1 <= args.single <= N_SINGLE):
+        p.error(f"--double must be in 1..{N_DOUBLE} and --single in 1..{N_SINGLE}")
+    return args
 
 
 def verdict(*, finite: bool) -> int:
@@ -197,10 +201,7 @@ def smoke(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, object]:
         )
     finite_df11 = bool(mx.isfinite(out_df11).all().item())
 
-    per_block = {n: df11.weights_for(n, shapes[n]) for n in names}
-    mx.eval(per_block)
-    df11.verify()
-    control = ResidentProvider(per_block)
+    control = ResidentProvider(decode_resident(df11, shapes))  # one block evaluated at a time
     transformer.attach(control, shapes, eval_policy=args.policy)
     out_control, control_times = run_steps(transformer, config, inputs, args.steps)
     finite_control = bool(mx.isfinite(out_control).all().item())
@@ -252,6 +253,7 @@ def main(argv: list[str] | None = None) -> int:
     caps = list(install_memory_caps())
     mx.set_cache_limit(FLUX_CACHE_LIMIT)
     args.out.mkdir(parents=True, exist_ok=True)
+    move_stale_abort_aside(args.out)
     watchdog = Watchdog(args.out, ceiling=default_ceiling(), budget=args.wall_budget).start()
     try:
         summary = smoke(args, watchdog)

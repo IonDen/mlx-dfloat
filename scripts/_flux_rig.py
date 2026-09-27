@@ -206,7 +206,6 @@ class WeightProvider(Protocol):
 
     launches: int
     launching: bool
-    groups_evaluated: bool
 
     def weights_for(self, block_name: str, shapes: BlockShapes) -> dict[str, mx.array]:
         """Weights for ``block_name``; ``shapes`` is that block's entry from ``install_placeholders``."""
@@ -250,7 +249,6 @@ class DF11Provider:
         self._matrix_names = matrix_names
         self._decode = decode if decode is not None else partial(decode_group, backend="metal")
         self.launches = 0
-        self.groups_evaluated = True  # GroupArrays.to_mx evaluates every array it builds
         self.pending: list[tuple[str, mx.array]] = []  # (block name, status words) not yet checked
 
     def verify(self) -> None:
@@ -305,7 +303,6 @@ class ReuseProvider:
         """Keep the two dicts; they are handed back as-is."""
         self._dicts = {DOUBLE_PREFIX: dict(double), SINGLE_PREFIX: dict(single)}
         self.launches = 0
-        self.groups_evaluated = True
 
     def verify(self) -> None:
         """Nothing deferred: no decode happened."""
@@ -336,7 +333,6 @@ class ResidentProvider:
         """Keep the per-block dicts."""
         self._per_block = per_block
         self.launches = 0
-        self.groups_evaluated = True
 
     def verify(self) -> None:
         """Nothing deferred: no decode happened."""
@@ -352,6 +348,26 @@ class ResidentProvider:
             raise RigError(f"{block_name}: no resident weights")
         _check_shapes(block_name, weights, shapes)
         return dict(weights)
+
+
+def decode_resident(provider: DF11Provider, shapes: Shapes) -> dict[str, dict[str, mx.array]]:
+    """Decode every block's group once into resident BF16 dicts, one block evaluated before the next.
+
+    One lazy eval over every block would allocate every decode up front (the run-ahead the per-block
+    eval policy exists to prevent), so each block's dict is evaluated as soon as it is cut. The
+    deferred status words are checked at the end.
+
+    Raises:
+        DFloatFormatError: A block's decode reported an error (``DF11Provider.verify``).
+        RigError: A block is not resident, or a matrix's size does not match its shape.
+    """
+    per_block: dict[str, dict[str, mx.array]] = {}
+    for name, per in shapes.items():
+        weights = provider.weights_for(name, per)
+        _eval(weights)
+        per_block[name] = weights
+    provider.verify()
+    return per_block
 
 
 # --- the seam ----------------------------------------------------------------------------------------
@@ -656,6 +672,7 @@ __all__ = [
     "WeightProvider",
     "build_transformer",
     "check_extras_cover",
+    "decode_resident",
     "extras_plan",
     "get_attr_path",
     "install_placeholders",

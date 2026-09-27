@@ -1,11 +1,12 @@
 """The unit-tested helpers behind the bench and parity scripts.
 
-The arithmetic (timings, overhead, throughput, the kill line and the cross-check band, the
+The arithmetic (timings, overhead, throughput, the overhead line and the cross-check band, the
 per-dispatch guard, the calibration ramp's decisions, the resume-key comparison, exit codes) is
 pure, so the numbers these scripts act on can be checked
 without a GPU. ``provenance`` and ``write_json_atomic`` are the two helpers with side effects:
 one reads the machine state a result is recorded against, the other writes a result so a crash
-never leaves a half-written file.
+never leaves a half-written file; ``move_stale_abort_aside`` keeps a previous run's abort artifact
+out of this run's way.
 
 This module imports none of the scripts it serves at module level, so any of them may import it.
 """
@@ -194,6 +195,17 @@ def resume_key_diff(stored: object, current: Mapping[str, object]) -> list[str]:
     if not isinstance(stored, Mapping):
         return ["key"]
     return sorted(f for f in set(stored) | set(current) if stored.get(f) != current.get(f))
+
+
+def move_stale_abort_aside(out_dir: Path) -> None:
+    """Move a previous run's ``abort.json`` in ``out_dir`` to ``abort.previous.json``.
+
+    A stale abort artifact must never be mistaken for this run's outcome, and it is kept rather
+    than deleted. Call it before the watchdog starts.
+    """
+    abort_path = out_dir / "abort.json"
+    if abort_path.exists():
+        abort_path.replace(out_dir / "abort.previous.json")
 
 
 def write_json_atomic(path: Path, payload: dict[str, object]) -> None:

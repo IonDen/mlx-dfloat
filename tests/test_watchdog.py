@@ -172,23 +172,59 @@ def test_footprint_over_the_ceiling_aborts_with_70(monkeypatch, tmp_path):
     assert artifact["peak_footprint"] == 10**12
 
 
+def test_reset_peak_starts_the_footprint_peak_over(monkeypatch, tmp_path):
+    # Bug caught: a peak that spans the process lifetime, so the model-load spike hides the timed
+    # steps' own peak; or a reset that also forgets to track the next sample.
+    values = iter([10**9, 10**6])
+    monkeypatch.setattr(wd, "phys_footprint", lambda: next(values))
+    w = wd.Watchdog(tmp_path, ceiling=10**15, budget=60)
+    w._sample()
+    assert w.peak_footprint == 10**9
+    w.reset_peak()
+    assert w.peak_footprint == 0
+    w._sample()
+    assert w.peak_footprint == 10**6
+
+
 def test_a_failing_footprint_read_aborts_as_a_sample_error(monkeypatch, tmp_path):
     monkeypatch.setattr(wd, "phys_footprint", lambda: (_ for _ in ()).throw(OSError("rusage")))
     reason, _ = wd.Watchdog(tmp_path, ceiling=10**11, budget=60)._sample()
     assert reason == "sample_error"
 
 
+_FOOTPRINT_RUNNER = """
+import json, sys
+import mlx.core as mx, psutil
+from scripts._watchdog import phys_footprint
+before, rss_before = phys_footprint(), psutil.Process().memory_info().rss
+a = mx.zeros((256 * 1024 * 1024,), dtype=mx.uint8)
+mx.eval(a)
+after, rss_after = phys_footprint(), psutil.Process().memory_info().rss
+print(json.dumps({"footprint": after - before, "rss": rss_after - rss_before}))
+"""
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="libproc footprint is macOS-only")
 def test_phys_footprint_sees_a_gpu_allocation_that_rss_misses():
     # Bug caught: a wrong struct field (resident size or wired size would not move with a Metal
-    # allocation).
-    import mlx.core as mx
-    import psutil
+    # allocation). Runs in a cold subprocess: in the test process the Metal driver hands a freed
+    # region of the same size straight back (the footprint then moves by nothing), and it reclaims
+    # freed regions lazily, so an in-process before/after pair depends on what ran earlier.
+    import json
+    import subprocess
+    from pathlib import Path
 
-    before, rss_before = wd.phys_footprint(), psutil.Process().memory_info().rss
-    a = mx.zeros((256 * 1024 * 1024,), dtype=mx.uint8)
-    mx.eval(a)
-    after, rss_after = wd.phys_footprint(), psutil.Process().memory_info().rss
-    assert after - before > 200 * 1024**2
-    assert rss_after - rss_before < 64 * 1024**2
-    del a
+    proc = subprocess.run(
+        [sys.executable, "-c", _FOOTPRINT_RUNNER],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    deltas = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert deltas["footprint"] > 200 * 1024**2
+    # RSS may pick up a little of a Metal allocation; the point is that it does not grow by the
+    # allocation while the footprint does.
+    assert deltas["rss"] < 200 * 1024**2

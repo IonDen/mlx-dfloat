@@ -10,13 +10,17 @@ from pathlib import Path
 
 import pytest
 from scripts._bench_common import write_json_atomic
+from scripts._flux_rig import FLUX_CACHE_LIMIT, DF11Provider, ReuseProvider, install_placeholders
 from scripts.bench_flux_step import (
     MODES,
     BenchError,
     check_embeds_shapes,
     child_command,
+    compressed_set_loaded,
     expected_launches,
     interleaved,
+    limits_in_force,
+    make_provider,
     mode_policy,
     parse_args,
     pending_runs,
@@ -447,20 +451,28 @@ class _FakeConfig:
 class _FakeProvider:
     def __init__(self):
         self.launches = 0
-        self.groups_evaluated = True
-        self.pending = []
 
 
 class _FakeTransformer:
-    """Counts ``launches[t]`` decode launches on the provider at step ``t``; tracks verify calls."""
+    """Counts ``launches[t]`` decode launches on the provider at step ``t``; tracks verify calls.
 
-    def __init__(self, provider, launches):
+    Steps before ``spike_until`` allocate and drop a 256 MiB array, a stand-in for the load spike.
+    """
+
+    def __init__(self, provider, launches, *, spike_until=0):
         self.provider = provider
         self.launches = launches
+        self.spike_until = spike_until
         self.verified = 0
 
     def __call__(self, *, t, config, hidden_states, prompt_embeds, pooled_prompt_embeds):
+        import mlx.core as mx
+
         self.provider.launches += self.launches[t]
+        if t < self.spike_until:
+            spike = mx.zeros((256 * 1024 * 1024,), dtype=mx.uint8)
+            mx.eval(spike)
+            del spike
         return hidden_states * 0.5
 
     def verify_step(self):
@@ -468,10 +480,25 @@ class _FakeTransformer:
 
 
 class _FakeWatchdog:
-    peak_footprint = 0
+    def __init__(self, peak_footprint=0):
+        self.peak_footprint = peak_footprint
+
+    def reset_peak(self):
+        self.peak_footprint = 0
 
 
-def _time(transformer, provider, *, scheduler=None, warmup=2, steps=3, per_step=12, limits=True):
+def _time(
+    transformer,
+    provider,
+    *,
+    scheduler=None,
+    warmup=2,
+    steps=3,
+    per_step=12,
+    limits=True,
+    loaded=True,
+    watchdog=None,
+):
     import mlx.core as mx
     from scripts.bench_flux_step import time_steps
 
@@ -485,8 +512,9 @@ def _time(transformer, provider, *, scheduler=None, warmup=2, steps=3, per_step=
         warmup=warmup,
         steps=steps,
         per_step=per_step,
+        compressed_loaded=loaded,
         limits_recorded=limits,
-        watchdog=_FakeWatchdog(),
+        watchdog=watchdog if watchdog is not None else _FakeWatchdog(),
         label="df11",
     )
 
@@ -521,12 +549,116 @@ def test_time_steps_names_the_failed_parity_conditions_before_timing():
     from scripts.bench_flux_step import ParityError
 
     provider = _FakeProvider()
-    provider.groups_evaluated = False
     transformer = _FakeTransformer(provider, [12, 13, 12, 12, 12])
     with pytest.raises(ParityError) as exc:
-        _time(transformer, provider, limits=False)
+        _time(transformer, provider, limits=False, loaded=False)
     assert exc.value.failed == ["compressed_loaded", "limits_recorded", "launches_expected"]
     assert transformer.verified == 2  # only the warm-up ran
+
+
+def test_time_steps_records_the_timed_steps_own_peaks_apart_from_the_lifetime_peaks():
+    # Bug caught: peaks that span the process lifetime (the load and warm-up spike would hide what the
+    # timed steps themselves reach), or a reset before the timed steps that loses the lifetime peak.
+    provider = _FakeProvider()
+    transformer = _FakeTransformer(provider, [0] * 5, spike_until=2)
+    out = _time(transformer, provider, per_step=0, watchdog=_FakeWatchdog(peak_footprint=10**13))
+    assert out["footprint_peak_bytes"] >= 10**13
+    assert out["step_footprint_peak_bytes"] < 10**13
+    assert out["mlx_peak_memory_bytes"] >= 256 * 1024**2
+    assert out["step_mlx_peak_bytes"] < 256 * 1024**2
+
+
+# --- the parity condition helpers ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("caps", "cache_limit", "want"),
+    [
+        ((20, 22), FLUX_CACHE_LIMIT, True),
+        ((0, 22), FLUX_CACHE_LIMIT, False),  # the wired cap failed to install
+        ((20, 0), FLUX_CACHE_LIMIT, False),  # the memory cap failed to install
+        ((0, 0), FLUX_CACHE_LIMIT, False),
+        ((20, 22), FLUX_CACHE_LIMIT + 1, False),  # another cache limit is in force
+    ],
+)
+def test_limits_in_force_needs_both_caps_and_the_cache_limit(caps, cache_limit, want):
+    # Bug caught: checking caps[0] alone (a failed memory cap passes), or ignoring the cache limit.
+    assert limits_in_force(caps, cache_limit) is want
+
+
+def _fake_rig(rng, *, n_double=2, n_single=2):
+    """A fake transformer's shapes, one real DF11 group per block, a ckpt-shaped view of their names."""
+    from types import SimpleNamespace
+
+    from tests.test_flux_rig import FakeTransformer, Recorder, _df11_groups
+
+    shapes = install_placeholders(FakeTransformer(Recorder(), n_double=n_double, n_single=n_single))
+    groups, names, source = _df11_groups(shapes, rng)
+    ckpt = SimpleNamespace(groups={n: SimpleNamespace(matrix_names=names[n]) for n in names})
+    return ckpt, groups, shapes, source
+
+
+def test_compressed_set_loaded_needs_every_block_resident_with_elements():
+    # Bug caught: a constant True (the condition the run JSON reports could never fail), a resident
+    # set missing a block the transformer has, or a group with no elements counted as loaded.
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    _ckpt, groups, shapes, _source = _fake_rig(np.random.default_rng(3), n_double=1, n_single=1)
+    assert compressed_set_loaded(groups, shapes) is True
+    missing = {k: v for k, v in groups.items() if k != "single_transformer_blocks.0"}
+    assert compressed_set_loaded(missing, shapes) is False
+    empty = {**groups, "transformer_blocks.0": SimpleNamespace(n_elements=0)}
+    assert compressed_set_loaded(empty, shapes) is False
+
+
+# --- the providers --------------------------------------------------------------------------------
+
+
+def _counting_reference_decode(calls):
+    from mlx_dfloat.decode import decode_group
+
+    def decode(group):
+        calls.append(group.name)
+        return decode_group(group, backend="reference")
+
+    return decode
+
+
+def test_make_provider_for_a_control_decodes_block_0_of_each_kind_once():
+    # Bug caught: the control decoding every block (that is the resident BF16 model, not the
+    # two-block control), decoding other blocks than the first of each kind, or launching in the step.
+    import mlx.core as mx
+    import numpy as np
+
+    ckpt, groups, shapes, source = _fake_rig(np.random.default_rng(4))
+    calls = []
+    provider = make_provider(
+        "control", ckpt, groups, shapes, decode=_counting_reference_decode(calls)
+    )
+    assert calls == ["transformer_blocks.0", "single_transformer_blocks.0"]
+    assert isinstance(provider, ReuseProvider)
+    # Every block of a kind gets block 0's decoded weights: the control's design.
+    w = provider.weights_for("transformer_blocks.1", shapes["transformer_blocks.1"])
+    want = source["transformer_blocks.0"]["transformer_blocks.0.attn.to_q.weight"]
+    assert np.array_equal(np.array(w["attn.to_q"].view(mx.uint16)), want)
+    assert provider.launches == 0
+
+
+@pytest.mark.parametrize("mode", ["df11", "df11-depth2"])
+def test_make_provider_for_df11_decodes_nothing_before_the_first_step(mode):
+    # Bug caught: a df11 provider that decodes at construction (launches before the first step, which
+    # the warm-up's launch count would then miss).
+    import numpy as np
+
+    ckpt, groups, shapes, _source = _fake_rig(np.random.default_rng(5))
+    calls = []
+    provider = make_provider(mode, ckpt, groups, shapes, decode=_counting_reference_decode(calls))
+    assert calls == []
+    assert isinstance(provider, DF11Provider)
+    provider.weights_for("transformer_blocks.1", shapes["transformer_blocks.1"])
+    assert calls == ["transformer_blocks.1"]
 
 
 def test_time_steps_refuses_non_finite_latents_after_the_warmup():
@@ -602,6 +734,29 @@ def test_run_one_writes_the_injected_measurement_under_the_injected_key(
     assert written["key"] == {"double": 4}
     assert written["limits"] is True
     assert written["mode"] == "control"
+
+
+def test_run_one_moves_a_stale_abort_artifact_aside_before_it_starts(tmp_path, restore_cache_limit):
+    # Bug caught: a resumed orchestration finishing next to a previous child's abort.json, which then
+    # reads as this run's outcome.
+    from scripts.bench_flux_step import run_one
+
+    (tmp_path / "abort.json").write_text('{"reason": "stale"}')
+
+    def measure(args, watchdog, *, limits_recorded):
+        return {
+            "exit_code": 0,
+            "policy": "per-block",
+            "median_s": 1.0,
+            "spread": 0.0,
+            "verify_median_s": 0.0,
+            "launches_expected_per_step": 0,
+            "footprint_peak_bytes": 1,
+        }
+
+    assert run_one(_one_run_args(tmp_path), measure=measure, key=lambda a: {}) == 0
+    assert (tmp_path / "abort.previous.json").read_text() == '{"reason": "stale"}'
+    assert not (tmp_path / "abort.json").exists()
 
 
 def test_run_one_records_a_failed_measurement_as_exit_2_with_its_key(tmp_path, restore_cache_limit):

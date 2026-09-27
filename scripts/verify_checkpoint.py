@@ -38,7 +38,12 @@ try:
     import mlx.core as mx
     import numpy as np
     import psutil
-    from scripts._bench_common import git_state, per_dispatch_guard, write_json_atomic
+    from scripts._bench_common import (
+        git_state,
+        move_stale_abort_aside,
+        per_dispatch_guard,
+        write_json_atomic,
+    )
     from scripts._watchdog import Watchdog, default_ceiling
 
     from mlx_dfloat._memory_caps import install_memory_caps
@@ -119,13 +124,22 @@ def run_mode(*, bf16_given: bool, decoder: str) -> str:
 def rate_from(path: Path) -> float:
     """Decode throughput in bytes per second, from a bench JSON's top-level ``gbps``.
 
+    Only a bench that passed (top-level ``exit_code`` 0) may size the guard: a rate a kernel produced
+    while failing parity, or a run that never reached a verdict, means nothing.
+
     Raises:
-        VerifyError: The file is unreadable, or ``gbps`` is absent, not a number, or not positive.
+        VerifyError: The file is unreadable, its ``exit_code`` is not 0, or ``gbps`` is absent, not a
+            number, or not positive.
     """
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
         raise VerifyError(f"--rate-from {path}: cannot read the bench JSON: {exc}") from exc
+    if isinstance(data, dict) and data.get("exit_code") != 0:
+        raise VerifyError(
+            f"--rate-from {path}: the bench's exit_code is {data.get('exit_code')!r}, not 0; only a "
+            "bench whose kernel passed parity may size the per-dispatch guard"
+        )
     gbps = data.get("gbps") if isinstance(data, dict) else None
     if isinstance(gbps, bool) or not isinstance(gbps, int | float):
         raise VerifyError(f"--rate-from {path}: no numeric top-level gbps")
@@ -412,7 +426,9 @@ def verify(
                     else:
                         records, group_missing = _compare(decoded, originals)
                     status = "equal" if all(r["equal"] for r in records) else "mismatch"
-            except (DFloatError, VerifyError) as exc:
+            except (DFloatError, VerifyError, RuntimeError, ValueError) as exc:
+                # RuntimeError: a Metal command-buffer failure surfacing at mx.eval; ValueError: a
+                # zip(strict=True) mismatch. Both are tool errors that must still write summary.json.
                 return _error_summary(f"{name}: {exc}")
             stored = {
                 "key": key,
@@ -506,6 +522,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return EXIT_ERROR
     try:
+        # Caps before any GPU work: available_backends() runs the kernel warm-up.
+        install_memory_caps()
         if args.decoder == "metal" and "metal" not in available_backends():
             print("error: --decoder metal: the Metal backend cannot run here", file=sys.stderr)
             return EXIT_ERROR
@@ -523,11 +541,7 @@ def main(argv: list[str] | None = None) -> int:
             decoder=args.decoder,
         )
         if not args.no_watchdog:
-            abort_path = args.out / "abort.json"
-            if abort_path.exists():
-                # A stale abort artifact from a previous run must never be mistaken for this
-                # run's outcome; move it aside rather than deleting it.
-                abort_path.replace(args.out / "abort.previous.json")
+            move_stale_abort_aside(args.out)
             watchdog = Watchdog(
                 args.out, ceiling=default_ceiling(), budget=args.wall_budget
             ).start()

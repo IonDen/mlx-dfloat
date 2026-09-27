@@ -114,6 +114,10 @@ class Watchdog:
         self._thread.start()
         return self
 
+    def reset_peak(self) -> None:
+        """Start ``peak_footprint`` over, so a later window's peak is not hidden by an earlier spike."""
+        self.peak_footprint = 0
+
     def stop(self) -> None:
         """Stop sampling. After this returns the watchdog never writes an abort or exits."""
         with self._lock:

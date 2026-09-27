@@ -18,10 +18,12 @@ A step is exactly mflux's loop body: ``scale_model_input``, the transformer, ``s
 ``mx.eval(latents)``, timed as a whole with ``time.perf_counter``; ``verify_step()`` (the deferred
 decode status reads, which upstream never does at step time) runs after the stop and is timed on
 its own as ``verify_s``. ``--warmup`` steps run untimed, then ``--steps`` timed. Between them the
-parity conditions are asserted: the compressed set is loaded, the memory caps and cache limit are
-recorded, nothing is pending, the launches so far match the mode, and the latents are finite. A
+parity conditions are asserted: every block's compressed group is resident, both memory caps and
+the cache limit are in force, the launches so far match the mode, and the latents are finite. A
 failed condition is exit 2 with the names in the JSON. Every timed step's launch count must equal
-the mode's expectation (0 or 57), and the final latents must be finite.
+the mode's expectation (0 or 57), and the final latents must be finite. The MLX peak and the
+watchdog's footprint peak are reset right before the timed steps, so the JSON carries the timed
+steps' own peaks (``step_*``) next to the process-lifetime ones.
 
 ``--orchestrate`` runs the five modes as subprocesses, interleaved per round in the order
 ``df11, control, df11-depth2, control-depth2, control-noeval``, one at a time, each writing
@@ -62,6 +64,7 @@ try:
     import mlx.core as mx
     from scripts._bench_common import (
         Timing,
+        move_stale_abort_aside,
         overhead,
         parity_conditions,
         provenance,
@@ -82,7 +85,8 @@ try:
     from scripts.verify_checkpoint import source_hash
 
     from mlx_dfloat._memory_caps import install_memory_caps
-    from mlx_dfloat.format import DF11Checkpoint, open_checkpoint
+    from mlx_dfloat.decode import DecodeResult
+    from mlx_dfloat.format import DF11Checkpoint, MxGroup, open_checkpoint
 except Exception as exc:  # a broken environment is a tool error (2)
     print(
         f"error: cannot import the project modules ({exc}); run from a synced checkout",
@@ -151,6 +155,23 @@ def is_df11(mode: str) -> bool:
 def expected_launches(mode: str, *, n_double: int, n_single: int, steps: int) -> int:
     """Decode launches ``steps`` steps of ``mode`` must make: one per block per step, or none."""
     return (n_double + n_single) * steps if is_df11(mode) else 0
+
+
+def limits_in_force(caps: Sequence[int], cache_limit: int) -> bool:
+    """Whether both memory caps installed (non-zero GB) and the MLX cache limit is the rig's.
+
+    ``caps`` is what ``install_memory_caps`` returned; a 0 means that cap failed to install.
+    """
+    return len(caps) == 2 and all(c > 0 for c in caps) and cache_limit == FLUX_CACHE_LIMIT
+
+
+def compressed_set_loaded(resident: Mapping[str, Any], shapes: Mapping[str, Any]) -> bool:
+    """Whether every block of the transformer has a resident compressed group with elements.
+
+    ``GroupArrays.to_mx`` evaluates every array it builds, so presence and a non-zero element
+    count are what remains to check.
+    """
+    return all(name in resident and resident[name].n_elements > 0 for name in shapes)
 
 
 def interleaved(rounds: int, *, modes: Sequence[str] = MODES) -> list[tuple[int, str]]:
@@ -494,15 +515,26 @@ def load_embeds(path: Path, model: str) -> tuple[mx.array, mx.array, dict[str, s
     return prompt, pooled, dict(meta)
 
 
+Decode = Callable[[MxGroup], DecodeResult]
+
+
 def make_provider(
-    mode: str, ckpt: DF11Checkpoint, resident: Mapping[str, Any], shapes: Mapping[str, Any]
+    mode: str,
+    ckpt: DF11Checkpoint,
+    resident: Mapping[str, Any],
+    shapes: Mapping[str, Any],
+    *,
+    decode: Decode | None = None,
 ) -> WeightProvider:
     """The mode's provider.
 
     ``DF11Provider`` for df11 modes; otherwise a ``ReuseProvider`` over one double and one single
-    block decoded once by that same Metal backend (the control's only extra memory).
+    block decoded once by that same backend (the control's only extra memory). ``decode`` is the
+    Metal backend by default; tests inject a counting reference decode.
     """
-    decoder = DF11Provider(resident, {n: ckpt.groups[n].matrix_names for n in shapes})
+    decoder = DF11Provider(
+        resident, {n: ckpt.groups[n].matrix_names for n in shapes}, decode=decode
+    )
     if is_df11(mode):
         return decoder
     double_name, single_name = f"{DOUBLE_PREFIX}.0", f"{SINGLE_PREFIX}.0"
@@ -586,13 +618,18 @@ def time_steps(
     warmup: int,
     steps: int,
     per_step: int,
+    compressed_loaded: bool,
     limits_recorded: bool,
     watchdog: Watchdog,
     label: str,
 ) -> dict[str, Any]:
     """Warm up, assert the parity conditions, time the steps; the measured fields of the run JSON.
 
-    ``per_step`` is the decode launches every step must make (``label`` names the mode in errors).
+    ``per_step`` is the decode launches every step must make (``label`` names the mode in errors);
+    ``compressed_loaded`` and ``limits_recorded`` are the two conditions the caller establishes
+    (``compressed_set_loaded``, ``limits_in_force``). The provider's deferred status words are read
+    by ``verify_step`` inside every step, so "nothing pending" is not a condition here; the
+    queue-then-drain contract is tested on the provider itself.
 
     Raises:
         ParityError: A parity condition failed before the timed loop.
@@ -617,14 +654,20 @@ def time_steps(
 
     warmup_s, warmup_verify_s = run_steps(0, warmup)
     failed = parity_conditions(
-        compressed_loaded=provider.groups_evaluated,
+        compressed_loaded=compressed_loaded,
         limits_recorded=limits_recorded,
-        nothing_pending=not getattr(provider, "pending", []),
         launches_expected=provider.launches == per_step * warmup,
         finite=bool(mx.isfinite(latents).all().item()),
     )
     if failed:
         raise ParityError(failed)
+    # The timed steps' own peaks, apart from the load and warm-up spike: snapshot the lifetime
+    # peaks so far, then start both counters over.
+    lifetime_footprint_peak = max(footprint_peak, watchdog.peak_footprint)
+    lifetime_mlx_peak = int(mx.get_peak_memory())
+    mx.reset_peak_memory()
+    watchdog.reset_peak()
+    footprint_peak = phys_footprint()
     step_s, verify_s = run_steps(warmup, steps)
     if any(n != per_step for n in launches_per_step[warmup:]):
         raise BenchError(
@@ -645,9 +688,13 @@ def time_steps(
         "launches_per_step": launches_per_step,
         "launches_expected_per_step": per_step,
         "launches_total": provider.launches,
-        "footprint_peak_bytes": max(footprint_peak, watchdog.peak_footprint),
-        "watchdog_peak_footprint_bytes": watchdog.peak_footprint,
-        "mlx_peak_memory_bytes": int(mx.get_peak_memory()),
+        "step_footprint_peak_bytes": max(footprint_peak, watchdog.peak_footprint),
+        "step_mlx_peak_bytes": int(mx.get_peak_memory()),
+        "footprint_peak_bytes": max(
+            lifetime_footprint_peak, footprint_peak, watchdog.peak_footprint
+        ),
+        "watchdog_peak_footprint_bytes": max(lifetime_footprint_peak, watchdog.peak_footprint),
+        "mlx_peak_memory_bytes": max(lifetime_mlx_peak, int(mx.get_peak_memory())),
         "cache_memory_bytes": int(mx.get_cache_memory()),
         "output_shape": list(latents.shape),
         "output_dtype": str(latents.dtype),
@@ -687,6 +734,7 @@ def run_mode(
         warmup=args.warmup,
         steps=args.steps,
         per_step=expected_launches(mode, n_double=N_DOUBLE, n_single=N_SINGLE, steps=1),
+        compressed_loaded=compressed_set_loaded(resident, shapes),
         limits_recorded=limits_recorded,
         watchdog=watchdog,
         label=mode,
@@ -731,8 +779,9 @@ def run_one(
     caps = list(install_memory_caps())
     mx.set_cache_limit(FLUX_CACHE_LIMIT)
     cache_limit = int(mx.set_cache_limit(FLUX_CACHE_LIMIT))  # the limit now in force
-    limits_recorded = caps[0] > 0 and cache_limit == FLUX_CACHE_LIMIT
+    limits_recorded = limits_in_force(caps, cache_limit)
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    move_stale_abort_aside(args.out.parent)
     watchdog = Watchdog(args.out.parent, ceiling=default_ceiling(), budget=args.wall_budget).start()
     summary: dict[str, Any]
     this_key: dict[str, Any] | None = None

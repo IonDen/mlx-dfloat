@@ -404,3 +404,20 @@ def test_ramp_should_stop_ignores_a_long_step_whose_rate_fell(seconds, k, rate, 
     # Bug caught: one transient slow dispatch ending the ramp with a collapsed rate (the guard then
     # refuses the group), `<=` in place of `<`, or the n_launch stop depending on the rate.
     assert ramp_should_stop(seconds, k, 27, rate=rate, prev_rate=prev_rate) is stop
+
+
+# --- stale abort artifacts ------------------------------------------------------------------------
+
+
+def test_move_stale_abort_aside_keeps_the_old_artifact_under_another_name(tmp_path):
+    # Bug caught: a resumed orchestration finishing next to an old abort.json (read as this run's
+    # outcome), or the stale artifact deleted instead of kept.
+    (tmp_path / "abort.json").write_text('{"reason": "stale"}')
+    bc.move_stale_abort_aside(tmp_path)
+    assert not (tmp_path / "abort.json").exists()
+    assert (tmp_path / "abort.previous.json").read_text() == '{"reason": "stale"}'
+
+
+def test_move_stale_abort_aside_without_an_artifact_changes_nothing(tmp_path):
+    bc.move_stale_abort_aside(tmp_path)
+    assert sorted(p.name for p in tmp_path.iterdir()) == []

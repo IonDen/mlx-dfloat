@@ -143,10 +143,10 @@ parallel = true
 omit = [
   "src/mlx_dfloat/_version.py",
   # Measurement glue that needs mflux, PyObjC or a GPU run; its pure logic is in scripts/_bench_common.py and
-  # scripts/_flux_rig.py, which are unit-tested.
+  # scripts/_flux_rig.py, which are unit-tested. The two FLUX benches (bench_flux_step, bench_control_validation)
+  # are measured: their pure parts, providers and step loop are unit-tested, and only the mflux-touching
+  # build / orchestration lines stay uncovered.
   "scripts/bench_decode_kernel.py",
-  "scripts/bench_flux_step.py",
-  "scripts/bench_control_validation.py",
   "scripts/encode_prompt.py",
   "scripts/regpressure.py",
   "scripts/ci_metal_probe.py",
