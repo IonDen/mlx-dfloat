@@ -23,6 +23,23 @@ jobs:
         run: uv run python scripts/ci_metal_probe.py
       - name: Test (required)
         run: uv run pytest --cov=mlx_dfloat --cov=scripts --cov-report=term-missing --cov-fail-under=85
+  integration:
+    # The mflux lane: installs the optional extra (torch and transformers come with mflux) and runs
+    # only the tests that need it. One job per mflux release in the pinned range (0.20.0 today).
+    runs-on: macos-15
+    strategy:
+      matrix:
+        mflux: ["0.20.0"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --locked --group dev
+      - run: uv pip install "mflux==${{ matrix.mflux }}" "psutil>=6"
+      - run: uv run --no-sync python -c "import mflux, mlx.core; print('mflux', mflux.__version__)"
+      - name: Integration tests (mflux lane)
+        run: uv run --no-sync pytest -m mflux --run-network -q -p no:cacheprovider
   build:
     # Same action the release workflow uses, so a distribution that would fail at tag time
     # (e.g. a build-backend metadata version newer than the bundled twine) fails on the PR.

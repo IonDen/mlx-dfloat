@@ -3,7 +3,13 @@ import sys
 from pathlib import Path
 
 import conftest  # pytest prepend mode adds tests/ to sys.path
-from conftest import GATED_MARKERS, _hard_exit_code, _markers_to_skip, _metal_marker_action
+from conftest import (
+    GATED_MARKERS,
+    _hard_exit_code,
+    _markers_to_skip,
+    _metal_marker_action,
+    _mflux_marker_action,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -81,3 +87,10 @@ def test_metal_marker_collection_succeeds():
     )
     assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-2000:]
     assert "test_decode_parity.py" in result.stdout
+
+
+def test_mflux_marker_runs_only_when_mflux_is_importable():
+    # Bug caught: mflux tests silently skipped on a machine that has mflux (a green run that tested
+    # nothing), or collected where mflux is absent (an ImportError instead of a skip).
+    assert _mflux_marker_action(available=True) == "run"
+    assert _mflux_marker_action(available=False) == "skip"
