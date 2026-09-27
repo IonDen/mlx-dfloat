@@ -773,7 +773,8 @@ def test_per_block_policy_evaluates_each_block_before_the_next_runs(monkeypatch)
 
 
 def test_depth2_policy_evaluates_block_i_minus_1_before_block_i_plus_1_runs(monkeypatch):
-    # Bug caught: eval(prev) placed before async_eval(out) (no overlap), or prev never drained.
+    # Bug caught: eval(prev) placed before async_eval(out) (the host would wait on block i-1 before
+    # block i is even queued, losing the gap the policy hides), or prev never drained.
     events, o, _ = _run_with_policy(monkeypatch, "depth2")
     assert events == [
         ("run", o[0]),

@@ -6,8 +6,12 @@ block runs (``DF11Provider``, 57 launches per step); ``control`` hands every blo
 pre-decoded weight dicts, one double and one single block, decoded once by that same kernel
 (``ReuseProvider``, no launches). Both load and evaluate the whole compressed set first, so the
 footprint baseline is the same; the control's two decoded blocks are its only extra. ``-depth2``
-variants run the depth-2 eval policy and ``control-noeval`` runs the control with no eval inside
-the step, so ``control - control-noeval`` is the eval policy's own cost. No text encoder or VAE is
+variants run the depth-2 eval policy: its look-ahead is bounded by MLX's command-buffer window (the
+encoding thread blocks once enough committed buffers are in flight, so ``async_eval`` of block i
+returns only near its end and the next block's decode never runs alongside block i's matmuls on the
+same in-order stream); what it saves is the host-side gap between blocks, on the DF11 and the
+control side alike. ``control-noeval`` runs the control with no eval inside the step, so ``control -
+control-noeval`` is the eval policy's own cost. No text encoder or VAE is
 loaded: the prompt embeddings come from ``--embeds`` (``scripts/encode_prompt.py``). Activation
 dtypes follow mflux exactly: the latents stay the float32 ``create_noise`` returns and the
 embeddings keep the dtype the encoder produced (T5 float32, CLIP bfloat16; a synthetic file is

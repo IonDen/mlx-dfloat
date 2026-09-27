@@ -21,11 +21,8 @@ jobs:
       - name: Metal capability probe (informational)
         continue-on-error: true
         run: uv run python scripts/ci_metal_probe.py
-      - name: Test (required, without the Metal suite)
-        run: uv run pytest -m "not metal" --cov=mlx_dfloat --cov=scripts --cov-report=term-missing --cov-fail-under=85
-      - name: Metal suite (informational until the probe reports ready)
-        continue-on-error: true
-        run: uv run pytest -m metal --no-cov
+      - name: Test (required)
+        run: uv run pytest --cov=mlx_dfloat --cov=scripts --cov-report=term-missing --cov-fail-under=85
   build:
     # Same action the release workflow uses, so a distribution that would fail at tag time
     # (e.g. a build-backend metadata version newer than the bundled twine) fails on the PR.

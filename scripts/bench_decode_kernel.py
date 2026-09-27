@@ -22,9 +22,9 @@ groups already in the file's ``groups`` map. The file carries a run ``key`` (res
 path, variants, reps, source hash, mlx version); resuming into a file whose key differs, or that has
 none, exits 2 and asks for a fresh ``--out``, so different runs never mix. The top-level ``gbps`` is
 the slowest Metal median over every recorded group, the conservative rate
-``verify_checkpoint --rate-from`` reads. ``--t-step S`` also reports the kill-equivalent throughput
-for the whole checkpoint's bytes per step and whether each Metal variant's aggregate throughput
-clears it.
+``verify_checkpoint --rate-from`` reads. ``--t-step S`` also reports the overhead-line throughput,
+the decode rate at which decoding the whole checkpoint's bytes per step costs exactly 25 % of a
+step, and whether each Metal variant's aggregate throughput clears it.
 
 Usage (from the repository root of a synced checkout):
     uv run python -m scripts.bench_decode_kernel --df11 DIR --groups a,b --out FILE \
@@ -268,7 +268,7 @@ def _kill_line(groups: dict[str, dict], *, bytes_per_step: int, t_step: float) -
         "variants": per_variant,
     }
     print(
-        f"kill-equivalent throughput: {need / 1e9:.3g} GB/s "
+        f"overhead-line throughput: {need / 1e9:.3g} GB/s "
         f"({bytes_per_step} bytes per step within 25% of a {t_step} s step)"
     )
     for variant in METAL_VARIANTS:
@@ -300,7 +300,11 @@ def main(argv: list[str] | None = None) -> int:
         "--rate-from", type=Path, help="bench JSON whose top-level gbps sets the guard"
     )
     parser.add_argument("--wall-budget", type=float, default=2 * 3600.0)
-    parser.add_argument("--t-step", type=float, help="seconds per denoising step (kill line)")
+    parser.add_argument(
+        "--t-step",
+        type=float,
+        help="seconds per denoising step; reports the throughput at which decoding costs 25 %% of it",
+    )
     args = parser.parse_args(argv)
     requested = {v for v in args.variants.split(",") if v}
     variants = [v for v in VARIANTS if v in requested]  # canonical order, for the resume key

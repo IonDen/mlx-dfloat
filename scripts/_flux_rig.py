@@ -67,8 +67,13 @@ MAX_BUILD_ACTIVE_BYTES = 2 * 1024**3
 FLUX_CACHE_LIMIT = int(1.4e9)
 EvalPolicy = Literal["per-block", "depth2", "none"]
 # "per-block": mx.eval each block's output. "depth2": async_eval it, then eval the previous block's.
-# "none": no evaluation inside the step; for ReuseProvider (the control-noeval run) only, since a
-# launching provider would keep every decoded group alive until the final eval (~24 GB on FLUX.1).
+# The depth2 look-ahead is bounded by MLX's command-buffer window: the encoding thread blocks once
+# enough committed buffers are in flight, so async_eval(out_i) returns only near the end of block i,
+# and the next block's decode never overlaps block i's matmuls on the same in-order stream. What it
+# saves is the host-side gap between blocks, on the DF11 and the control side alike; it is not a
+# decode/compute overlap. "none": no evaluation inside the step; for ReuseProvider (the
+# control-noeval run) only, since a launching provider would keep every decoded group alive until
+# the final eval (~24 GB on FLUX.1).
 EVAL_POLICIES: tuple[str, ...] = ("per-block", "depth2", "none")
 MAX_NONE_POLICY_LAUNCHING_BLOCKS = (
     2  # the reduced-depth validation (1+1) may still launch under "none"
