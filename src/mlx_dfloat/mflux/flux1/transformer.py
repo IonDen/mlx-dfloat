@@ -3,13 +3,17 @@
 from functools import cache
 from typing import Any
 
-from mlx_dfloat.errors import DFloatIntegrationError
+import mlx.core as mx
+
+from mlx_dfloat.errors import DFloatFormatError, DFloatIntegrationError
+from mlx_dfloat.format import DF11Checkpoint
 from mlx_dfloat.integrate import seam
-from mlx_dfloat.integrate.names import Shapes
+from mlx_dfloat.integrate.names import NameMap, Shapes
 from mlx_dfloat.integrate.providers import WeightProvider
 
 DOUBLE_PREFIX = "transformer_blocks"
 SINGLE_PREFIX = "single_transformer_blocks"
+MAX_BUILD_ACTIVE_BYTES = 2 * 1024**3
 
 
 class SeamMixin:
@@ -87,3 +91,76 @@ def seam_transformer_class() -> type:
     from mflux.models.flux.model.flux_transformer.transformer import Transformer
 
     return type("SeamTransformer", (SeamMixin, Transformer), {})
+
+
+def build_transformer(
+    model_config: Any,
+    ckpt: DF11Checkpoint,
+    *,
+    name_map: NameMap | None = None,
+    n_double: int | None = None,
+    n_single: int | None = None,
+) -> tuple[Any, Shapes]:
+    """Construct mflux's ``Transformer`` (seamed) with placeholders for the matrices and the extras loaded.
+
+    Block counts come from the checkpoint's groups, or ``n_double``/``n_single`` for a reduced-depth build
+    (each capped at the checkpoint's own count). Every block matrix is a placeholder and every other
+    parameter comes from the checkpoint's extras; the coverage of both is asserted, and so is the MLX
+    active memory the build added (under ``MAX_BUILD_ACTIVE_BYTES``).
+
+    Raises:
+        DFloatFormatError: The groups are not FLUX.1's, an extra is not BF16 or has the wrong shape.
+        DFloatIntegrationError: A depth override exceeds the checkpoint's own block count, an uncovered
+            parameter, an extra without a target, or too much active memory added by the build.
+    """
+    from mlx.utils import tree_flatten
+
+    from mlx_dfloat.integrate.coverage import check_extras_cover, extras_plan, read_extra
+    from mlx_dfloat.integrate.placeholders import PLACEHOLDER, install_placeholders
+    from mlx_dfloat.mflux.flux1.names import DROPPED_EXTRAS, check_flux_groups, flux_name_map
+
+    names = flux_name_map() if name_map is None else name_map
+    ckpt_double, ckpt_single = check_flux_groups(ckpt)
+    n_double = ckpt_double if n_double is None else n_double
+    n_single = ckpt_single if n_single is None else n_single
+    if n_double > ckpt_double or n_single > ckpt_single:
+        raise DFloatIntegrationError(
+            f"asked for {n_double} double / {n_single} single blocks; the checkpoint has "
+            f"{ckpt_double} / {ckpt_single}"
+        )
+    before = int(mx.get_active_memory())
+    transformer = seam_transformer_class()(
+        model_config, num_transformer_blocks=n_double, num_single_transformer_blocks=n_single
+    )
+    shapes = install_placeholders(
+        [
+            (DOUBLE_PREFIX, transformer.transformer_blocks),
+            (SINGLE_PREFIX, transformer.single_transformer_blocks),
+        ],
+        names,
+    )
+    matrix_paths = {f"{block}.{attr}.weight" for block, per in shapes.items() for attr in per}
+    params = dict(tree_flatten(transformer.parameters()))
+    plan = extras_plan(
+        ckpt,
+        names,
+        counts={DOUBLE_PREFIX: n_double, SINGLE_PREFIX: n_single},
+        dropped=DROPPED_EXTRAS,
+    )
+    check_extras_cover(params, (name for name, _path, _info in plan), matrix_paths)
+    weights: list[tuple[str, mx.array]] = []
+    for name, path, info in plan:
+        array = read_extra(path, info)
+        if tuple(array.shape) != tuple(params[name].shape):
+            raise DFloatFormatError(
+                f"{name}: extra has shape {tuple(array.shape)}, parameter {tuple(params[name].shape)}"
+            )
+        weights.append((name, array))
+    transformer.load_weights(weights, strict=False)
+    mx.eval([array for _name, array in weights], PLACEHOLDER)
+    added = int(mx.get_active_memory()) - before
+    if added >= MAX_BUILD_ACTIVE_BYTES:
+        raise DFloatIntegrationError(
+            f"{added / 1024**3:.2f} GiB active added by the build; a block matrix is probably resident"
+        )
+    return transformer, shapes
