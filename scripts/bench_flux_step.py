@@ -11,8 +11,9 @@ the step, so ``control - control-noeval`` is the eval policy's own cost. No text
 loaded: the prompt embeddings come from ``--embeds`` (``scripts/encode_prompt.py``).
 
 A step is exactly mflux's loop body: ``scale_model_input``, the transformer, ``scheduler.step``,
-``mx.eval(latents)``, then ``verify_step()`` (the deferred decode status reads), timed as a whole
-with ``time.perf_counter``. ``--warmup`` steps run untimed, then ``--steps`` timed. Between them the
+``mx.eval(latents)``, timed as a whole with ``time.perf_counter``; ``verify_step()`` (the deferred
+decode status reads, which upstream never does at step time) runs after the stop and is timed on
+its own as ``verify_s``. ``--warmup`` steps run untimed, then ``--steps`` timed. Between them the
 parity conditions are asserted: the compressed set is loaded, the memory caps and cache limit are
 recorded, nothing is pending, the launches so far match the mode, and the latents are finite. A
 failed condition is exit 2 with the names in the JSON. Every timed step's launch count must equal
@@ -232,7 +233,9 @@ def check_embeds_shapes(
 def report(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Paired overheads per round, pooled medians with spreads, and the eval-policy cost.
 
-    ``results`` are run JSONs with ``round``, ``mode`` and ``step_s`` (the timed steps). A round's
+    ``results`` are run JSONs with ``round``, ``mode`` and ``step_s`` (the timed steps), and
+    optionally ``verify_s`` (the status validation timed outside the step window, pooled to
+    ``verify_median_s``, None when no result of the mode recorded it). A round's
     pair is reported only when both of its modes are present; a mode is pooled over every timed
     step of every round it ran in; the overheads come from the pooled medians;
     ``eval_policy_cost_s`` is the pooled control median minus the pooled control-noeval median,
@@ -243,12 +246,15 @@ def report(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """
     by_round: dict[int, dict[str, list[float]]] = {}
     reps: dict[str, list[float]] = {}
+    verify_reps: dict[str, list[float]] = {}
     for r in results:
         steps = [float(s) for s in r["step_s"]]
         if not steps:
             raise BenchError(f"round {r['round']} {r['mode']}: no timed steps")
-        by_round.setdefault(int(r["round"]), {})[str(r["mode"])] = steps
-        reps.setdefault(str(r["mode"]), []).extend(steps)
+        mode = str(r["mode"])
+        by_round.setdefault(int(r["round"]), {})[mode] = steps
+        reps.setdefault(mode, []).extend(steps)
+        verify_reps.setdefault(mode, []).extend(float(s) for s in r.get("verify_s", ()))
     rounds = {
         rnd: {
             label: overhead(
@@ -260,7 +266,14 @@ def report(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         for rnd, modes in sorted(by_round.items())
     }
     pooled = {
-        mode: {"median": t.median, "spread": t.spread, "n": len(t.reps)}
+        mode: {
+            "median": t.median,
+            "spread": t.spread,
+            "n": len(t.reps),
+            "verify_median_s": (
+                Timing(reps=tuple(verify_reps[mode])).median if verify_reps[mode] else None
+            ),
+        }
         for mode, t in ((m, Timing(reps=tuple(v))) for m, v in reps.items())
     }
     overheads = {
@@ -370,8 +383,12 @@ def denoise_step(
     prompt: mx.array,
     pooled: mx.array,
     t: int,
-) -> tuple[mx.array, float]:
-    """Mflux's loop body for step ``t`` plus ``verify_step()``, timed as a whole; returns (latents, seconds)."""
+) -> tuple[mx.array, float, float]:
+    """The upstream loop body for step ``t``, timed to its eval; then ``verify_step()``, timed on its own.
+
+    Returns ``(latents, step seconds, verify seconds)``. The measured window holds exactly what
+    upstream runs per step; the status validation is DF11's separate, reported cost.
+    """
     start = time.perf_counter()
     latents = config.scheduler.scale_model_input(latents, t)
     noise = transformer(
@@ -379,8 +396,9 @@ def denoise_step(
     )
     latents = config.scheduler.step(noise=noise, timestep=t, latents=latents)
     mx.eval(latents)
+    stop = time.perf_counter()
     transformer.verify_step()
-    return latents, time.perf_counter() - start
+    return latents, stop - start, time.perf_counter() - stop
 
 
 def run_mode(
@@ -429,18 +447,20 @@ def run_mode(
     launches_per_step: list[int] = []
     footprint_peak = phys_footprint()
 
-    def run_steps(first: int, count: int) -> list[float]:
+    def run_steps(first: int, count: int) -> tuple[list[float], list[float]]:
         nonlocal latents, footprint_peak
         seconds: list[float] = []
+        verify: list[float] = []
         for t in range(first, first + count):
             before = provider.launches
-            latents, took = denoise_step(transformer, config, latents, prompt, pooled, t)
+            latents, took, checked = denoise_step(transformer, config, latents, prompt, pooled, t)
             seconds.append(took)
+            verify.append(checked)
             launches_per_step.append(provider.launches - before)
             footprint_peak = max(footprint_peak, phys_footprint())
-        return seconds
+        return seconds, verify
 
-    warmup_s = run_steps(0, args.warmup)
+    warmup_s, warmup_verify_s = run_steps(0, args.warmup)
     failed = parity_conditions(
         compressed_loaded=provider.groups_evaluated,
         limits_recorded=limits_recorded,
@@ -451,7 +471,7 @@ def run_mode(
     )
     if failed:
         raise ParityError(failed)
-    step_s = run_steps(args.warmup, args.steps)
+    step_s, verify_s = run_steps(args.warmup, args.steps)
     if any(n != per_step for n in launches_per_step[args.warmup :]):
         raise BenchError(
             f"timed steps made {launches_per_step[args.warmup :]} launches; {mode} expects "
@@ -477,6 +497,9 @@ def run_mode(
         "warmup_s": warmup_s,
         "median_s": timing.median,
         "spread": timing.spread,
+        "verify_s": verify_s,
+        "warmup_verify_s": warmup_verify_s,
+        "verify_median_s": Timing(reps=tuple(verify_s)).median,
         "launches_per_step": launches_per_step,
         "launches_expected_per_step": per_step,
         "launches_total": provider.launches,
@@ -530,7 +553,8 @@ def run_one(args: argparse.Namespace) -> int:
     if code == EXIT_OK:
         print(
             f"ok: {args.mode} ({summary['policy']}) median {summary['median_s']:.3f} s "
-            f"spread {summary['spread']:.3f} over {args.steps} steps, "
+            f"spread {summary['spread']:.3f} over {args.steps} steps "
+            f"(+ {summary['verify_median_s']:.4f} s status validation, outside the window), "
             f"{summary['launches_expected_per_step']} launches/step, footprint peak "
             f"{summary['footprint_peak_bytes'] / 1024**3:.2f} GiB"
         )
@@ -547,9 +571,11 @@ def _print_report(rep: Mapping[str, Any]) -> None:
         pairs_text = ", ".join(f"{label} {value:+.1%}" for label, value in pairs.items())
         print(f"round {rnd}: {pairs_text or 'no complete pair'}")
     for mode, stats in rep["pooled"].items():
+        verify = stats["verify_median_s"]
+        verify_text = f", validation {verify:.4f} s" if verify is not None else ""
         print(
             f"pooled {mode}: median {stats['median']:.3f} s spread {stats['spread']:.3f} "
-            f"(n={stats['n']})"
+            f"(n={stats['n']}{verify_text})"
         )
     for label, value in rep["overhead"].items():
         print(f"overhead {label}: {value:+.1%}")

@@ -26,15 +26,21 @@ from scripts.bench_flux_step import (
 
 # Two rounds of fixture step times (seconds). Medians: r1 df11 1.2, control 1.0, df11-depth2 1.1,
 # control-depth2 1.0, control-noeval 0.9; r2 df11 1.5, control 1.1. Pooled df11 (6 reps) 1.35,
-# pooled control 1.0.
+# pooled control 1.0. `verify_s` is the status validation timed outside the step window: pooled
+# df11 (0.01, 0.02, 0.03, 0.02, 0.04, 0.03) has median 0.025; control-noeval carries none.
 FIXTURES = [
-    {"round": 1, "mode": "df11", "step_s": [1.2, 1.3, 1.1]},
-    {"round": 1, "mode": "control", "step_s": [1.0, 1.0, 1.0]},
-    {"round": 1, "mode": "df11-depth2", "step_s": [1.1, 1.05, 1.15]},
-    {"round": 1, "mode": "control-depth2", "step_s": [1.0, 1.0, 1.0]},
+    {"round": 1, "mode": "df11", "step_s": [1.2, 1.3, 1.1], "verify_s": [0.01, 0.02, 0.03]},
+    {"round": 1, "mode": "control", "step_s": [1.0, 1.0, 1.0], "verify_s": [0.0, 0.0, 0.0]},
+    {
+        "round": 1,
+        "mode": "df11-depth2",
+        "step_s": [1.1, 1.05, 1.15],
+        "verify_s": [0.02, 0.02, 0.02],
+    },
+    {"round": 1, "mode": "control-depth2", "step_s": [1.0, 1.0, 1.0], "verify_s": [0.0, 0.0, 0.0]},
     {"round": 1, "mode": "control-noeval", "step_s": [0.9, 0.9, 0.9]},
-    {"round": 2, "mode": "df11", "step_s": [1.5, 1.4, 1.6]},
-    {"round": 2, "mode": "control", "step_s": [1.0, 1.2, 1.1]},
+    {"round": 2, "mode": "df11", "step_s": [1.5, 1.4, 1.6], "verify_s": [0.02, 0.04, 0.03]},
+    {"round": 2, "mode": "control", "step_s": [1.0, 1.2, 1.1], "verify_s": [0.0, 0.0, 0.0]},
 ]
 
 
@@ -224,9 +230,28 @@ def test_report_pools_every_timed_step_of_a_mode_across_rounds():
         "median": pytest.approx(1.35),
         "spread": pytest.approx(0.5 / 1.35),
         "n": 6,
+        "verify_median_s": pytest.approx(0.025),
     }
-    assert pooled["control"] == {"median": pytest.approx(1.0), "spread": pytest.approx(0.2), "n": 6}
+    assert pooled["control"] == {
+        "median": pytest.approx(1.0),
+        "spread": pytest.approx(0.2),
+        "n": 6,
+        "verify_median_s": pytest.approx(0.0),
+    }
     assert pooled["control-noeval"]["n"] == 3
+
+
+def test_report_pools_the_status_validation_time_outside_the_step_window():
+    # Bug caught: verify_s folded into step_s (df11's pooled median would read 1.37 instead of
+    # 1.35), or the validation median taken per round (r1 0.02, r2 0.03) instead of over 6 reps.
+    pooled = report(FIXTURES)["pooled"]
+    assert pooled["df11"]["median"] == pytest.approx(1.35)
+    assert pooled["df11"]["verify_median_s"] == pytest.approx(0.025)
+
+
+def test_report_without_verify_times_has_a_none_validation_median():
+    # Bug caught: a KeyError on a result that never recorded verify_s (control-noeval here).
+    assert report(FIXTURES)["pooled"]["control-noeval"]["verify_median_s"] is None
 
 
 def test_report_overhead_is_from_the_pooled_medians():
