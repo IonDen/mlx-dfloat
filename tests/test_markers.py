@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 import conftest  # pytest prepend mode adds tests/ to sys.path
-from conftest import GATED_MARKERS, _hard_exit_code, _markers_to_skip
+from conftest import GATED_MARKERS, _hard_exit_code, _markers_to_skip, _metal_marker_action
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -42,3 +42,42 @@ def test_a_pytest_usage_error_still_exits_non_zero():
         check=False,
     )
     assert result.returncode == 4, result.stderr[-500:]
+
+
+def test_metal_marker_runs_on_apple_silicon():
+    # Bug caught: skipping the Metal suite on the one platform that must run it.
+    assert _metal_marker_action("Darwin", "arm64") == "run"
+
+
+def test_metal_marker_skips_elsewhere():
+    # Bug caught: a Linux or Intel job trying to dispatch a Metal kernel.
+    assert _metal_marker_action("Linux", "x86_64") == "skip"
+    assert _metal_marker_action("Darwin", "x86_64") == "skip"
+
+
+def test_metal_marker_collection_succeeds():
+    # Bug caught: a typo in the collection hook (e.g. `_metal_marker_action_TYPO`) that crashes
+    # `pytest_collection_modifyitems` outright. Confirmed empirically: that specific crash exits
+    # 3 (INTERNALERROR), traceback pointing at the bad name. `tests/test_decode_parity.py` is
+    # marked `metal`, so a working hook collects at least that file and pytest exits 0; a hook
+    # that deselected everything would exit 5 ("no tests collected") and fail here too.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-q",
+            "-m",
+            "metal",
+            "-p",
+            "no:cacheprovider",
+        ],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-2000:]
+    assert "test_decode_parity.py" in result.stdout

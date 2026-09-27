@@ -1,4 +1,5 @@
 import json
+import sys
 import threading
 
 import pytest
@@ -68,11 +69,12 @@ def test_watchdog_fires_memory_abort_and_writes_the_artifact(tmp_path, monkeypat
     assert artifact["reason"] == "memory"
     assert set(artifact) >= {
         "reason",
-        "rss",
-        "peak_rss",
+        "footprint",
+        "peak_footprint",
         "ceiling",
         "elapsed",
         "budget",
+        "rss",
         "mlx_active",
         "mlx_cache",
     }
@@ -86,27 +88,18 @@ def test_watchdog_fires_wall_abort(tmp_path, monkeypatch):
     assert artifact["reason"] == "wall"
 
 
-def test_memory_verdict_includes_mlx_active_and_cache(tmp_path, monkeypatch):
-    # Bug caught: a watchdog that feeds `verdict` bare process RSS would miss MLX buffers that
-    # never land in RSS on this platform (measured: ~1 GB active, ~0 RSS delta). Either MLX term
-    # alone (1e9) stays under the 1.5e9 ceiling; only active + cache crosses it.
-    _stub_memory(monkeypatch, rss=0, mlx_active=10**9, mlx_cache=10**9)
-    exit_codes = _run_watchdog_to_abort(tmp_path, monkeypatch, ceiling=15 * 10**8, budget=1e9)
-    assert exit_codes == [70]
-    artifact = json.loads((tmp_path / "abort.json").read_text())
-    assert artifact["mlx_active"] == 10**9
-    assert artifact["mlx_cache"] == 10**9
-
-
-def test_memory_verdict_includes_process_rss(tmp_path, monkeypatch):
-    # Bug caught: dropping the `rss` term leaves the NumPy-only parity scripts (their memory is
-    # invisible to MLX's counters) with no working ceiling at all.
-    _stub_memory(monkeypatch, rss=10**12, mlx_active=0, mlx_cache=0)
-    exit_codes = _run_watchdog_to_abort(tmp_path, monkeypatch, ceiling=10**11, budget=1e9)
-    assert exit_codes == [70]
-    artifact = json.loads((tmp_path / "abort.json").read_text())
-    assert artifact["reason"] == "memory"
-    assert artifact["rss"] == 10**12
+def test_sample_records_rss_mlx_active_and_cache_alongside_footprint(tmp_path, monkeypatch):
+    # Bug caught: switching the enforced ceiling number to the OS footprint and dropping rss/
+    # mlx_active/mlx_cache from the sample would lose the diagnostic fields the parity scripts'
+    # own abort artifacts rely on, even though those fields no longer drive the verdict.
+    monkeypatch.setattr(wd, "phys_footprint", lambda: 10**6)
+    _stub_memory(monkeypatch, rss=10**12, mlx_active=2 * 10**9, mlx_cache=3 * 10**9)
+    reason, sample = wd.Watchdog(tmp_path, ceiling=10**15, budget=1e9)._sample()
+    assert reason is None
+    assert sample["footprint"] == 10**6
+    assert sample["rss"] == 10**12
+    assert sample["mlx_active"] == 2 * 10**9
+    assert sample["mlx_cache"] == 3 * 10**9
 
 
 def test_a_stopped_watchdog_never_writes_an_abort_or_exits(tmp_path, monkeypatch):
@@ -150,3 +143,88 @@ def test_watchdog_still_exits_when_the_artifact_write_itself_fails(tmp_path, mon
     exit_codes = _run_watchdog_to_abort(blocked, monkeypatch, ceiling=0, budget=1e9)
     assert exit_codes
     assert exit_codes[0] == 70
+
+
+def test_verdict_uses_the_os_footprint_not_rss_plus_mlx(monkeypatch, tmp_path):
+    # Bug caught: counting mx.load'ed arrays twice (RSS and MLX active) and false-aborting at half
+    # the real ceiling.
+    monkeypatch.setattr(wd, "phys_footprint", lambda: 10**9)
+    monkeypatch.setattr(wd.psutil, "Process", _FixedRssProcess(rss=10**12))
+    monkeypatch.setattr(wd.mx, "get_active_memory", lambda: 10**12)
+    monkeypatch.setattr(wd.mx, "get_cache_memory", lambda: 0)
+    reason, sample = wd.Watchdog(tmp_path, ceiling=5 * 10**9, budget=60)._sample()
+    assert reason is None
+    assert sample["footprint"] == 10**9
+    assert sample["rss"] == 10**12
+
+
+def test_footprint_over_the_ceiling_aborts_with_70(monkeypatch, tmp_path):
+    monkeypatch.setattr(wd, "phys_footprint", lambda: 10**12)
+    exits = []
+    monkeypatch.setattr(wd, "_exit", lambda code: exits.append(code))
+    w = wd.Watchdog(tmp_path, ceiling=10**11, budget=60)
+    reason, sample = w._sample()
+    w._fire(reason, sample)
+    assert reason == "memory"
+    assert exits == [70]
+    artifact = json.loads((tmp_path / "abort.json").read_text())
+    assert artifact["footprint"] == 10**12
+    assert artifact["peak_footprint"] == 10**12
+
+
+def test_reset_peak_starts_the_footprint_peak_over(monkeypatch, tmp_path):
+    # Bug caught: a peak that spans the process lifetime, so the model-load spike hides the timed
+    # steps' own peak; or a reset that also forgets to track the next sample.
+    values = iter([10**9, 10**6])
+    monkeypatch.setattr(wd, "phys_footprint", lambda: next(values))
+    w = wd.Watchdog(tmp_path, ceiling=10**15, budget=60)
+    w._sample()
+    assert w.peak_footprint == 10**9
+    w.reset_peak()
+    assert w.peak_footprint == 0
+    w._sample()
+    assert w.peak_footprint == 10**6
+
+
+def test_a_failing_footprint_read_aborts_as_a_sample_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(wd, "phys_footprint", lambda: (_ for _ in ()).throw(OSError("rusage")))
+    reason, _ = wd.Watchdog(tmp_path, ceiling=10**11, budget=60)._sample()
+    assert reason == "sample_error"
+
+
+_FOOTPRINT_RUNNER = """
+import json, sys
+import mlx.core as mx, psutil
+from scripts._watchdog import phys_footprint
+before, rss_before = phys_footprint(), psutil.Process().memory_info().rss
+a = mx.zeros((256 * 1024 * 1024,), dtype=mx.uint8)
+mx.eval(a)
+after, rss_after = phys_footprint(), psutil.Process().memory_info().rss
+print(json.dumps({"footprint": after - before, "rss": rss_after - rss_before}))
+"""
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="libproc footprint is macOS-only")
+def test_phys_footprint_sees_a_gpu_allocation_that_rss_misses():
+    # Bug caught: a wrong struct field (resident size or wired size would not move with a Metal
+    # allocation). Runs in a cold subprocess: in the test process the Metal driver hands a freed
+    # region of the same size straight back (the footprint then moves by nothing), and it reclaims
+    # freed regions lazily, so an in-process before/after pair depends on what ran earlier.
+    import json
+    import subprocess
+    from pathlib import Path
+
+    proc = subprocess.run(
+        [sys.executable, "-c", _FOOTPRINT_RUNNER],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    deltas = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert deltas["footprint"] > 200 * 1024**2
+    # RSS may pick up a little of a Metal allocation; the point is that it does not grow by the
+    # allocation while the footprint does.
+    assert deltas["rss"] < 200 * 1024**2

@@ -2,14 +2,16 @@
 
 import atexit
 import os
+import platform
 import sys
+from typing import Literal
 
 import pytest
 
 from mlx_dfloat._memory_caps import install_memory_caps
 
 GATED_MARKERS: tuple[tuple[str, str, str], ...] = (
-    ("slow", "--run-slow", "real-weights decode or Metal kernel test"),
+    ("slow", "--run-slow", "real-weights decode"),
     ("network", "--run-network", "real network I/O"),
 )
 
@@ -27,6 +29,11 @@ def _markers_to_skip(enabled_flags: set[str]) -> list[tuple[str, str]]:
         for marker, flag, description in GATED_MARKERS
         if flag not in enabled_flags
     ]
+
+
+def _metal_marker_action(system: str, machine: str) -> Literal["run", "skip"]:
+    """`metal` tests run (and may fail) on Apple Silicon; elsewhere they skip with a reason."""
+    return "run" if (system == "Darwin" and machine == "arm64") else "skip"
 
 
 def _hard_exit_code(recorded: int | None) -> int | None:
@@ -54,6 +61,12 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         for item in items:
             if marker in item.keywords:
                 item.add_marker(skip)
+
+    if _metal_marker_action(platform.system(), platform.machine()) == "skip":
+        metal_skip = pytest.mark.skip(reason="metal: requires Apple Silicon")
+        for item in items:
+            if "metal" in item.keywords:
+                item.add_marker(metal_skip)
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:

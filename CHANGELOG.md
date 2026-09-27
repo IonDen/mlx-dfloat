@@ -18,3 +18,35 @@ All notable changes to this project are documented here. The format follows
   checkpoint, the other samples a few groups of a Hugging Face repo over range requests. They exit 0 when every
   compared value matches, 1 on a real mismatch, 2 on any other error, and 70 or 71 when the memory or wall-clock
   watchdog aborts the run.
+- A Metal decode kernel for DFloat11 groups, behind `mlx_dfloat.decode`. `decode_group(group, backend="metal")`
+  returns the BF16 bit patterns and a per-block status word, `check` refuses a group whose status reports an invalid
+  code, a count mismatch or a broken thread chain, and `available_backends` says whether the kernel compiles and runs
+  on this machine; nothing falls back silently. Every decode path is tested bit for bit against the NumPy reference:
+  hand-built codebooks, encoder round-trips, a real Qwen3-4B slice, and corrupt inputs that must end with an error
+  instead of a hang. On an M1 Max the kernel decodes 50 to 54 GB/s of BF16 output when a block's output is staged
+  through threadgroup memory and 19 to 24 GB/s when it writes straight to device memory
+  (`scripts/bench_decode_kernel.py`, median of 5 repetitions after a warm-up); staged is the default, and the direct
+  path is the fallback for blocks larger than the staging buffer. `verify_checkpoint.py --decoder metal` checks a
+  whole checkpoint through the kernel, against the BF16 original when one is given and against the reference
+  otherwise: Qwen3-4B decodes bit-identically in 12.8 s where the reference took 223 s, and all 57 groups of
+  FLUX.1-schnell match the reference.
+- A measurement rig for the question the project hinges on: how much a FLUX.1 denoise step slows down when every
+  transformer block's weights are decoded just in time. `scripts/bench_flux_step.py` runs one mode per process, either
+  decoding per block or a control that swaps pre-decoded weights into the same graph, and reports the paired overhead;
+  `scripts/bench_control_validation.py` checks that control against a run whose BF16 weights are all resident, on a
+  reduced-depth transformer and through the same per-block path; `scripts/encode_prompt.py` encodes the prompt once,
+  so the timed process holds no text encoder. Measured on an M1 Max (32 GB, macOS 27.0, mlx 0.32.2, mflux 0.20.0) at
+  1024², five timed steps in each of three rounds: FLUX.1-schnell costs 6.1 % more per step with a one-block
+  evaluation run-ahead and 8.5 % with a per-block evaluation; FLUX.1-dev costs 5.0 % either way (the dev prompt was
+  encoded with the schnell text encoders at 512 tokens, the same T5 and CLIP architecture, because the dev base
+  repository is gated). The control agrees with that run within 0.13 %; the per-block evaluation itself costs 0.21 s
+  (schnell) to 0.26 s (dev) per step, measured against a control that evaluates only at the end of the step. In the
+  step, decoding costs 2.1 to 3.4 times what the isolated kernel benchmark predicts from its throughput; the
+  difference is recorded, not explained. A timed process peaks at about 19 GiB of memory.
+- The scripts' memory watchdog now enforces its ceiling on the process footprint the OS reports rather than on RSS
+  plus MLX memory, which counted loaded arrays twice.
+
+### Changed
+
+- CI runs the whole test suite, Metal tests included, on the macOS runner, which reports a Metal device; a probe step
+  prints the device it found.

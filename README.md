@@ -19,7 +19,7 @@ one BF16 weight, 16 bits:    s   eeeeeeee   mmmmmmm
 Why that matters on a Mac: unified memory is the limit. The BF16 FLUX.1-dev transformer is about 24 GB,[^flux] more
 than the GPU on a 32 GB machine can comfortably hold. At 70% it should come in under that line, and unlike 4-bit or
 8-bit quantization it changes nothing in the output. Whether it really fits on a given Mac is something this project
-has to measure, and the first measured number will be published here.
+has to measure, and the first measured numbers are in the status below.
 
 ## Status
 
@@ -28,9 +28,14 @@ Pre-alpha. Nothing to install yet, and not on PyPI. Two milestones decide whethe
 1. A bit-exact reference decoder for published DFloat11 checkpoints. **Done.** Every compressed tensor of Qwen3-4B,
    and sampled blocks of FLUX.1-schnell, FLUX.1-Krea-dev, Qwen-Image-Edit and Qwen-Image-Edit-2509, decode to
    exactly the BF16 originals. That covers all four published versions of the checkpoint format.
-2. A Metal decode kernel fast enough to run inside an image-generation step. Not started.
+2. A Metal decode kernel fast enough to run inside an image-generation step. **Measured.** The kernel decodes the
+   published checkpoints bit-exactly at 50 GB/s on an M1 Max, and decoding every block just in time adds 5 %
+   (FLUX.1-dev) to 6 % (FLUX.1-schnell, with a one-block evaluation run-ahead; 8.5 % with per-block evaluation) to a
+   1024² denoise step, well under the project's ~25 % threshold. That is measured against a control that agrees
+   within 0.13 % with a run whose BF16 weights are all resident, through the same per-block path. The recipe and
+   numbers are in the changelog.
 
-If the second milestone fails, the repository will say so and why.
+Both milestones are measured; the next step is the mflux integration.
 
 ## Try it
 
