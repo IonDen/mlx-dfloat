@@ -9,9 +9,15 @@ footprint baseline is the same; the control's two decoded blocks are its only ex
 variants run the depth-2 eval policy: its look-ahead is bounded by MLX's command-buffer window (the
 encoding thread blocks once enough committed buffers are in flight, so ``async_eval`` of block i
 returns only near its end and the next block's decode never runs alongside block i's matmuls on the
-same in-order stream); what it saves is the host-side gap between blocks, on the DF11 and the
-control side alike. ``control-noeval`` runs the control with no eval inside the step, so ``control -
-control-noeval`` is the eval policy's own cost. No text encoder or VAE is
+same in-order stream); what it hides is host-side work done while the GPU runs block i, above all
+the allocation of decode outputs that miss the buffer cache. ``control-noeval`` runs the control
+with no eval inside the step, so ``control - control-noeval`` is the eval policy's own cost.
+``--trace`` records per-block phase stamps; ``--cache-limit`` sets the MLX buffer-cache limit (at
+the default 1.4 GB the decode outputs miss the exact-size cache at every double/single switch, which
+costs 1.29 s per schnell step; 2.5 GB holds one buffer of each size). ``--modes`` runs a subset,
+including the two look-ahead experiment modes (``df11-prefetch`` decodes the next block on a
+second GPU stream while this one runs, ``df11-prefetch-inline`` on the default stream); measured
+2026-09-27, neither beats per-block once the cache limit fits. No text encoder or VAE is
 loaded: the prompt embeddings come from ``--embeds`` (``scripts/encode_prompt.py``). Activation
 dtypes follow mflux exactly: the latents stay the float32 ``create_noise`` returns and the
 embeddings keep the dtype the encoder produced (T5 float32, CLIP bfloat16; a synthetic file is

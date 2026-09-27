@@ -41,8 +41,14 @@ All notable changes to this project are documented here. The format follows
   encoded with the schnell text encoders at 512 tokens, the same T5 and CLIP architecture, because the dev base
   repository is gated). The control agrees with that run within 0.13 %; the per-block evaluation itself costs 0.21 s
   (schnell) to 0.26 s (dev) per step, measured against a control that evaluates only at the end of the step. In the
-  step, decoding costs 2.1 to 3.4 times what the isolated kernel benchmark predicts from its throughput; the
-  difference is recorded, not explained. A timed process peaks at about 19 GiB of memory.
+  step, decoding costs 2.1 to 3.4 times what the isolated kernel benchmark predicts from its throughput. Most of that
+  difference is memory allocation: at the bench's 1.4 GB cache limit the decode outputs miss MLX's exact-size buffer
+  cache at every switch between block sizes, which costs 1.29 s of a schnell step (the bench's `--trace` and
+  `--cache-limit` options measure it). With a 2.5 GB limit, enough for one buffer of each decoded size, the per-block
+  overhead on schnell is 4.0 % for one more GiB of memory, and the in-step decode time is 1.5 times the isolated
+  prediction. Decoding the next block on a second GPU stream while the current one runs (`df11-prefetch`) hides about
+  a fifth of the kernel's time and none of the allocation, so the integration will not do that. A timed process peaks
+  at 19 to 20 GiB of memory.
 - The scripts' memory watchdog now enforces its ceiling on the process footprint the OS reports rather than on RSS
   plus MLX memory, which counted loaded arrays twice.
 

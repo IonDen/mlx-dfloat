@@ -66,14 +66,21 @@ DROPPED_EXTRAS: frozenset[str] = frozenset({"norm_out.linear.bias"})
 PLACEHOLDER = mx.zeros((0,), dtype=mx.bfloat16)
 MAX_BUILD_ACTIVE_BYTES = 2 * 1024**3
 # MLX cache limit every FLUX rig process sets before building (the smoke and the step bench share it).
+# At this limit the decode outputs (679 MB double, 283 MB single) miss the exact-size buffer cache at
+# every size switch; the misses cost 1.29 s per 1024² step (measured 2026-09-27) and a 2.5e9 limit
+# removes them for +1 GiB of footprint. The bench keeps 1.4e9 as the recorded default so runs stay
+# comparable with the 0003 numbers; `--cache-limit` sets another.
 FLUX_CACHE_LIMIT = int(1.4e9)
 EvalPolicy = Literal["per-block", "depth2", "none"]
 # "per-block": mx.eval each block's output. "depth2": async_eval it, then eval the previous block's.
 # The depth2 look-ahead is bounded by MLX's command-buffer window: the encoding thread blocks once
 # enough committed buffers are in flight, so async_eval(out_i) returns only near the end of block i,
 # and the next block's decode never overlaps block i's matmuls on the same in-order stream. What it
-# saves is the host-side gap between blocks, on the DF11 and the control side alike; it is not a
-# decode/compute overlap. "none": no evaluation inside the step; for ReuseProvider (the
+# hides is host-side work done while the GPU still runs block i, above all the allocation of decode
+# outputs that miss the buffer cache (measured: 0.80 s per FLUX.1-schnell step on the DF11 side,
+# 0.03 s on the control side, at the 1.4 GB limit); it is not a decode/compute overlap. A cache
+# limit that holds one buffer of each decoded size removes that cost for both policies.
+# "none": no evaluation inside the step; for ReuseProvider (the
 # control-noeval run) only, since a launching provider would keep every decoded group alive until
 # the final eval (~24 GB on FLUX.1).
 EVAL_POLICIES: tuple[str, ...] = ("per-block", "depth2", "none")
