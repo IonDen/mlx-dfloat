@@ -3,9 +3,10 @@
 Builds mflux's ``Transformer`` with ``--double`` joint and ``--single`` single blocks (every extra
 loaded, every block matrix a placeholder), loads those blocks' DF11 groups, and runs ``--steps``
 steps in two modes: ``df11`` (``DF11Provider``: one Metal decode per block, the chosen eval policy)
-and ``control`` (``ResidentProvider`` over the same decoded weights, no launches). Every output must
-be finite. The report carries the launches per step, the per-step times, the footprint peak and
-whether the two modes' outputs are bit-identical (reported, not asserted).
+and ``control`` (``ResidentProvider`` over the same decoded weights, no launches), each after one
+untimed warm-up step. Every output must be finite. The report carries the launches, the per-step
+times (labelled: not a measurement), the footprint peak, the cache limit and whether the two modes'
+outputs are bit-identical (reported, not asserted).
 
 Gated heavy-run unit: it loads real weights and dispatches the decode kernel. Expected at 1+1 blocks
 and 256 px: about 2 GB and seconds.
@@ -34,6 +35,7 @@ try:
     from scripts._bench_common import provenance, write_json_atomic
     from scripts._flux_rig import (
         EVAL_POLICIES,
+        FLUX_CACHE_LIMIT,
         DF11Provider,
         ResidentProvider,
         RigError,
@@ -43,7 +45,6 @@ try:
     from scripts._watchdog import Watchdog, default_ceiling, phys_footprint
 
     from mlx_dfloat._memory_caps import install_memory_caps
-    from mlx_dfloat.errors import DFloatError
     from mlx_dfloat.format import open_checkpoint
 except Exception as exc:  # a broken environment is 2, never the non-finite signal (1)
     print(
@@ -115,24 +116,32 @@ def make_inputs(args: argparse.Namespace, precision: Any) -> tuple[mx.array, mx.
     return inputs
 
 
+STEP_S_NOTE = "not a measurement (single step; JIT and warm-up effects)"
+
+
 def run_steps(
     transformer: Any, config: Any, inputs: tuple[mx.array, mx.array, mx.array], steps: int
 ) -> tuple[mx.array, list[float]]:
-    """Run ``steps`` denoise steps (t = 0, 1, ...) and time each one to its final ``mx.eval``."""
+    """One untimed warm-up step, then ``steps`` steps (t = 0, 1, ...) timed to their final eval.
+
+    Every step ends with ``verify_step()``, which reads the decode status words after the eval.
+    """
     hidden, prompt, pooled = inputs
     times: list[float] = []
     out = hidden
-    for t in range(steps):
+    for t in range(-1, steps):  # -1 is the warm-up
         start = time.perf_counter()
         out = transformer(
-            t=t,
+            t=max(t, 0),
             config=config,
             hidden_states=hidden,
             prompt_embeds=prompt,
             pooled_prompt_embeds=pooled,
         )
         mx.eval(out)
-        times.append(time.perf_counter() - start)
+        transformer.verify_step()
+        if t >= 0:
+            times.append(time.perf_counter() - start)
     return out, times
 
 
@@ -167,12 +176,15 @@ def smoke(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, object]:
     transformer.attach(df11, shapes, eval_policy=args.policy)
     out_df11, df11_times = run_steps(transformer, config, inputs, args.steps)
     launches_df11 = df11.launches
-    if launches_df11 != args.steps * len(names):
-        raise RigError(f"{launches_df11} launches for {args.steps} steps of {len(names)} blocks")
+    if launches_df11 != (args.steps + 1) * len(names):  # + the warm-up step
+        raise RigError(
+            f"{launches_df11} launches for {args.steps} + 1 steps of {len(names)} blocks"
+        )
     finite_df11 = bool(mx.isfinite(out_df11).all().item())
 
     per_block = {n: df11.weights_for(n, shapes[n]) for n in names}
     mx.eval(per_block)
+    df11.verify()
     control = ResidentProvider(per_block)
     transformer.attach(control, shapes, eval_policy=args.policy)
     out_control, control_times = run_steps(transformer, config, inputs, args.steps)
@@ -190,12 +202,20 @@ def smoke(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, object]:
         "embeds": "synthetic" if args.synthetic else str(args.embeds),
         "seed": args.seed,
         "output_shape": list(out_df11.shape),
-        "df11": {"launches": launches_df11, "step_s": df11_times, "finite": finite_df11},
+        "step_s_note": STEP_S_NOTE,
+        "df11": {
+            "launches": launches_df11,
+            "launches_per_step": len(names),
+            "step_s": df11_times,
+            "finite": finite_df11,
+        },
         "control": {
             "launches": control.launches,
+            "launches_per_step": 0,
             "step_s": control_times,
             "finite": finite_control,
         },
+        "cache_limit_bytes": FLUX_CACHE_LIMIT,
         "outputs_bit_identical": equal,
         "active_after_build_bytes": active_after_build,
         "mlx_peak_memory_bytes": int(mx.get_peak_memory()),
@@ -209,22 +229,29 @@ def main(argv: list[str] | None = None) -> int:
     """Entry point: run the smoke under the watchdog and write ``smoke.json`` to ``--out``."""
     args = parse_args(argv)
     caps = list(install_memory_caps())
+    mx.set_cache_limit(FLUX_CACHE_LIMIT)
     args.out.mkdir(parents=True, exist_ok=True)
     watchdog = Watchdog(args.out, ceiling=default_ceiling(), budget=args.wall_budget).start()
     try:
         summary = smoke(args, watchdog)
-    except (DFloatError, RigError, OSError, ValueError, ImportError) as exc:
+    except Exception as exc:  # any unexpected failure is a tool error (2), never the verdict (0/1)
         summary = {"exit_code": EXIT_ERROR, "error": f"{type(exc).__name__}: {exc}"}
         traceback.print_exc()
     finally:
         watchdog.stop()
     summary["memory_caps_gb"] = caps
-    write_json_atomic(args.out / "smoke.json", summary)
+    summary["cache_limit_bytes"] = FLUX_CACHE_LIMIT
+    try:
+        write_json_atomic(args.out / "smoke.json", summary)
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"error: cannot write smoke.json ({exc})", file=sys.stderr)
+        summary["exit_code"] = EXIT_ERROR
     code = int(summary["exit_code"])  # type: ignore[arg-type]
     if code == EXIT_OK:
         print(
-            f"ok: {summary['df11']['launches']} launches over {args.steps} step(s), "  # type: ignore[index]
-            f"df11 {summary['df11']['step_s']} s, control {summary['control']['step_s']} s, "  # type: ignore[index]
+            f"ok: {summary['df11']['launches']} launches over {args.steps} + 1 step(s), "  # type: ignore[index]
+            f"df11 {summary['df11']['step_s']} s, control {summary['control']['step_s']} s "  # type: ignore[index]
+            f"({STEP_S_NOTE}), "
             f"footprint peak {int(summary['footprint_peak_bytes']) / 1024**3:.2f} GiB, "  # type: ignore[call-overload]
             f"bit-identical {summary['outputs_bit_identical']}"
         )

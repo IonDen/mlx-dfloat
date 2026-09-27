@@ -88,7 +88,16 @@ def check(result: DecodeResult, *, name: str = "<group>") -> None:
         DFloatFormatError: A block's status word has an error bit set (informational bits, such
             as `STATUS_PATH_DIRECT`, are ignored).
     """
-    status = np.array(result.status) & STATUS_ERROR_MASK
+    check_status(result.status, name=name)
+
+
+def check_status(status_words: mx.array, *, name: str = "<group>") -> None:
+    """``check`` on a bare status array: reads it on the host, so call it after the step's eval.
+
+    Raises:
+        DFloatFormatError: A block's status word has an error bit set.
+    """
+    status = np.array(status_words) & STATUS_ERROR_MASK
     bad = np.flatnonzero(status)
     if bad.size:
         b = int(bad[0])

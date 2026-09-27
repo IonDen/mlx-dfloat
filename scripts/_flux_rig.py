@@ -25,7 +25,7 @@ import mlx.nn as nn
 import numpy as np
 
 from mlx_dfloat._safetensors import TensorInfo, read_array
-from mlx_dfloat.decode import DecodeResult, check, decode_group, split_matrices
+from mlx_dfloat.decode import DecodeResult, check_status, decode_group, split_matrices
 from mlx_dfloat.format import DF11Checkpoint, MxGroup, load_group_mx
 
 DOUBLE_PREFIX = "transformer_blocks"
@@ -63,8 +63,16 @@ _MAPS = {DOUBLE_PREFIX: DOUBLE_MAP, SINGLE_PREFIX: SINGLE_MAP}
 DROPPED_EXTRAS: frozenset[str] = frozenset({"norm_out.linear.bias"})
 PLACEHOLDER = mx.zeros((0,), dtype=mx.bfloat16)
 MAX_BUILD_ACTIVE_BYTES = 2 * 1024**3
+# MLX cache limit every FLUX rig process sets before building (the smoke and the step bench share it).
+FLUX_CACHE_LIMIT = int(1.4e9)
 EvalPolicy = Literal["per-block", "depth2", "none"]
+# "per-block": mx.eval each block's output. "depth2": async_eval it, then eval the previous block's.
+# "none": no evaluation inside the step; for ReuseProvider (the control-noeval run) only, since a
+# launching provider would keep every decoded group alive until the final eval (~24 GB on FLUX.1).
 EVAL_POLICIES: tuple[str, ...] = ("per-block", "depth2", "none")
+MAX_NONE_POLICY_LAUNCHING_BLOCKS = (
+    2  # the reduced-depth validation (1+1) may still launch under "none"
+)
 _BLOCK_NAME = re.compile(rf"^({DOUBLE_PREFIX}|{SINGLE_PREFIX})\.(\d+)\.(.+)$")
 
 # The seam calls MLX through these names so a test can record the evaluation order.
@@ -190,13 +198,22 @@ def install_placeholders(transformer: Any) -> Shapes:
 
 
 class WeightProvider(Protocol):
-    """Hands the seam one block's matrices as ``{mflux attribute path: bf16 (out, in) array}``."""
+    """Hands the seam one block's matrices as ``{mflux attribute path: bf16 (out, in) array}``.
+
+    ``launching`` says whether ``weights_for`` decodes (so ``launches`` can grow); the seam uses it
+    to refuse the ``"none"`` policy over more than ``MAX_NONE_POLICY_LAUNCHING_BLOCKS`` blocks.
+    """
 
     launches: int
+    launching: bool
     groups_evaluated: bool
 
     def weights_for(self, block_name: str, shapes: BlockShapes) -> dict[str, mx.array]:
         """Weights for ``block_name``; ``shapes`` is that block's entry from ``install_placeholders``."""
+        ...
+
+    def verify(self) -> None:
+        """Check what ``weights_for`` deferred (the decode status words); call it after the step's eval."""
         ...
 
 
@@ -208,7 +225,15 @@ def _check_shapes(block_name: str, weights: Mapping[str, mx.array], shapes: Bloc
 
 
 class DF11Provider:
-    """Decodes each block's DF11 group when asked: one decode launch per call."""
+    """Decodes each block's DF11 group when asked: one decode launch per call.
+
+    The kernel's status words are not read inside ``weights_for`` (a host read there would sync
+    before every block and be counted as DF11 overhead); they are queued in ``pending`` and read by
+    ``verify()``, which the step caller runs after the step's final ``mx.eval`` (the status comes
+    out of the same launch as the bits, so by then it is already computed).
+    """
+
+    launching = True
 
     def __init__(
         self,
@@ -226,19 +251,29 @@ class DF11Provider:
         self._decode = decode if decode is not None else partial(decode_group, backend="metal")
         self.launches = 0
         self.groups_evaluated = True  # GroupArrays.to_mx evaluates every array it builds
+        self.pending: list[tuple[str, mx.array]] = []  # (block name, status words) not yet checked
+
+    def verify(self) -> None:
+        """Read every pending status word on the host and clear the list.
+
+        Raises:
+            DFloatFormatError: A block's decode reported an error; the message names the block.
+        """
+        pending, self.pending = self.pending, []
+        for block_name, status in pending:
+            check_status(status, name=block_name)
 
     def weights_for(self, block_name: str, shapes: BlockShapes) -> dict[str, mx.array]:
-        """Decode the block's group and cut it into ``(out, in)`` bf16 views (no copies).
+        """Decode the block's group and cut it into ``(out, in)`` bf16 views (no copies, no host read).
 
         Raises:
             RigError: The block is not resident, or a matrix's size does not match its shape.
-            DFloatFormatError: The kernel's status words report an error (via ``check``).
         """
         group = self._resident.get(block_name)
         if group is None:
             raise RigError(f"{block_name}: no resident DF11 group")
         result = self._decode(group)
-        check(result, name=block_name)
+        self.pending.append((block_name, result.status))
         parts = split_matrices(result.bits, group.split_positions)
         names = self._matrix_names[block_name]
         if len(names) != len(parts):
@@ -259,13 +294,21 @@ class DF11Provider:
 
 
 class ReuseProvider:
-    """One pre-decoded double-block dict and one single-block dict, returned for every block."""
+    """One pre-decoded double-block dict and one single-block dict, returned for every block.
+
+    The control provider: no launches, so it is the one the ``"none"`` policy is for.
+    """
+
+    launching = False
 
     def __init__(self, double: Mapping[str, mx.array], single: Mapping[str, mx.array]) -> None:
         """Keep the two dicts; they are handed back as-is."""
         self._dicts = {DOUBLE_PREFIX: dict(double), SINGLE_PREFIX: dict(single)}
         self.launches = 0
         self.groups_evaluated = True
+
+    def verify(self) -> None:
+        """Nothing deferred: no decode happened."""
 
     def weights_for(self, block_name: str, shapes: BlockShapes) -> dict[str, mx.array]:
         """The double or single dict, by the block's kind.
@@ -282,13 +325,21 @@ class ReuseProvider:
 
 
 class ResidentProvider:
-    """Per-block pre-decoded BF16 dicts (every block resident at once); never launches."""
+    """Per-block pre-decoded BF16 dicts (every block resident at once); never launches.
+
+    For the reduced-depth validation only: at full depth the resident set is the whole BF16 model.
+    """
+
+    launching = False
 
     def __init__(self, per_block: Mapping[str, Mapping[str, mx.array]]) -> None:
         """Keep the per-block dicts."""
         self._per_block = per_block
         self.launches = 0
         self.groups_evaluated = True
+
+    def verify(self) -> None:
+        """Nothing deferred: no decode happened."""
 
     def weights_for(self, block_name: str, shapes: BlockShapes) -> dict[str, mx.array]:
         """The block's resident dict.
@@ -320,6 +371,10 @@ class SeamMixin:
     Compose it in front of mflux's ``Transformer`` (``seam_transformer_class``) or a fake with the
     same hooks. Call ``attach`` before the first step. The state lives in a plain attribute so
     ``nn.Module`` never treats it as a parameter.
+
+    A step is: ``out = transformer(...)``, ``mx.eval(out)``, then ``transformer.verify_step()``,
+    which reads the decode status words the provider deferred. Nothing inside the step reads the
+    device, so the eval policy alone decides where the host waits.
     """
 
     _seam: _SeamState
@@ -330,11 +385,31 @@ class SeamMixin:
         """Bind the provider, the block shapes (from ``install_placeholders``) and the eval policy.
 
         Raises:
-            RigError: Unknown eval policy.
+            RigError: Unknown eval policy, or ``"none"`` with a launching provider over more than
+                ``MAX_NONE_POLICY_LAUNCHING_BLOCKS`` blocks (every decoded group would stay alive
+                until the final eval).
         """
         if eval_policy not in EVAL_POLICIES:
             raise RigError(f"unknown eval policy {eval_policy!r}; choose from {EVAL_POLICIES}")
+        if (
+            eval_policy == "none"
+            and provider.launching
+            and len(shapes) > MAX_NONE_POLICY_LAUNCHING_BLOCKS
+        ):
+            raise RigError(
+                f"eval policy 'none' with a launching provider over {len(shapes)} blocks would keep "
+                f"every decoded group resident until the final eval; 'none' is for ReuseProvider "
+                f"(or at most {MAX_NONE_POLICY_LAUNCHING_BLOCKS} blocks)"
+            )
         self._seam = _SeamState(provider=provider, shapes=shapes, policy=eval_policy)
+
+    def verify_step(self) -> None:
+        """Run the provider's deferred checks; call it after the step's final ``mx.eval``.
+
+        Raises:
+            DFloatFormatError: A block's decode reported an error (``DF11Provider.verify``).
+        """
+        self._seam_state().provider.verify()
 
     def _seam_state(self) -> _SeamState:
         try:
@@ -552,7 +627,9 @@ def build_transformer(
             )
         weights.append((name, array))
     transformer.load_weights(weights, strict=False)
-    mx.eval(transformer.parameters())
+    # Only what this function put in place: the extras and the placeholder. Never the whole
+    # parameter tree, which would materialise anything a future mflux leaves as lazy random init.
+    mx.eval([array for _name, array in weights], PLACEHOLDER)
     active = int(mx.get_active_memory())
     if active >= MAX_BUILD_ACTIVE_BYTES:
         raise RigError(
@@ -565,7 +642,9 @@ __all__ = [
     "DOUBLE_MAP",
     "DROPPED_EXTRAS",
     "EVAL_POLICIES",
+    "FLUX_CACHE_LIMIT",
     "MAX_BUILD_ACTIVE_BYTES",
+    "MAX_NONE_POLICY_LAUNCHING_BLOCKS",
     "PLACEHOLDER",
     "SINGLE_MAP",
     "DF11Provider",

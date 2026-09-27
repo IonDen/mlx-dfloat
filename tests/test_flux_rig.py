@@ -6,6 +6,8 @@ image_rotary_embeddings, controlnet_block_samples)` and the single-block twin), 
 exercised the way mflux will drive it. No test here imports mflux.
 """
 
+import dataclasses
+
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
@@ -29,7 +31,8 @@ from scripts._flux_rig import (
 from tests._decode_fixtures import encoder_group
 from tests._df11_fixtures import random_bf16, write_checkpoint
 
-from mlx_dfloat.decode import decode_group
+from mlx_dfloat.decode import STATUS_INVALID_CODE, decode_group
+from mlx_dfloat.errors import DFloatFormatError
 from mlx_dfloat.format import MxGroup, open_checkpoint
 
 D, FF = 4, 8  # hidden width and feed-forward width of the fakes
@@ -106,7 +109,8 @@ class Recorder:
 
     def __init__(self):
         self.seen = []  # the `attn.to_q.weight` array each block saw while it ran
-        self.events = []  # ("run" | "eval" | "async", id of the block's hidden output)
+        self.events = []  # ("run" | "eval" | "async", id of the object the block returned)
+        self.keep = []  # every recorded object, so no id can be reused by a later one
 
 
 class _Sub(nn.Module):
@@ -146,9 +150,10 @@ class FakeDoubleBlock(nn.Module):
 
     def __call__(self, hidden_states, encoder_hidden_states, text_embeddings, rotary_embeddings):
         self._recorder.seen.append(self.attn.to_q.weight)
-        hidden = self.attn.to_q(hidden_states)
-        self._recorder.events.append(("run", id(hidden)))
-        return encoder_hidden_states, hidden
+        out = (encoder_hidden_states, self.attn.to_q(hidden_states))
+        self._recorder.events.append(("run", id(out)))  # the whole tuple, as mflux returns it
+        self._recorder.keep.append(out)
+        return out
 
 
 class FakeSingleBlock(nn.Module):
@@ -164,6 +169,7 @@ class FakeSingleBlock(nn.Module):
         self._recorder.seen.append(self.attn.to_q.weight)
         hidden = self.attn.to_q(hidden_states)
         self._recorder.events.append(("run", id(hidden)))
+        self._recorder.keep.append(hidden)
         return hidden
 
 
@@ -452,10 +458,14 @@ def test_seam_refuses_a_provider_dict_that_does_not_match_the_block():
     # without the check the matmul would raise a shape error naming nothing useful.
     class Partial:
         launches = 0
+        launching = False
         groups_evaluated = True
 
         def weights_for(self, block_name, shapes):
             return {k: mx.zeros(v, dtype=mx.bfloat16) for k, v in list(shapes.items())[:-1]}
+
+        def verify(self):
+            pass
 
     tf = FakeSeamTransformer(Recorder(), n_double=1, n_single=0)
     shapes = install_placeholders(tf)
@@ -470,6 +480,75 @@ def test_seam_refuses_an_unknown_eval_policy():
     shapes = install_placeholders(tf)
     with pytest.raises(RigError, match="depth3"):
         tf.attach(ResidentProvider(_resident_dicts(shapes)), shapes, eval_policy="depth3")
+
+
+class _Launching:
+    """A provider that decodes (launches grow), like DF11Provider, without any groups."""
+
+    launches = 0
+    launching = True
+    groups_evaluated = True
+
+    def weights_for(self, block_name, shapes):
+        self.launches += 1
+        return {k: mx.zeros(v, dtype=mx.bfloat16) for k, v in shapes.items()}
+
+    def verify(self):
+        pass
+
+
+def test_none_policy_is_refused_for_a_launching_provider_over_more_than_two_blocks():
+    # Bug caught: "none" + DF11Provider over the full model keeps every decoded group alive until
+    # the final eval (about 24 GB on FLUX.1); the refusal must fire before any block is decoded.
+    tf = FakeSeamTransformer(Recorder(), n_double=2, n_single=1)
+    shapes = install_placeholders(tf)
+    with pytest.raises(RigError, match=r"none.*3 blocks|3 blocks.*none"):
+        tf.attach(_Launching(), shapes, eval_policy="none")
+    # Two blocks (the reduced-depth validation) and the non-launching control are fine.
+    tf.attach(_Launching(), {k: shapes[k] for k in list(shapes)[:2]}, eval_policy="none")
+    double = {a: mx.zeros(s, dtype=mx.bfloat16) for a, s in shapes["transformer_blocks.0"].items()}
+    single = {
+        a: mx.zeros(s, dtype=mx.bfloat16) for a, s in shapes["single_transformer_blocks.0"].items()
+    }
+    tf.attach(ReuseProvider(double, single), shapes, eval_policy="none")
+    mx.eval(tf(*_inputs()))
+
+
+def test_df11_provider_defers_the_status_check_to_verify():
+    # Bug caught: a host read of the status inside weights_for (a sync before every block, which
+    # is what the deferral exists to remove), or verify() that never reads it / never clears it.
+    class Unread:
+        """A status that fails the moment anything tries to read it."""
+
+        def __array__(self, *args, **kwargs):
+            raise AssertionError("status was read")
+
+    tf = FakeTransformer(Recorder(), n_double=1, n_single=0)
+    shapes = install_placeholders(tf)
+    groups, names, _source = _df11_groups(shapes, np.random.default_rng(9))
+    unread = DF11Provider(
+        groups,
+        names,
+        decode=lambda g: dataclasses.replace(decode_group(g, backend="reference"), status=Unread()),
+    )
+    unread.weights_for("transformer_blocks.0", shapes["transformer_blocks.0"])
+    assert [name for name, _status in unread.pending] == ["transformer_blocks.0"]
+    with pytest.raises(AssertionError, match="status was read"):
+        unread.verify()
+
+    bad_status = mx.array([STATUS_INVALID_CODE], dtype=mx.uint32)
+    corrupt = DF11Provider(
+        groups,
+        names,
+        decode=lambda g: dataclasses.replace(
+            decode_group(g, backend="reference"), status=bad_status
+        ),
+    )
+    corrupt.weights_for("transformer_blocks.0", shapes["transformer_blocks.0"])
+    with pytest.raises(DFloatFormatError, match=r"transformer_blocks\.0: block 0: invalid code"):
+        corrupt.verify()
+    assert corrupt.pending == []
+    corrupt.verify()  # nothing pending: a no-op, not a repeat of the error
 
 
 def test_df11_provider_decodes_each_block_once_into_bit_exact_views():
@@ -487,8 +566,12 @@ def test_df11_provider_decodes_each_block_once_into_bit_exact_views():
 
     provider = DF11Provider(groups, names, decode=counting_decode)
     assert provider.groups_evaluated is True
+    assert provider.launching is True
     tf.attach(provider, shapes, eval_policy="per-block")
     mx.eval(tf(*_inputs()))
+    assert [name for name, _status in provider.pending] == list(shapes)
+    tf.verify_step()  # every status is clean; the seam's hook drains the pending list
+    assert provider.pending == []
     assert provider.launches == 3
     assert calls == ["transformer_blocks.0", "transformer_blocks.1", "single_transformer_blocks.0"]
     for seen, block_name in zip(rec.seen, shapes, strict=True):
@@ -571,17 +654,18 @@ def test_reuse_provider_refuses_a_shape_that_does_not_match_the_block():
 
 
 def _patch_eval_recorders(monkeypatch, rec):
+    """Record which object the seam hands to mx.eval / mx.async_eval: for a joint block that must
+    be the very tuple the block returned, not one of its elements."""
     real_eval, real_async = rig._eval, rig._async_eval
 
-    def key(out):
-        return id(out[1]) if isinstance(out, tuple) else id(out)
-
     def eval_(out):
-        rec.events.append(("eval", key(out)))
+        rec.events.append(("eval", id(out)))
+        rec.keep.append(out)
         real_eval(out)
 
     def async_(out):
-        rec.events.append(("async", key(out)))
+        rec.events.append(("async", id(out)))
+        rec.keep.append(out)
         real_async(out)
 
     monkeypatch.setattr(rig, "_eval", eval_)
