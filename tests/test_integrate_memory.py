@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
-from mlx_dfloat.integrate.memory import decoded_bytes, largest_decoded_bytes
+from mlx_dfloat.integrate import memory
+from mlx_dfloat.integrate.memory import budget_bytes, decoded_bytes, largest_decoded_bytes
 
 
 def _group(name, n_elements):
@@ -28,3 +29,12 @@ def test_largest_decoded_bytes_per_kind():
         "transformer_blocks": 680,
         "single_transformer_blocks": 280,
     }
+
+
+def test_budget_bytes_subtracts_the_reserve_from_the_devices_working_set(monkeypatch):
+    # Bug caught: the reserve subtracted from the wrong figure (or ignored) or a hardcoded device size.
+    monkeypatch.setattr(
+        memory.mx, "device_info", lambda: {"max_recommended_working_set_size": 10 * 1024**3}
+    )
+    assert budget_bytes() == 8 * 1024**3
+    assert budget_bytes(reserve_bytes=1) == 10 * 1024**3 - 1

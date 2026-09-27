@@ -76,3 +76,37 @@ def test_fit_estimate_refuses_over_budget_with_the_peak_phase_named():
     assert est.peak_phase == "b"
     assert est.peak_bytes == 35
     assert est.fits is False
+
+
+def test_flux_phases_depth2_doubles_the_in_flight_decoded_buffer():
+    # Bug caught: an inverted or missing multiplier under-estimating the depth-2 in-flight decoded
+    # buffers (or over-estimating the per-block ones).
+    common = {
+        "compressed_bytes": 16_330_000_000,
+        "extras_bytes": 100_000_000,
+        "largest": LARGEST,
+        "cache_limit": 2_500_000_000,
+        "allowance": 1_500_000_000,
+        "encoders_bytes": 9_900_000_000,
+        "vae_bytes": 160_000_000,
+        "vae_transient_bytes": int(3.5 * GIB),
+        "overhead_bytes": int(1.4 * GIB),
+    }
+    per_block = flux_phases(policy="per-block", **common)
+    depth2 = flux_phases(policy="depth2", **common)
+    assert per_block["denoise"]["decoded"] == max(LARGEST.values())
+    assert depth2["denoise"]["decoded"] == 2 * max(LARGEST.values())
+
+
+def test_cache_limit_below_1024_squared_is_not_floored():
+    # Bug caught: an inverted resolution condition force-capping every non-1024x1024 run at 2.5 GB.
+    expected = (
+        LARGEST["transformer_blocks"]
+        + LARGEST["single_transformer_blocks"]
+        + activation_allowance(height=512, width=512, text_tokens=256)
+    )
+    assert expected < 2_500_000_000
+    assert (
+        cache_limit_for(LARGEST, policy="per-block", height=512, width=512, text_tokens=256)
+        == expected
+    )
