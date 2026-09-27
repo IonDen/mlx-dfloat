@@ -417,3 +417,204 @@ def test_read_results_loads_the_completed_files_of_every_round(tmp_path):
     loaded = read_results(tmp_path, 3)
     assert [(r["round"], r["mode"]) for r in loaded] == [(r["round"], r["mode"]) for r in FIXTURES]
     assert json.loads(run_path(tmp_path, 2, "df11").read_text())["step_s"] == [1.5, 1.4, 1.6]
+
+
+# --- the shared step loop (fakes for the mflux transformer and scheduler) ------------------------
+
+
+class _FakeScheduler:
+    """Scales nothing; ``step`` returns ``latents - noise`` (or ``bad`` from step ``bad_from`` on)."""
+
+    def __init__(self, bad_from=None, bad=float("nan")):
+        self.bad_from = bad_from
+        self.bad = bad
+
+    def scale_model_input(self, latents, t):
+        return latents
+
+    def step(self, *, noise, timestep, latents):
+        out = latents - noise
+        if self.bad_from is not None and timestep >= self.bad_from:
+            out = out * 0 + self.bad
+        return out
+
+
+class _FakeConfig:
+    def __init__(self, scheduler):
+        self.scheduler = scheduler
+
+
+class _FakeProvider:
+    def __init__(self):
+        self.launches = 0
+        self.groups_evaluated = True
+        self.pending = []
+
+
+class _FakeTransformer:
+    """Counts ``launches[t]`` decode launches on the provider at step ``t``; tracks verify calls."""
+
+    def __init__(self, provider, launches):
+        self.provider = provider
+        self.launches = launches
+        self.verified = 0
+
+    def __call__(self, *, t, config, hidden_states, prompt_embeds, pooled_prompt_embeds):
+        self.provider.launches += self.launches[t]
+        return hidden_states * 0.5
+
+    def verify_step(self):
+        self.verified += 1
+
+
+class _FakeWatchdog:
+    peak_footprint = 0
+
+
+def _time(transformer, provider, *, scheduler=None, warmup=2, steps=3, per_step=12, limits=True):
+    import mlx.core as mx
+    from scripts.bench_flux_step import time_steps
+
+    return time_steps(
+        transformer,
+        provider,
+        _FakeConfig(scheduler or _FakeScheduler()),
+        mx.ones((1, 4, 8), dtype=mx.float32),
+        mx.zeros((1, 2, 4)),
+        mx.zeros((1, 4)),
+        warmup=warmup,
+        steps=steps,
+        per_step=per_step,
+        limits_recorded=limits,
+        watchdog=_FakeWatchdog(),
+        label="df11",
+    )
+
+
+def test_time_steps_times_only_the_steps_after_the_warmup_and_verifies_every_step():
+    # Bug caught: the warm-up steps landing in step_s (their pipeline compile would inflate the
+    # median), or verify_step skipped (a decode status error would go unseen).
+    provider = _FakeProvider()
+    transformer = _FakeTransformer(provider, [12] * 5)
+    out = _time(transformer, provider)
+    assert len(out["warmup_s"]) == 2
+    assert len(out["step_s"]) == 3
+    assert len(out["verify_s"]) == 3
+    assert out["launches_per_step"] == [12, 12, 12, 12, 12]
+    assert out["launches_total"] == 60
+    assert out["launches_expected_per_step"] == 12
+    assert transformer.verified == 5
+
+
+def test_time_steps_refuses_a_timed_step_with_other_launches_than_the_mode():
+    # Bug caught: only the warm-up total checked, so a timed step that skipped a block's decode
+    # (11 launches instead of 12) would be timed as if it had decoded every block.
+    provider = _FakeProvider()
+    transformer = _FakeTransformer(provider, [12, 12, 12, 11, 12])
+    with pytest.raises(BenchError, match=r"\[12, 11, 12\] launches; df11 expects 12"):
+        _time(transformer, provider)
+
+
+def test_time_steps_names_the_failed_parity_conditions_before_timing():
+    # Bug caught: a failed condition ignored (the caps not recorded, the compressed set not loaded,
+    # or a launch count off in the warm-up) and the steps timed anyway.
+    from scripts.bench_flux_step import ParityError
+
+    provider = _FakeProvider()
+    provider.groups_evaluated = False
+    transformer = _FakeTransformer(provider, [12, 13, 12, 12, 12])
+    with pytest.raises(ParityError) as exc:
+        _time(transformer, provider, limits=False)
+    assert exc.value.failed == ["compressed_loaded", "limits_recorded", "launches_expected"]
+    assert transformer.verified == 2  # only the warm-up ran
+
+
+def test_time_steps_refuses_non_finite_latents_after_the_warmup():
+    from scripts.bench_flux_step import ParityError
+
+    provider = _FakeProvider()
+    with pytest.raises(ParityError) as exc:
+        _time(
+            _FakeTransformer(provider, [0] * 5), provider, scheduler=_FakeScheduler(1), per_step=0
+        )
+    assert exc.value.failed == ["finite"]
+
+
+def test_time_steps_refuses_non_finite_final_latents():
+    # Bug caught: only the warm-up latents checked; an inf appearing in a timed step would be timed
+    # and reported as a valid run.
+    provider = _FakeProvider()
+    with pytest.raises(BenchError, match="not finite"):
+        _time(
+            _FakeTransformer(provider, [0] * 5),
+            provider,
+            scheduler=_FakeScheduler(3, float("inf")),
+            per_step=0,
+        )
+
+
+# --- run_one with an injected measurement and key ------------------------------------------------
+
+
+@pytest.fixture
+def restore_cache_limit():
+    import mlx.core as mx
+
+    previous = mx.set_cache_limit(0)
+    mx.set_cache_limit(previous)
+    yield
+    mx.set_cache_limit(previous)
+
+
+def _one_run_args(tmp_path):
+    return parse_args(
+        [
+            *("--mode", "control", "--out", str(tmp_path / "r.json")),
+            *("--df11", "d", "--embeds", "e", "--wall-budget", "60"),
+        ]
+    )
+
+
+def test_run_one_writes_the_injected_measurement_under_the_injected_key(
+    tmp_path, restore_cache_limit
+):
+    # Bug caught: run_one ignoring the injected key (the reduced-depth validation would write
+    # bench_flux_step's key without its depth, so every resume would read as a conflict) or the
+    # injected measurement (it would run the full-depth mode).
+    from scripts.bench_flux_step import run_one
+
+    def measure(args, watchdog, *, limits_recorded):
+        return {
+            "exit_code": 0,
+            "policy": "per-block",
+            "median_s": 1.0,
+            "spread": 0.0,
+            "verify_median_s": 0.0,
+            "launches_expected_per_step": 0,
+            "footprint_peak_bytes": 1,
+            "limits": limits_recorded,
+        }
+
+    args = _one_run_args(tmp_path)
+    code = run_one(args, measure=measure, key=lambda a: {"double": 4})
+    written = json.loads((tmp_path / "r.json").read_text())
+    assert code == 0
+    assert written["key"] == {"double": 4}
+    assert written["limits"] is True
+    assert written["mode"] == "control"
+
+
+def test_run_one_records_a_failed_measurement_as_exit_2_with_its_key(tmp_path, restore_cache_limit):
+    # Bug caught: an exception escaping without a JSON (the orchestrator could not tell a failed
+    # run from a missing one) or the key left out of the failed record.
+    from scripts.bench_flux_step import run_one
+
+    def measure(args, watchdog, *, limits_recorded):
+        raise RuntimeError("boom")
+
+    code = run_one(_one_run_args(tmp_path), measure=measure, key=lambda a: {"double": 4})
+    written = json.loads((tmp_path / "r.json").read_text())
+    assert code == 2
+    assert written["exit_code"] == 2
+    assert "boom" in written["error"]
+    assert written["key"] == {"double": 4}

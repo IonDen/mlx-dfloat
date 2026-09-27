@@ -50,7 +50,7 @@ import subprocess
 import sys
 import time
 import traceback
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -152,9 +152,9 @@ def expected_launches(mode: str, *, n_double: int, n_single: int, steps: int) ->
     return (n_double + n_single) * steps if is_df11(mode) else 0
 
 
-def interleaved(rounds: int) -> list[tuple[int, str]]:
-    """The (round, mode) sequence of an orchestration: every mode once per round, in ``MODES`` order."""
-    return [(r, mode) for r in range(1, rounds + 1) for mode in MODES]
+def interleaved(rounds: int, *, modes: Sequence[str] = MODES) -> list[tuple[int, str]]:
+    """The (round, mode) sequence of an orchestration: every mode once per round, in ``modes`` order."""
+    return [(r, mode) for r in range(1, rounds + 1) for mode in modes]
 
 
 def run_path(out_dir: Path, round_no: int, mode: str) -> Path:
@@ -171,10 +171,14 @@ def result_is_complete(path: Path) -> bool:
     return isinstance(data, dict) and data.get("exit_code") == 0 and bool(data.get("step_s"))
 
 
-def pending_runs(out_dir: Path, rounds: int) -> list[tuple[int, str]]:
+def pending_runs(
+    out_dir: Path, rounds: int, *, modes: Sequence[str] = MODES
+) -> list[tuple[int, str]]:
     """The interleaved runs whose complete JSON is not in ``out_dir`` yet (the resume set)."""
     return [
-        (r, m) for r, m in interleaved(rounds) if not result_is_complete(run_path(out_dir, r, m))
+        (r, m)
+        for r, m in interleaved(rounds, modes=modes)
+        if not result_is_complete(run_path(out_dir, r, m))
     ]
 
 
@@ -211,7 +215,7 @@ def run_key(
 
 
 def resume_conflicts(
-    out_dir: Path, rounds: int, key: Mapping[str, Any]
+    out_dir: Path, rounds: int, key: Mapping[str, Any], *, modes: Sequence[str] = MODES
 ) -> list[tuple[int, str, list[str]]]:
     """Existing run files whose key differs from ``key``: (round, mode, differing fields).
 
@@ -220,7 +224,7 @@ def resume_conflicts(
     no conflict.
     """
     conflicts: list[tuple[int, str, list[str]]] = []
-    for r, m in interleaved(rounds):
+    for r, m in interleaved(rounds, modes=modes):
         path = run_path(out_dir, r, m)
         if not path.exists():
             continue
@@ -297,6 +301,27 @@ def check_embeds_shapes(
         )
 
 
+def pooled_stats(
+    by_round: Mapping[int, Mapping[str, Mapping[str, Any]]], mode: str, over: Sequence[int]
+) -> dict[str, Any] | None:
+    """Median and spread of ``mode``'s timed steps pooled over the rounds ``over``; None for no round.
+
+    ``by_round`` maps round -> mode -> run JSON. ``verify_median_s`` pools ``verify_s`` the same
+    way and is None when none of those runs recorded it.
+    """
+    if not over:
+        return None
+    steps = [float(s) for rnd in over for s in by_round[rnd][mode]["step_s"]]
+    verify = [float(s) for rnd in over for s in by_round[rnd][mode].get("verify_s", ())]
+    t = Timing(reps=tuple(steps))
+    return {
+        "median": t.median,
+        "spread": t.spread,
+        "n": len(steps),
+        "verify_median_s": Timing(reps=tuple(verify)).median if verify else None,
+    }
+
+
 def report(
     results: Sequence[Mapping[str, Any]], *, stopped: Mapping[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -325,17 +350,7 @@ def report(
         return Timing(reps=tuple(float(s) for s in by_round[rnd][mode]["step_s"])).median
 
     def pool(mode: str, over: Sequence[int]) -> dict[str, Any] | None:
-        if not over:
-            return None
-        steps = [float(s) for rnd in over for s in by_round[rnd][mode]["step_s"]]
-        verify = [float(s) for rnd in over for s in by_round[rnd][mode].get("verify_s", ())]
-        t = Timing(reps=tuple(steps))
-        return {
-            "median": t.median,
-            "spread": t.spread,
-            "n": len(steps),
-            "verify_median_s": Timing(reps=tuple(verify)).median if verify else None,
-        }
+        return pooled_stats(by_round, mode, over)
 
     rounds = {
         rnd: {
@@ -380,10 +395,12 @@ def report(
     }
 
 
-def read_results(out_dir: Path, rounds: int) -> list[dict[str, Any]]:
+def read_results(
+    out_dir: Path, rounds: int, *, modes: Sequence[str] = MODES
+) -> list[dict[str, Any]]:
     """The complete run JSONs of ``out_dir`` in interleaved order (incomplete ones are left out)."""
     results: list[dict[str, Any]] = []
-    for r, m in interleaved(rounds):
+    for r, m in interleaved(rounds, modes=modes):
         path = run_path(out_dir, r, m)
         if result_is_complete(path):
             results.append(json.loads(path.read_text()))
@@ -516,32 +533,17 @@ def denoise_step(
     return latents, stop - start, time.perf_counter() - stop
 
 
-def run_mode(
-    args: argparse.Namespace, watchdog: Watchdog, *, limits_recorded: bool
-) -> dict[str, Any]:
-    """Build, load, warm up, assert the parity conditions, time the steps; the result dict.
+def step_inputs(
+    args: argparse.Namespace,
+) -> tuple[Any, mx.array, mx.array, mx.array, dict[str, Any]]:
+    """The mflux ``Config``, the float32 noise latents and the embeddings of a run, plus their record.
 
-    Raises:
-        ParityError: A parity condition failed before the timed loop.
-        BenchError: A timed step's launches differ from the mode's, or the final latents are not finite.
+    Returns ``(config, latents, prompt, pooled, record)``; ``record`` holds the embeddings path and
+    metadata and the latent and embedding dtypes, for the run JSON.
     """
     from mflux.models.common.config.config import Config
     from mflux.models.common.config.model_config import ModelConfig
     from mflux.models.flux.latent_creator.flux_latent_creator import FluxLatentCreator
-
-    mode, policy = args.mode, mode_policy(args.mode)
-    timings: dict[str, float] = {}
-    ckpt = open_checkpoint(args.df11)
-    start = time.perf_counter()
-    transformer, shapes = build_transformer(args.model, ckpt, n_double=N_DOUBLE, n_single=N_SINGLE)
-    timings["build_s"] = time.perf_counter() - start
-    start = time.perf_counter()
-    resident = load_resident_set(ckpt)  # every group, in every mode: the same footprint baseline
-    timings["load_resident_s"] = time.perf_counter() - start
-    start = time.perf_counter()
-    provider = make_provider(mode, ckpt, resident, shapes)
-    timings["provider_s"] = time.perf_counter() - start
-    transformer.attach(provider, shapes, eval_policy=policy)
 
     model_config = ModelConfig.schnell() if args.model == "schnell" else ModelConfig.dev()
     config = Config(
@@ -557,10 +559,41 @@ def run_mode(
         args.seed, args.size, args.size
     )  # float32, as upstream
     mx.eval(latents)
-    latent_dtype = str(latents.dtype)
-    embeds_dtype = {"prompt_embeds": str(prompt.dtype), "pooled_prompt_embeds": str(pooled.dtype)}
+    record = {
+        "embeds": {"path": str(args.embeds), "metadata": embeds_meta},
+        "latent_dtype": str(latents.dtype),
+        "embeds_dtype": {
+            "prompt_embeds": str(prompt.dtype),
+            "pooled_prompt_embeds": str(pooled.dtype),
+        },
+    }
+    return config, latents, prompt, pooled, record
 
-    per_step = expected_launches(mode, n_double=N_DOUBLE, n_single=N_SINGLE, steps=1)
+
+def time_steps(
+    transformer: Any,
+    provider: WeightProvider,
+    config: Any,
+    latents: mx.array,
+    prompt: mx.array,
+    pooled: mx.array,
+    *,
+    warmup: int,
+    steps: int,
+    per_step: int,
+    limits_recorded: bool,
+    watchdog: Watchdog,
+    label: str,
+) -> dict[str, Any]:
+    """Warm up, assert the parity conditions, time the steps; the measured fields of the run JSON.
+
+    ``per_step`` is the decode launches every step must make (``label`` names the mode in errors).
+
+    Raises:
+        ParityError: A parity condition failed before the timed loop.
+        BenchError: A timed step's launches differ from ``per_step``, or the final latents are not
+            finite.
+    """
     launches_per_step: list[int] = []
     footprint_peak = phys_footprint()
 
@@ -577,39 +610,26 @@ def run_mode(
             footprint_peak = max(footprint_peak, phys_footprint())
         return seconds, verify
 
-    warmup_s, warmup_verify_s = run_steps(0, args.warmup)
+    warmup_s, warmup_verify_s = run_steps(0, warmup)
     failed = parity_conditions(
         compressed_loaded=provider.groups_evaluated,
         limits_recorded=limits_recorded,
         nothing_pending=not getattr(provider, "pending", []),
-        launches_expected=provider.launches
-        == expected_launches(mode, n_double=N_DOUBLE, n_single=N_SINGLE, steps=args.warmup),
+        launches_expected=provider.launches == per_step * warmup,
         finite=bool(mx.isfinite(latents).all().item()),
     )
     if failed:
         raise ParityError(failed)
-    step_s, verify_s = run_steps(args.warmup, args.steps)
-    if any(n != per_step for n in launches_per_step[args.warmup :]):
+    step_s, verify_s = run_steps(warmup, steps)
+    if any(n != per_step for n in launches_per_step[warmup:]):
         raise BenchError(
-            f"timed steps made {launches_per_step[args.warmup :]} launches; {mode} expects "
+            f"timed steps made {launches_per_step[warmup:]} launches; {label} expects "
             f"{per_step} per step"
         )
     if not bool(mx.isfinite(latents).all().item()):
         raise BenchError("the final latents are not finite")
     timing = Timing(reps=tuple(step_s))
     return {
-        "exit_code": EXIT_OK,
-        "mode": mode,
-        "policy": policy,
-        "round": args.round,
-        "model": args.model,
-        "size": args.size,
-        "steps": args.steps,
-        "warmup": args.warmup,
-        "seed": args.seed,
-        "guidance": GUIDANCE,
-        "n_double": N_DOUBLE,
-        "n_single": N_SINGLE,
         "step_s": step_s,
         "warmup_s": warmup_s,
         "median_s": timing.median,
@@ -624,18 +644,85 @@ def run_mode(
         "watchdog_peak_footprint_bytes": watchdog.peak_footprint,
         "mlx_peak_memory_bytes": int(mx.get_peak_memory()),
         "cache_memory_bytes": int(mx.get_cache_memory()),
-        "embeds": {"path": str(args.embeds), "metadata": embeds_meta},
-        "latent_dtype": latent_dtype,
-        "embeds_dtype": embeds_dtype,
         "output_shape": list(latents.shape),
         "output_dtype": str(latents.dtype),
+    }
+
+
+def run_mode(
+    args: argparse.Namespace, watchdog: Watchdog, *, limits_recorded: bool
+) -> dict[str, Any]:
+    """Build, load, warm up, assert the parity conditions, time the steps; the result dict.
+
+    Raises:
+        ParityError: A parity condition failed before the timed loop.
+        BenchError: A timed step's launches differ from the mode's, or the final latents are not finite.
+    """
+    mode, policy = args.mode, mode_policy(args.mode)
+    timings: dict[str, float] = {}
+    ckpt = open_checkpoint(args.df11)
+    start = time.perf_counter()
+    transformer, shapes = build_transformer(args.model, ckpt, n_double=N_DOUBLE, n_single=N_SINGLE)
+    timings["build_s"] = time.perf_counter() - start
+    start = time.perf_counter()
+    resident = load_resident_set(ckpt)  # every group, in every mode: the same footprint baseline
+    timings["load_resident_s"] = time.perf_counter() - start
+    start = time.perf_counter()
+    provider = make_provider(mode, ckpt, resident, shapes)
+    timings["provider_s"] = time.perf_counter() - start
+    transformer.attach(provider, shapes, eval_policy=policy)
+    config, latents, prompt, pooled, inputs = step_inputs(args)
+    measured = time_steps(
+        transformer,
+        provider,
+        config,
+        latents,
+        prompt,
+        pooled,
+        warmup=args.warmup,
+        steps=args.steps,
+        per_step=expected_launches(mode, n_double=N_DOUBLE, n_single=N_SINGLE, steps=1),
+        limits_recorded=limits_recorded,
+        watchdog=watchdog,
+        label=mode,
+    )
+    return {
+        "exit_code": EXIT_OK,
+        "mode": mode,
+        "policy": policy,
+        "round": args.round,
+        "model": args.model,
+        "size": args.size,
+        "steps": args.steps,
+        "warmup": args.warmup,
+        "seed": args.seed,
+        "guidance": GUIDANCE,
+        "n_double": N_DOUBLE,
+        "n_single": N_SINGLE,
+        **measured,
+        **inputs,
         "timings_s": timings,
         "provenance": provenance(),
     }
 
 
-def run_one(args: argparse.Namespace) -> int:
-    """Run one mode under the caps, the cache limit and the watchdog; write ``--out``."""
+Measure = Callable[..., dict[str, Any]]
+
+
+def run_one(
+    args: argparse.Namespace,
+    *,
+    measure: Measure | None = None,
+    key: Callable[[argparse.Namespace], dict[str, Any]] | None = None,
+) -> int:
+    """Run one mode under the caps, the cache limit and the watchdog; write ``--out``.
+
+    ``measure(args, watchdog, limits_recorded=...)`` returns the run's result dict (default
+    ``run_mode``) and ``key(args)`` its resume key (default ``current_key``); another bench with the
+    same run discipline (the reduced-depth control validation) passes its own.
+    """
+    measure = run_mode if measure is None else measure
+    key_of = current_key if key is None else key
     caps = list(install_memory_caps())
     mx.set_cache_limit(FLUX_CACHE_LIMIT)
     cache_limit = int(mx.set_cache_limit(FLUX_CACHE_LIMIT))  # the limit now in force
@@ -643,10 +730,10 @@ def run_one(args: argparse.Namespace) -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     watchdog = Watchdog(args.out.parent, ceiling=default_ceiling(), budget=args.wall_budget).start()
     summary: dict[str, Any]
-    key: dict[str, Any] | None = None
+    this_key: dict[str, Any] | None = None
     try:
-        key = current_key(args)
-        summary = run_mode(args, watchdog, limits_recorded=limits_recorded)
+        this_key = key_of(args)
+        summary = measure(args, watchdog, limits_recorded=limits_recorded)
     except ParityError as exc:
         summary = {
             "exit_code": EXIT_ERROR,
@@ -664,7 +751,7 @@ def run_one(args: argparse.Namespace) -> int:
             "round": args.round,
             "memory_caps_gb": caps,
             "cache_limit_bytes": cache_limit,
-            "key": key,
+            "key": this_key,
         }
     )
     try:
