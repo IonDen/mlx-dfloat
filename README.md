@@ -28,14 +28,14 @@ Pre-alpha. Nothing to install yet, and not on PyPI. Two milestones decide whethe
 1. A bit-exact reference decoder for published DFloat11 checkpoints. **Done.** Every compressed tensor of Qwen3-4B,
    and sampled blocks of FLUX.1-schnell, FLUX.1-Krea-dev, Qwen-Image-Edit and Qwen-Image-Edit-2509, decode to
    exactly the BF16 originals. That covers all four published versions of the checkpoint format.
-2. A Metal decode kernel fast enough to run inside an image-generation step. **Measured.** The kernel decodes the
+2. A Metal decode kernel fast enough to run inside an image-generation step. **Done.** The kernel decodes the
    published checkpoints bit-exactly at 50 GB/s on an M1 Max, and decoding every block just in time adds 5 %
    (FLUX.1-dev) to 6 % (FLUX.1-schnell, with a one-block evaluation run-ahead; 8.5 % with per-block evaluation) to a
    1024² denoise step, well under the project's ~25 % threshold. That is measured against a control that agrees
-   within 0.13 % with a run whose BF16 weights are all resident, through the same per-block path. The recipe and
-   numbers are in the changelog.
+   within 0.13 % with a run whose BF16 weights are all resident, on a reduced-depth transformer and through the
+   same per-block path. The recipe and numbers are in the changelog.
 
-Both milestones are measured; the next step is the mflux integration.
+Both milestones are done; the next step is the mflux integration.
 
 ## Try it
 
