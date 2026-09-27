@@ -9,9 +9,17 @@ footprint baseline is the same; the control's two decoded blocks are its only ex
 variants run the depth-2 eval policy: its look-ahead is bounded by MLX's command-buffer window (the
 encoding thread blocks once enough committed buffers are in flight, so ``async_eval`` of block i
 returns only near its end and the next block's decode never runs alongside block i's matmuls on the
-same in-order stream); what it saves is the host-side gap between blocks, on the DF11 and the
-control side alike. ``control-noeval`` runs the control with no eval inside the step, so ``control -
-control-noeval`` is the eval policy's own cost. No text encoder or VAE is
+same in-order stream); what it hides is host-side work done while the GPU runs block i, above all
+the allocation of decode outputs that miss the buffer cache. ``control-noeval`` runs the control
+with no eval inside the step, so ``control - control-noeval`` is the eval policy's own cost.
+``--trace`` records per-block phase stamps; ``--cache-limit`` sets the MLX buffer-cache limit (at
+the default 1.4 GB the activations each block frees fill the cache, so every decoded output is
+released and allocated fresh, 1.29 s per schnell step; 2.5 GB keeps a decoded buffer next to them).
+``--modes`` runs a subset, including the two look-ahead experiment modes (``df11-prefetch`` decodes
+the next block on a second GPU stream while this one runs, ``df11-prefetch-inline`` on the default
+stream; both submit at the top of the block, after the previous block's eval returned, so the
+look-ahead's allocation still lands in the idle gap); measured 2026-09-27, neither beats per-block
+once the cache limit fits. No text encoder or VAE is
 loaded: the prompt embeddings come from ``--embeds`` (``scripts/encode_prompt.py``). Activation
 dtypes follow mflux exactly: the latents stay the float32 ``create_noise`` returns and the
 embeddings keep the dtype the encoder produced (T5 float32, CLIP bfloat16; a synthetic file is
@@ -51,6 +59,7 @@ error, a rig error, a child's failure), 70/71 watchdog abort (footprint ceiling 
 """
 
 import argparse
+import dataclasses
 import json
 import subprocess
 import sys
@@ -80,10 +89,13 @@ try:
         FLUX_CACHE_LIMIT,
         SINGLE_PREFIX,
         DF11Provider,
+        PrefetchProvider,
         ReuseProvider,
+        Tracer,
         WeightProvider,
         build_transformer,
         load_resident_set,
+        summarize_trace,
     )
     from scripts._watchdog import Watchdog, default_ceiling, phys_footprint
     from scripts.verify_checkpoint import source_hash
@@ -102,17 +114,24 @@ EXIT_OK, EXIT_ERROR = 0, 2
 # One round runs the modes in this order: each df11 mode right before its control, so a drift in
 # machine state lands on both sides of a pair.
 MODES: tuple[str, ...] = ("df11", "control", "df11-depth2", "control-depth2", "control-noeval")
+# Experiment modes, run only when ``--modes`` names them: the look-ahead decode of the next block,
+# on a second GPU stream (``df11-prefetch``) or on the default one (``df11-prefetch-inline``).
+EXTRA_MODES: tuple[str, ...] = ("df11-prefetch", "df11-prefetch-inline")
 _POLICIES = {
     "df11": "per-block",
     "control": "per-block",
     "df11-depth2": "depth2",
     "control-depth2": "depth2",
     "control-noeval": "none",
+    "df11-prefetch": "per-block",
+    "df11-prefetch-inline": "per-block",
 }
 # (label, df11 mode, control mode): the paired overheads the report computes.
 PAIRS: tuple[tuple[str, str, str], ...] = (
     ("per-block", "df11", "control"),
     ("depth2", "df11-depth2", "control-depth2"),
+    ("prefetch", "df11-prefetch", "control"),
+    ("prefetch-inline", "df11-prefetch-inline", "control"),
 )
 N_DOUBLE, N_SINGLE = 19, 38  # FLUX.1 at full depth
 T5_DIM, POOLED_DIM = 4096, 768
@@ -147,7 +166,7 @@ def mode_policy(mode: str) -> str:
     try:
         return _POLICIES[mode]
     except KeyError:
-        raise BenchError(f"unknown mode {mode!r}; choose from {MODES}") from None
+        raise BenchError(f"unknown mode {mode!r}; choose from {MODES + EXTRA_MODES}") from None
 
 
 def is_df11(mode: str) -> bool:
@@ -161,12 +180,15 @@ def expected_launches(mode: str, *, n_double: int, n_single: int, steps: int) ->
     return (n_double + n_single) * steps if is_df11(mode) else 0
 
 
-def limits_in_force(caps: Sequence[int], cache_limit: int) -> bool:
-    """Whether both memory caps installed (non-zero GB) and the MLX cache limit is the rig's.
+def limits_in_force(caps: Sequence[int]) -> bool:
+    """Whether both memory caps installed (non-zero GB).
 
-    ``caps`` is what ``install_memory_caps`` returned; a 0 means that cap failed to install.
+    ``caps`` is what ``install_memory_caps`` returned; a 0 means that cap failed to install. The
+    MLX cache limit is not part of the condition: mlx 0.32.2 has no getter (``set_cache_limit``
+    only swaps the value and returns the previous one), so a read-back would compare the requested
+    value with itself. The requested limit is recorded as ``cache_limit_bytes`` and keyed.
     """
-    return len(caps) == 2 and all(c > 0 for c in caps) and cache_limit == FLUX_CACHE_LIMIT
+    return len(caps) == 2 and all(c > 0 for c in caps)
 
 
 def compressed_set_loaded(resident: Mapping[str, Any], shapes: Mapping[str, Any]) -> bool:
@@ -220,11 +242,13 @@ def run_key(
     embeds_meta: Mapping[str, str],
     source: str,
     mlx: str,
+    cache_limit: int,
 ) -> dict[str, Any]:
     """The settings a run's JSON is keyed on; two runs may share an out dir only when they agree.
 
     The checkpoint path is resolved so the same checkpoint reached from another cwd matches; the
     embeddings metadata (prompt, seed, model, synthetic, versions) identifies the file's content.
+    The MLX cache limit is part of the key because it changes what a step allocates.
     """
     return {
         "model": model,
@@ -237,6 +261,7 @@ def run_key(
         "embeds_meta": dict(embeds_meta),
         "source": source,
         "mlx": mlx,
+        "cache_limit": cache_limit,
     }
 
 
@@ -278,9 +303,11 @@ def child_command(
     size: int,
     seed: int,
     wall_budget: float,
+    cache_limit: int,
+    trace: bool,
 ) -> list[str]:
     """The subprocess argv for one mode of one round (never ``--orchestrate``; run with the repository root as cwd)."""
-    return [
+    cmd = [
         sys.executable,
         "-m",
         "scripts.bench_flux_step",
@@ -306,7 +333,12 @@ def child_command(
         str(seed),
         "--wall-budget",
         str(wall_budget),
+        "--cache-limit",
+        str(cache_limit),
     ]
+    if trace:
+        cmd.append("--trace")
+    return cmd
 
 
 def check_embeds_shapes(
@@ -339,13 +371,21 @@ def pooled_stats(
         return None
     steps = [float(s) for rnd in over for s in by_round[rnd][mode]["step_s"]]
     verify = [float(s) for rnd in over for s in by_round[rnd][mode].get("verify_s", ())]
+    traced = [t for rnd in over for t in by_round[rnd][mode].get("trace_steps", ())]
     t = Timing(reps=tuple(steps))
     return {
         "median": t.median,
         "spread": t.spread,
         "n": len(steps),
         "verify_median_s": Timing(reps=tuple(verify)).median if verify else None,
+        "trace": trace_medians(traced) if traced else None,
     }
+
+
+def trace_medians(steps: Sequence[Mapping[str, Any]]) -> dict[str, float]:
+    """Per-phase medians over per-step trace summaries (``summarize_trace`` dicts)."""
+    keys = list(steps[0]) if steps else []
+    return {k: Timing(reps=tuple(float(s[k]) for s in steps)).median for k in keys}
 
 
 def report(
@@ -390,20 +430,23 @@ def report(
         label: sorted(rnd for rnd, modes in by_round.items() if d in modes and c in modes)
         for label, d, c in (*PAIRS, ("eval-policy", "control", "control-noeval"))
     }
+    # Each pair pools its two modes over its own rounds. A mode shared by several pairs (control
+    # is the control of per-block and of both prefetch pairs) is exposed under its name from the
+    # first pair in PAIRS that has rounds; the overheads never go through that shared entry.
     pooled: dict[str, dict[str, Any]] = {}
+    overheads: dict[str, float] = {}
     for label, d, c in PAIRS:
-        for mode in (d, c):
-            stats = pool(mode, paired[label])
-            if stats is not None:
-                pooled[mode] = stats
+        if not paired[label]:
+            continue
+        stats_d, stats_c = pool(d, paired[label]), pool(c, paired[label])
+        assert stats_d is not None  # paired[label] is non-empty
+        assert stats_c is not None
+        pooled.setdefault(d, stats_d)
+        pooled.setdefault(c, stats_c)
+        overheads[label] = overhead(stats_d["median"], stats_c["median"])
     noeval = pool("control-noeval", paired["eval-policy"])
     if noeval is not None:
         pooled["control-noeval"] = noeval
-    overheads = {
-        label: overhead(pooled[d]["median"], pooled[c]["median"])
-        for label, d, c in PAIRS
-        if paired[label]
-    }
     cost = None
     if noeval is not None:
         control = pool("control", paired["eval-policy"])
@@ -436,16 +479,38 @@ def read_results(
 # --- one mode ---------------------------------------------------------------------------------------
 
 
+def _cache_limit_bytes(text: str) -> int:
+    """A positive byte count for ``--cache-limit``.
+
+    0 would turn the buffer cache off; a negative or oversized value would raise inside
+    ``mx.set_cache_limit`` outside ``run_one``'s guard, with exit 1, the bit-mismatch code.
+    """
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not an integer byte count") from None
+    if not 0 < value < 2**63:
+        raise argparse.ArgumentTypeError(f"{value} is not a positive byte count below 2**63")
+    return value
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse the command line: one mode (``--mode``, ``--out``) or ``--orchestrate`` (``--out-dir``)."""
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--mode", choices=MODES, help="the one mode this process runs")
+    p.add_argument("--mode", choices=MODES + EXTRA_MODES, help="the one mode this process runs")
+    p.add_argument(
+        "--modes",
+        nargs="+",
+        choices=MODES + EXTRA_MODES,
+        default=None,
+        help="the modes an orchestration runs each round, in this order (default: the five)",
+    )
     p.add_argument("--round", type=int, default=None, help="round number (set by --orchestrate)")
     p.add_argument("--out", type=Path, help="JSON file of this mode's result")
     p.add_argument("--orchestrate", action="store_true", help="run every mode as subprocesses")
-    p.add_argument("--rounds", type=int, default=3, help="rounds of the five modes to orchestrate")
+    p.add_argument("--rounds", type=int, default=3, help="rounds of the modes to orchestrate")
     p.add_argument("--out-dir", type=Path, help="directory of the per-run JSONs and report.json")
     p.add_argument("--df11", type=Path, required=True, help="DF11 checkpoint directory")
     p.add_argument(
@@ -457,9 +522,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--size", type=int, default=1024, help="image side in pixels (multiple of 16)")
     p.add_argument("--seed", type=int, default=42, help="seed of the packed latent noise")
     p.add_argument(
+        "--cache-limit",
+        type=_cache_limit_bytes,
+        default=FLUX_CACHE_LIMIT,
+        help="MLX buffer-cache limit in bytes for this process (part of the resume key)",
+    )
+    p.add_argument(
+        "--trace",
+        action="store_true",
+        help="record per-block phase timestamps (decode / encode / eval wait) into the run JSON",
+    )
+    p.add_argument(
         "--wall-budget", type=float, default=3600.0, help="seconds before the watchdog aborts"
     )
     args = p.parse_args(argv)
+    if args.modes is not None and not args.orchestrate:
+        p.error("--modes applies to --orchestrate; a single run takes --mode")
+    if args.modes is None:
+        args.modes = list(MODES)
     if args.orchestrate:
         if args.out_dir is None:
             p.error("--orchestrate needs --out-dir")
@@ -497,6 +577,7 @@ def current_key(args: argparse.Namespace) -> dict[str, Any]:
         embeds_meta=embeds_metadata(args.embeds),
         source=source_hash(),
         mlx=mx.__version__,
+        cache_limit=args.cache_limit,
     )
 
 
@@ -539,6 +620,9 @@ def make_provider(
     decoder = DF11Provider(
         resident, {n: ckpt.groups[n].matrix_names for n in shapes}, decode=decode
     )
+    if mode.startswith("df11-prefetch"):
+        stream = mx.new_stream(mx.gpu) if mode == "df11-prefetch" else None
+        return PrefetchProvider(decoder, shapes, stream=stream)
     if is_df11(mode):
         return decoder
     double_name, single_name = f"{DOUBLE_PREFIX}.0", f"{SINGLE_PREFIX}.0"
@@ -626,8 +710,13 @@ def time_steps(
     limits_recorded: bool,
     watchdog: Watchdog,
     label: str,
+    tracer: Tracer | None = None,
 ) -> dict[str, Any]:
     """Warm up, assert the parity conditions, time the steps; the measured fields of the run JSON.
+
+    With a ``tracer`` (the one attached to the transformer's seam) the result also carries
+    ``trace_events`` (the timed steps' block events), ``trace_steps`` (one ``summarize_trace``
+    dict per timed step) and ``trace_medians``.
 
     ``per_step`` is the decode launches every step must make (``label`` names the mode in errors);
     ``compressed_loaded`` and ``limits_recorded`` are the two conditions the caller establishes
@@ -681,7 +770,20 @@ def time_steps(
     if not bool(mx.isfinite(latents).all().item()):
         raise BenchError("the final latents are not finite")
     timing = Timing(reps=tuple(step_s))
+    traced: dict[str, Any] = {}
+    if tracer is not None:
+        timed_steps = range(warmup, warmup + steps)
+        trace_steps = [
+            summarize_trace([e for e in tracer.events if e.step == s], step=tracer.steps[s])
+            for s in timed_steps
+        ]
+        traced = {
+            "trace_events": [dataclasses.asdict(e) for e in tracer.events if e.step >= warmup],
+            "trace_steps": trace_steps,
+            "trace_medians": trace_medians(trace_steps),
+        }
     return {
+        **traced,
         "step_s": step_s,
         "warmup_s": warmup_s,
         "median_s": timing.median,
@@ -726,7 +828,8 @@ def run_mode(
     start = time.perf_counter()
     provider = make_provider(mode, ckpt, resident, shapes)
     timings["provider_s"] = time.perf_counter() - start
-    transformer.attach(provider, shapes, eval_policy=policy)
+    tracer = Tracer() if args.trace else None
+    transformer.attach(provider, shapes, eval_policy=policy, tracer=tracer)
     config, latents, prompt, pooled, inputs = step_inputs(args)
     measured = time_steps(
         transformer,
@@ -742,11 +845,13 @@ def run_mode(
         limits_recorded=limits_recorded,
         watchdog=watchdog,
         label=mode,
+        tracer=tracer,
     )
     return {
         "exit_code": EXIT_OK,
         "mode": mode,
         "policy": policy,
+        "traced": tracer is not None,
         "round": args.round,
         "model": args.model,
         "size": args.size,
@@ -771,19 +876,20 @@ def run_one(
     *,
     measure: Measure | None = None,
     key: Callable[[argparse.Namespace], dict[str, Any]] | None = None,
+    cache_limit: int = FLUX_CACHE_LIMIT,
 ) -> int:
     """Run one mode under the caps, the cache limit and the watchdog; write ``--out``.
 
     ``measure(args, watchdog, limits_recorded=...)`` returns the run's result dict (default
     ``run_mode``) and ``key(args)`` its resume key (default ``current_key``); another bench with the
-    same run discipline (the reduced-depth control validation) passes its own.
+    same run discipline (the reduced-depth control validation) passes its own. ``cache_limit`` is
+    the MLX buffer-cache limit to set for the process (``--cache-limit``; the rig's by default).
     """
     measure = run_mode if measure is None else measure
     key_of = current_key if key is None else key
     caps = list(install_memory_caps())
-    mx.set_cache_limit(FLUX_CACHE_LIMIT)
-    cache_limit = int(mx.set_cache_limit(FLUX_CACHE_LIMIT))  # the limit now in force
-    limits_recorded = limits_in_force(caps, cache_limit)
+    mx.set_cache_limit(cache_limit)  # no getter in mlx 0.32.2: the requested value is recorded
+    limits_recorded = limits_in_force(caps)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     move_stale_abort_aside(args.out.parent)
     watchdog = Watchdog(args.out.parent, ceiling=default_ceiling(), budget=args.wall_budget).start()
@@ -851,6 +957,11 @@ def _print_report(rep: Mapping[str, Any]) -> None:
             f"pooled {mode}: median {stats['median']:.3f} s spread {stats['spread']:.3f} "
             f"(n={stats['n']}{verify_text})"
         )
+    for mode, stats in rep["pooled"].items():
+        trace = stats.get("trace")
+        if trace:
+            phases = ", ".join(f"{k[:-2]} {v:.3f}" for k, v in trace.items() if k.endswith("_s"))
+            print(f"trace {mode} (median s/step): {phases}")
     for label, value in rep["overhead"].items():
         print(f"overhead {label}: {value:+.1%}")
     cost = rep["eval_policy_cost_s"]
@@ -863,7 +974,8 @@ def orchestrate(args: argparse.Namespace) -> int:
     out_dir: Path = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     key = current_key(args)
-    conflicts = resume_conflicts(out_dir, args.rounds, key)
+    modes: list[str] = list(args.modes)
+    conflicts = resume_conflicts(out_dir, args.rounds, key, modes=modes)
     if conflicts:
         for r, m, fields in conflicts:
             print(
@@ -872,9 +984,10 @@ def orchestrate(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
         return EXIT_ERROR
-    todo = pending_runs(out_dir, args.rounds)
+    todo = pending_runs(out_dir, args.rounds, modes=modes)
     print(
-        f"{len(interleaved(args.rounds)) - len(todo)} run(s) already complete, {len(todo)} to run"
+        f"{len(interleaved(args.rounds, modes=modes)) - len(todo)} run(s) already complete, "
+        f"{len(todo)} to run"
     )
     stopped: dict[str, Any] | None = None
     for round_no, mode in todo:
@@ -890,6 +1003,8 @@ def orchestrate(args: argparse.Namespace) -> int:
             size=args.size,
             seed=args.seed,
             wall_budget=args.wall_budget,
+            cache_limit=args.cache_limit,
+            trace=args.trace,
         )
         print(f"round {round_no} {mode}: {' '.join(cmd)}", flush=True)
         code = subprocess.run(cmd, cwd=_REPO, check=False).returncode
@@ -897,11 +1012,12 @@ def orchestrate(args: argparse.Namespace) -> int:
             stopped = {"round": round_no, "mode": mode, "exit_code": code}
             print(f"error: round {round_no} {mode} exited {code}; stopping", file=sys.stderr)
             break
-    results = read_results(out_dir, args.rounds)
+    results = read_results(out_dir, args.rounds, modes=modes)
     rep = report(results, stopped=stopped)
     rep.update(
         {
             "key": key,
+            "modes": modes,
             "rounds_requested": args.rounds,
             "runs_complete": [(r["round"], r["mode"]) for r in results],
             "steps": args.steps,
@@ -920,7 +1036,7 @@ def main(argv: list[str] | None = None) -> int:
     """Entry point."""
     args = parse_args(argv)
     if not args.orchestrate:
-        return run_one(args)
+        return run_one(args, cache_limit=args.cache_limit)
     try:
         return orchestrate(args)
     except Exception as exc:  # a setup or report error is a tool error (2), never 1

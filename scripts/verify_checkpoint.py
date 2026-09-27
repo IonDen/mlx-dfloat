@@ -91,16 +91,18 @@ def revision_from_path(path: Path) -> str:
 def source_hash() -> str:
     """sha256 over every package source file plus this script and the helpers it imports.
 
-    Recurses through ``src/mlx_dfloat`` (not just its top level) and also covers
-    ``scripts/verify_checkpoint.py``, ``scripts/_watchdog.py`` and ``scripts/_bench_common.py``,
-    so an edit to the parity script or its helpers invalidates a stored result too, not just an
-    edit to the package.
+    Recurses through ``src/mlx_dfloat`` (not just its top level) and also covers this script,
+    the helpers it imports (``_watchdog.py``, ``_bench_common.py``) and the FLUX rig and step
+    bench (``_flux_rig.py``, ``bench_flux_step.py``), so an edit to a script on a measurement's
+    hot path invalidates its stored results too, not just an edit to the package.
     """
     files = sorted(_SRC.rglob("*.py")) + sorted(
         [
             _SCRIPTS / "_watchdog.py",
             _SCRIPTS / "verify_checkpoint.py",
             _SCRIPTS / "_bench_common.py",
+            _SCRIPTS / "_flux_rig.py",
+            _SCRIPTS / "bench_flux_step.py",
         ]
     )
     digest = hashlib.sha256()

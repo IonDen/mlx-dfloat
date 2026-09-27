@@ -55,6 +55,7 @@ COMMON = {
     "embeds_meta": {"synthetic": "true"},
     "source": "abc",
     "mlx": "0.32.2",
+    "cache_limit": 1_400_000_000,
 }
 KEY = run_key(**COMMON, double=4, single=8)
 
@@ -172,6 +173,7 @@ def test_report_pools_every_timed_step_of_the_complete_rounds_only():
         "spread": pytest.approx(0.06 / 1.01),
         "n": 6,
         "verify_median_s": pytest.approx(0.0),
+        "trace": None,
     }
     assert out["pooled"]["control"]["median"] == pytest.approx(1.015)
     assert out["pooled"]["control"]["spread"] == pytest.approx(0.04 / 1.015)

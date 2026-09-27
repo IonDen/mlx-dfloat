@@ -64,6 +64,7 @@ KEY = run_key(
     embeds_meta={"synthetic": "true", "seed": "42"},
     source="abc",
     mlx="0.32.2",
+    cache_limit=FLUX_CACHE_LIMIT,
 )
 
 
@@ -190,9 +191,12 @@ def test_child_command_runs_the_module_for_one_mode_and_round_without_orchestrat
         size=768,
         seed=42,
         wall_budget=1200.0,
+        cache_limit=FLUX_CACHE_LIMIT,
+        trace=False,
     )
     assert cmd[:3] == [sys.executable, "-m", "scripts.bench_flux_step"]
     assert "--orchestrate" not in cmd
+    assert "--trace" not in cmd
     flags = dict(zip(cmd[3::2], cmd[4::2], strict=True))
     assert flags == {
         "--mode": "df11-depth2",
@@ -206,7 +210,41 @@ def test_child_command_runs_the_module_for_one_mode_and_round_without_orchestrat
         "--size": "768",
         "--seed": "42",
         "--wall-budget": "1200.0",
+        "--cache-limit": str(FLUX_CACHE_LIMIT),
     }
+
+
+def test_child_command_forwards_trace_and_a_custom_cache_limit(tmp_path):
+    # Bug caught: a traced or cache-limit orchestration whose children run untraced at the default
+    # limit (the A/B would compare two identical runs).
+    cmd = child_command(
+        mode="df11",
+        round_no=1,
+        out=tmp_path / "r.json",
+        df11=tmp_path / "ckpt",
+        embeds=tmp_path / "e.safetensors",
+        steps=5,
+        warmup=2,
+        model="schnell",
+        size=1024,
+        seed=42,
+        wall_budget=1200.0,
+        cache_limit=2_500_000_000,
+        trace=True,
+    )
+    assert cmd[-1] == "--trace"
+    flags = dict(zip(cmd[3:-1:2], cmd[4:-1:2], strict=True))
+    assert flags["--cache-limit"] == "2500000000"
+
+
+def test_parse_args_defaults_to_the_rig_cache_limit_and_no_trace():
+    args = parse_args(["--mode", "df11", "--out", "r.json", "--df11", "d", "--embeds", "e"])
+    assert args.cache_limit == FLUX_CACHE_LIMIT
+    assert args.trace is False
+    traced = parse_args(
+        [*("--mode", "df11", "--out", "r.json", "--df11", "d", "--embeds", "e"), "--trace"]
+    )
+    assert traced.trace is True
 
 
 # --- embeddings shape check ---------------------------------------------------------------------
@@ -255,12 +293,14 @@ def test_report_pools_every_timed_step_of_a_mode_across_rounds():
         "spread": pytest.approx(0.5 / 1.35),
         "n": 6,
         "verify_median_s": pytest.approx(0.025),
+        "trace": None,
     }
     assert pooled["control"] == {
         "median": pytest.approx(1.0),
         "spread": pytest.approx(0.2),
         "n": 6,
         "verify_median_s": pytest.approx(0.0),
+        "trace": None,
     }
     assert pooled["control-noeval"]["n"] == 3
 
@@ -313,7 +353,13 @@ def test_report_pools_only_rounds_where_both_modes_of_the_pair_completed():
     assert out["pooled"]["df11"]["median"] == pytest.approx(1.35)
     assert out["pooled"]["df11"]["verify_median_s"] == pytest.approx(0.025)
     assert out["overhead"]["per-block"] == pytest.approx(0.35)
-    assert out["paired_rounds"] == {"per-block": [1, 2], "depth2": [1], "eval-policy": [1]}
+    assert out["paired_rounds"] == {
+        "per-block": [1, 2],
+        "depth2": [1],
+        "prefetch": [],
+        "prefetch-inline": [],
+        "eval-policy": [1],
+    }
 
 
 def test_report_of_a_stopped_orchestration_suppresses_the_pooled_overhead():
@@ -347,6 +393,7 @@ def test_run_key_resolves_the_checkpoint_path_and_carries_every_setting(tmp_path
         embeds_meta={"synthetic": "false", "prompt": "a lighthouse"},
         source="deadbeef",
         mlx="0.32.2",
+        cache_limit=2_500_000_000,
     )
     assert key == {
         "model": "dev",
@@ -359,6 +406,7 @@ def test_run_key_resolves_the_checkpoint_path_and_carries_every_setting(tmp_path
         "embeds_meta": {"synthetic": "false", "prompt": "a lighthouse"},
         "source": "deadbeef",
         "mlx": "0.32.2",
+        "cache_limit": 2_500_000_000,
     }
 
 
@@ -498,6 +546,7 @@ def _time(
     limits=True,
     loaded=True,
     watchdog=None,
+    tracer=None,
 ):
     import mlx.core as mx
     from scripts.bench_flux_step import time_steps
@@ -516,6 +565,7 @@ def _time(
         limits_recorded=limits,
         watchdog=watchdog if watchdog is not None else _FakeWatchdog(),
         label="df11",
+        tracer=tracer,
     )
 
 
@@ -572,18 +622,20 @@ def test_time_steps_records_the_timed_steps_own_peaks_apart_from_the_lifetime_pe
 
 
 @pytest.mark.parametrize(
-    ("caps", "cache_limit", "want"),
+    ("caps", "want"),
     [
-        ((20, 22), FLUX_CACHE_LIMIT, True),
-        ((0, 22), FLUX_CACHE_LIMIT, False),  # the wired cap failed to install
-        ((20, 0), FLUX_CACHE_LIMIT, False),  # the memory cap failed to install
-        ((0, 0), FLUX_CACHE_LIMIT, False),
-        ((20, 22), FLUX_CACHE_LIMIT + 1, False),  # another cache limit is in force
+        ((20, 22), True),
+        ((0, 22), False),  # the wired cap failed to install
+        ((20, 0), False),  # the memory cap failed to install
+        ((0, 0), False),
+        ((20,), False),  # one cap missing
     ],
 )
-def test_limits_in_force_needs_both_caps_and_the_cache_limit(caps, cache_limit, want):
-    # Bug caught: checking caps[0] alone (a failed memory cap passes), or ignoring the cache limit.
-    assert limits_in_force(caps, cache_limit) is want
+def test_limits_in_force_needs_both_caps(caps, want):
+    # Bug caught: checking caps[0] alone (a failed memory cap passes). The MLX cache limit is not
+    # part of the condition: mlx 0.32.2 has no getter, so a read-back would compare the requested
+    # value with itself.
+    assert limits_in_force(caps) is want
 
 
 def _fake_rig(rng, *, n_double=2, n_single=2):
@@ -829,3 +881,276 @@ def test_the_orchestrator_launches_children_from_the_repository_root_with_absolu
     assert flags["--df11"] == str(here / "c")
     assert flags["--embeds"] == str(here / "e.safetensors")
     assert Path(flags["--out"]).parent == here / "out"
+
+
+# --- trace ----------------------------------------------------------------------------------------
+
+
+class _TracingTransformer(_FakeTransformer):
+    """The fake, recording one block event per call into ``tracer`` the way the seam does."""
+
+    def __init__(self, provider, launches, tracer):
+        super().__init__(provider, launches)
+        self.tracer = tracer
+
+    def __call__(self, **kwargs):
+        import time
+
+        self.tracer.begin_step()
+        t0 = time.perf_counter()
+        out = super().__call__(**kwargs)
+        t1 = time.perf_counter()
+        self.tracer.record("b", decode_start=t0, decode_end=t0, encode_end=t1, eval_end=t1)
+        self.tracer.end_step()
+        return out
+
+
+def test_time_steps_with_a_tracer_summarises_only_the_timed_steps():
+    # Bug caught: warm-up steps' events in the trace (their compile time would pollute the
+    # medians), or a summary built from another step's window.
+    from scripts._flux_rig import Tracer
+
+    provider = _FakeProvider()
+    tracer = Tracer()
+    transformer = _TracingTransformer(provider, [12] * 5, tracer)
+    out = _time(transformer, provider, tracer=tracer)
+    assert len(tracer.events) == 5
+    assert [e["step"] for e in out["trace_events"]] == [2, 3, 4]
+    assert [s["n_blocks"] for s in out["trace_steps"]] == [1, 1, 1]
+    for summary, (start, end), event in zip(
+        out["trace_steps"], tracer.steps[2:], out["trace_events"], strict=True
+    ):
+        assert summary["step_s"] == pytest.approx(end - start)
+        assert summary["head_s"] == pytest.approx(event["t_decode_start"] - start)
+        assert summary["head_s"] >= 0  # an off-by-one in the step filter goes negative here
+    assert out["trace_medians"].keys() == out["trace_steps"][0].keys()
+
+
+def test_time_steps_without_a_tracer_records_no_trace_fields():
+    provider = _FakeProvider()
+    out = _time(_FakeTransformer(provider, [12] * 5), provider)
+    assert not {"trace_steps", "trace_events", "trace_medians"} & out.keys()
+
+
+def test_trace_medians_takes_the_median_of_every_phase_across_steps():
+    from scripts.bench_flux_step import trace_medians
+
+    steps = [
+        {"n_blocks": 2, "host_decode_s": 0.1, "eval_wait_s": 1.0},
+        {"n_blocks": 2, "host_decode_s": 0.3, "eval_wait_s": 3.0},
+        {"n_blocks": 2, "host_decode_s": 0.2, "eval_wait_s": 9.0},
+    ]
+    assert trace_medians(steps) == {
+        "n_blocks": 2,
+        "host_decode_s": pytest.approx(0.2),
+        "eval_wait_s": pytest.approx(3.0),
+    }
+
+
+def test_report_pools_the_trace_phases_over_the_paired_rounds():
+    # Bug caught: a trace pooled from one round only, or from rounds whose pair did not complete.
+    traced = [
+        {**FIXTURES[0], "trace_steps": [{"host_decode_s": 0.1}, {"host_decode_s": 0.2}]},
+        FIXTURES[1],
+        {**FIXTURES[5], "trace_steps": [{"host_decode_s": 0.4}]},
+        FIXTURES[6],
+        {**FIXTURES[7], "trace_steps": [{"host_decode_s": 9.0}]},  # unpaired round 3
+    ]
+    pooled = report(traced)["pooled"]
+    assert pooled["df11"]["trace"] == {"host_decode_s": pytest.approx(0.2)}
+    assert pooled["control"]["trace"] is None
+
+
+@pytest.mark.parametrize("value", ["-1", "0", "18446744073709551616", "abc"])
+def test_a_cache_limit_that_is_not_a_positive_size_is_a_usage_error(value):
+    # Bug caught: a negative or oversized value reaching mx.set_cache_limit (a TypeError outside
+    # run_one's guard, exit 1, which this project reserves for a real bit mismatch), or 0 silently
+    # turning the buffer cache off.
+    with pytest.raises(SystemExit) as exc:
+        parse_args(
+            [
+                *("--mode", "df11", "--out", "r.json", "--df11", "d", "--embeds", "e"),
+                "--cache-limit",
+                value,
+            ]
+        )
+    assert exc.value.code == 2
+
+
+def test_run_one_sets_and_records_the_requested_cache_limit(tmp_path, restore_cache_limit):
+    import mlx.core as mx
+    from scripts.bench_flux_step import run_one
+
+    seen = {}
+
+    def measure(args, watchdog, *, limits_recorded):
+        seen["limit"] = int(mx.set_cache_limit(0))
+        mx.set_cache_limit(seen["limit"])
+        return {
+            "exit_code": 0,
+            "policy": "per-block",
+            "median_s": 1.0,
+            "spread": 0.0,
+            "verify_median_s": 0.0,
+            "launches_expected_per_step": 0,
+            "footprint_peak_bytes": 1,
+            "limits": limits_recorded,
+        }
+
+    args = _one_run_args(tmp_path)
+    code = run_one(args, measure=measure, key=lambda a: {}, cache_limit=2_000_000_000)
+    written = json.loads((tmp_path / "r.json").read_text())
+    assert code == 0
+    assert seen["limit"] == 2_000_000_000
+    assert written["cache_limit_bytes"] == 2_000_000_000
+    assert written["limits"] is True
+
+
+# --- prefetch modes -------------------------------------------------------------------------------
+
+
+def test_prefetch_modes_are_df11_modes_under_the_per_block_policy():
+    from scripts.bench_flux_step import EXTRA_MODES, PAIRS
+
+    for mode in EXTRA_MODES:
+        assert mode_policy(mode) == "per-block"
+        assert expected_launches(mode, n_double=19, n_single=38, steps=2) == 114
+    assert ("prefetch", "df11-prefetch", "control") in PAIRS
+    assert ("prefetch-inline", "df11-prefetch-inline", "control") in PAIRS
+    assert not set(EXTRA_MODES) & set(MODES)  # the verdict recipe stays the five modes
+
+
+def test_make_provider_for_prefetch_modes_wraps_the_decoder_with_the_right_stream():
+    # Bug caught: the second-stream mode decoding on the default stream (the A/B would compare two
+    # identical runs), or the inline mode given a new stream.
+    import mlx.core as mx
+    import numpy as np
+    from scripts._flux_rig import PrefetchProvider
+
+    from mlx_dfloat.decode import decode_group
+
+    ckpt, groups, shapes, _source = _fake_rig(np.random.default_rng(5), n_double=1, n_single=1)
+    streams = []
+
+    def recording_decode(group):
+        streams.append(mx.default_stream(mx.gpu))  # the stream a kernel launched here would use
+        return decode_group(group, backend="reference")
+
+    two = make_provider("df11-prefetch", ckpt, groups, shapes, decode=recording_decode)
+    one = make_provider("df11-prefetch-inline", ckpt, groups, shapes, decode=recording_decode)
+    assert isinstance(two, PrefetchProvider)
+    assert isinstance(one, PrefetchProvider)
+    assert two.stream is not None
+    assert two.stream != mx.default_stream(mx.gpu)
+    assert one.stream is None
+    assert streams == []  # nothing decoded before the first step
+    two.weights_for("transformer_blocks.0", shapes["transformer_blocks.0"])
+    assert streams == [two.stream, two.stream]  # the cold decode and the look-ahead
+    one.weights_for("transformer_blocks.0", shapes["transformer_blocks.0"])
+    assert streams[2:] == [mx.default_stream(mx.gpu)] * 2
+
+
+def test_orchestrate_runs_only_the_requested_modes(tmp_path, monkeypatch):
+    # Bug caught: --modes ignored (the prefetch experiment would run the five-mode recipe).
+    from types import SimpleNamespace
+
+    import scripts.bench_flux_step as bfs
+
+    launched = []
+    commands = []
+
+    def run(cmd, **kwargs):
+        if "scripts.bench_flux_step" in cmd:
+            launched.append(cmd[cmd.index("--mode") + 1])
+            commands.append(cmd)
+            out = Path(cmd[cmd.index("--out") + 1])
+            write_json_atomic(
+                out, {"exit_code": 0, "step_s": [1.0], "mode": launched[-1], "round": 1}
+            )
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(bfs, "current_key", lambda args: {"model": "schnell"})
+    monkeypatch.setattr(bfs.subprocess, "run", run)
+    code = bfs.main(
+        [
+            *("--orchestrate", "--rounds", "1", "--out-dir", str(tmp_path / "out")),
+            *("--df11", "c", "--embeds", "e.safetensors"),
+            *("--modes", "df11-prefetch", "control"),
+            *("--trace", "--cache-limit", "2500000000"),
+        ]
+    )
+    assert code == 0
+    assert launched == ["df11-prefetch", "control"]
+    for cmd in commands:  # the children run what the orchestration asked for
+        assert cmd[-1] == "--trace"
+        assert cmd[cmd.index("--cache-limit") + 1] == "2500000000"
+    rep = json.loads((tmp_path / "out" / "report.json").read_text())
+    assert rep["overhead"] == {"prefetch": pytest.approx(0.0)}
+
+
+def test_modes_without_orchestrate_is_a_usage_error():
+    # Bug caught: `--modes` silently ignored on a single-mode run.
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                *("--mode", "df11", "--out", "r.json", "--df11", "d", "--embeds", "e"),
+                "--modes",
+                "df11",
+            ]
+        )
+
+
+def test_main_runs_one_mode_at_the_requested_cache_limit(tmp_path, monkeypatch):
+    # Bug caught: main dropping the kwarg, so a --cache-limit child runs at the rig's default
+    # while its key and limits still claim the requested one.
+    import scripts.bench_flux_step as bfs
+
+    seen = {}
+
+    def run_one(args, **kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(bfs, "run_one", run_one)
+    code = bfs.main(
+        [
+            *("--mode", "df11", "--out", str(tmp_path / "r.json"), "--df11", "d", "--embeds", "e"),
+            *("--cache-limit", "2000000000"),
+        ]
+    )
+    assert code == 0
+    assert seen["cache_limit"] == 2_000_000_000
+
+
+def test_current_key_carries_the_cache_limit(tmp_path, monkeypatch):
+    import scripts.bench_flux_step as bfs
+
+    monkeypatch.setattr(bfs, "embeds_metadata", lambda path: {"synthetic": "true"})
+    monkeypatch.setattr(bfs, "source_hash", lambda: "abc")
+    args = parse_args(
+        [
+            *("--mode", "df11", "--out", "r.json", "--df11", "d", "--embeds", "e"),
+            *("--cache-limit", "2500000000"),
+        ]
+    )
+    assert bfs.current_key(args)["cache_limit"] == 2_500_000_000
+
+
+def test_report_pools_a_shared_control_over_each_pairs_own_rounds():
+    # Bug caught: control pooled once, over the rounds of whichever pair came last, so the per-block
+    # overhead compared df11 over rounds 1-2 with a control over round 1 only (+40 % here instead of
+    # -6.7 %).
+    results = [
+        {"round": 1, "mode": "df11", "step_s": [1.2]},
+        {"round": 1, "mode": "control", "step_s": [1.0]},
+        {"round": 1, "mode": "df11-prefetch", "step_s": [1.1]},
+        {"round": 2, "mode": "df11", "step_s": [1.6]},
+        {"round": 2, "mode": "control", "step_s": [2.0]},
+    ]
+    out = report(results)
+    assert out["paired_rounds"]["per-block"] == [1, 2]
+    assert out["paired_rounds"]["prefetch"] == [1]
+    assert out["overhead"]["per-block"] == pytest.approx((1.4 - 1.5) / 1.5)
+    assert out["overhead"]["prefetch"] == pytest.approx(0.1)
+    assert out["pooled"]["control"]["n"] == 2  # the per-block pair's rounds
+    assert out["pooled"]["df11-prefetch"]["n"] == 1
