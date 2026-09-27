@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPTS = ["scripts/verify_checkpoint.py", "scripts/verify_remote_group.py"]
+SCRIPTS = [
+    "scripts/verify_checkpoint.py",
+    "scripts/verify_remote_group.py",
+    "scripts/flux_rig_smoke.py",  # its --help must work without mflux (mflux loads inside smoke())
+]
 
 
 def _run(args, env=None):
