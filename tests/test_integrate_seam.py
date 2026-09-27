@@ -7,6 +7,7 @@ mflux.
 """
 
 import dataclasses
+from functools import partial
 
 import mlx.core as mx
 import numpy as np
@@ -16,6 +17,7 @@ from tests._flux_fakes import (
     D,
     FakeDoubleBlock,
     FakeSeamTransformer,
+    FakeTransformer,
     Recorder,
     all_block_weights,
     block_lists,
@@ -34,6 +36,7 @@ from mlx_dfloat.integrate.providers import (
     ResidentProvider,
     ReuseProvider,
 )
+from mlx_dfloat.mflux.flux1.transformer import SeamMixin
 
 
 def test_seam_runs_each_block_on_the_provider_weight_and_restores_the_placeholder():
@@ -301,7 +304,9 @@ def test_df11_provider_with_the_metal_backend_feeds_the_seam_bit_exact_weights()
     tf = FakeSeamTransformer(rec, n_double=2, n_single=1)
     shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
     groups, names, source = df11_groups(shapes, np.random.default_rng(11))
-    provider = DF11Provider(groups, names, FLUX_TABLE)  # default decode: the Metal backend
+    provider = DF11Provider(
+        groups, names, FLUX_TABLE, decode=partial(decode_group, backend="metal")
+    )
     tf.attach(provider, shapes, eval_policy="per-block")
     mx.eval(tf(*inputs()))
     tf.verify_step()
@@ -315,8 +320,20 @@ def test_df11_provider_with_the_metal_backend_feeds_the_seam_bit_exact_weights()
 
 
 def test_hooks_forward_unknown_keywords_to_mflux():
-    # Bug caught: a keyword mflux adds to its per-block hooks raising TypeError in the seam.
-    tf = FakeSeamTransformer(Recorder(), n_double=1, n_single=0)
+    # Bug caught: the seam dropping (or choking on) a keyword a later mflux adds to its per-block
+    # hooks, instead of passing it through to mflux's own hook. The fake's hooks mirror mflux 0.20.0
+    # exactly (no **kwargs), so this local subclass stands in for a future mflux that takes one more.
+    forwarded = []
+
+    class FutureTransformer(FakeTransformer):
+        def _apply_joint_transformer_block(self, idx, block, **kwargs):
+            forwarded.append(kwargs.pop("future_keyword", None))
+            return super()._apply_joint_transformer_block(idx=idx, block=block, **kwargs)
+
+    class FutureSeam(SeamMixin, FutureTransformer):
+        pass
+
+    tf = FutureSeam(Recorder(), n_double=1, n_single=0)
     shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
     tf.attach(ResidentProvider(resident_dicts(shapes)), shapes)
     x = mx.ones((1, 2, D), dtype=mx.bfloat16)
@@ -331,3 +348,82 @@ def test_hooks_forward_unknown_keywords_to_mflux():
         future_keyword=1,
     )
     mx.eval(out)
+    assert forwarded == [1]
+
+
+def _reference_df11(n_double, n_single, seed):
+    tf = FakeSeamTransformer(Recorder(), n_double=n_double, n_single=n_single)
+    shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
+    groups, names, _source = df11_groups(shapes, np.random.default_rng(seed))
+    provider = DF11Provider(
+        groups, names, FLUX_TABLE, decode=partial(decode_group, backend="reference")
+    )
+    return tf, shapes, provider
+
+
+def test_a_step_is_refused_while_the_previous_steps_status_words_are_unverified():
+    # Bug caught: a caller that never calls verify_step() growing the provider's pending list
+    # without bound and never checking a single decode (mflux's own denoise loop evaluates inside
+    # the step, so nothing else would ever read them). The refusal fires before any block decodes
+    # and keeps the pending words, so the caller can still verify them.
+    tf, shapes, provider = _reference_df11(1, 1, 41)
+    tf.attach(provider, shapes)
+    mx.eval(tf(*inputs()))
+    with pytest.raises(DFloatIntegrationError, match=r"verify_step\(\).*verify_in_call=True"):
+        tf(*inputs())
+    assert provider.launches == 2
+    assert len(provider.pending) == 2
+    tf.verify_step()
+    mx.eval(tf(*inputs()))  # verified in between: the next step runs
+    tf.verify_step()
+    tf.attach(provider, shapes, verify_in_call=True)
+    mx.eval(tf(*inputs()))
+    mx.eval(tf(*inputs()))  # verify_in_call drains the words inside every step
+    assert provider.pending == []
+    assert provider.launches == 8
+
+
+def test_verify_in_call_is_refused_under_the_none_policy_with_a_launching_provider():
+    # Bug caught: verify_in_call reading the status words at the end of a "none" step, which forces
+    # every decode of the step before the caller's own eval (the run-ahead "none" is there to
+    # measure turns into a hidden full-step eval).
+    tf = FakeSeamTransformer(Recorder(), n_double=1, n_single=0)
+    shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
+    with pytest.raises(DFloatIntegrationError, match=r"verify_in_call.*'none'"):
+        tf.attach(_Launching(), shapes, eval_policy="none", verify_in_call=True)
+    tf.attach(_Launching(), shapes, eval_policy="per-block", verify_in_call=True)
+    tf.attach(_Launching(), shapes, eval_policy="none")
+    tf.attach(
+        ResidentProvider(resident_dicts(shapes)), shapes, eval_policy="none", verify_in_call=True
+    )
+
+
+def test_a_step_that_raises_midway_clears_the_df11_providers_status_words():
+    # Bug caught: the seam's abort path not resetting the provider, so the failed step's status
+    # words (block 0's decode) stay pending and the next step is refused as unverified.
+    class BoomOnce(FakeDoubleBlock):
+        def __init__(self, recorder):
+            super().__init__(recorder)
+            self.boomed = False
+
+        def __call__(self, **kwargs):
+            if not self.boomed:
+                self.boomed = True
+                raise RuntimeError("boom")
+            return super().__call__(**kwargs)
+
+    rec = Recorder()
+    tf = FakeSeamTransformer(rec, n_double=2, n_single=0)
+    tf.transformer_blocks[1] = BoomOnce(rec)
+    shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
+    groups, names, _source = df11_groups(shapes, np.random.default_rng(42))
+    provider = DF11Provider(
+        groups, names, FLUX_TABLE, decode=partial(decode_group, backend="reference")
+    )
+    tf.attach(provider, shapes)
+    with pytest.raises(RuntimeError, match="boom"):
+        tf(*inputs())
+    assert provider.launches == 2
+    assert provider.pending == []
+    mx.eval(tf(*inputs()))
+    tf.verify_step()

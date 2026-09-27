@@ -4,15 +4,24 @@ from functools import cache
 from typing import Any
 
 import mlx.core as mx
+from mlx.utils import tree_flatten
 
 from mlx_dfloat.errors import DFloatFormatError, DFloatIntegrationError
 from mlx_dfloat.format import DF11Checkpoint
 from mlx_dfloat.integrate import seam
+from mlx_dfloat.integrate.coverage import check_extras_cover, extras_plan, read_extra
 from mlx_dfloat.integrate.names import NameMap, Shapes
+from mlx_dfloat.integrate.placeholders import PLACEHOLDER, install_placeholders
 from mlx_dfloat.integrate.providers import WeightProvider
+from mlx_dfloat.mflux import require_mflux
+from mlx_dfloat.mflux.flux1.names import (
+    DOUBLE_PREFIX,
+    DROPPED_EXTRAS,
+    SINGLE_PREFIX,
+    check_flux_groups,
+    flux_name_map,
+)
 
-DOUBLE_PREFIX = "transformer_blocks"
-SINGLE_PREFIX = "single_transformer_blocks"
 MAX_BUILD_ACTIVE_BYTES = 2 * 1024**3
 
 
@@ -87,7 +96,12 @@ class SeamMixin:
 
 @cache
 def seam_transformer_class() -> type:
-    """``SeamMixin`` composed in front of mflux's ``Transformer`` (imports mflux)."""
+    """``SeamMixin`` composed in front of mflux's ``Transformer`` (imports mflux).
+
+    Raises:
+        DFloatDependencyError: The optional ``mflux`` extra is not installed.
+    """
+    require_mflux()
     from mflux.models.flux.model.flux_transformer.transformer import Transformer
 
     return type("SeamTransformer", (SeamMixin, Transformer), {})
@@ -104,25 +118,25 @@ def build_transformer(
     """Construct mflux's ``Transformer`` (seamed) with placeholders for the matrices and the extras loaded.
 
     Block counts come from the checkpoint's groups, or ``n_double``/``n_single`` for a reduced-depth build
-    (each capped at the checkpoint's own count). Every block matrix is a placeholder and every other
+    (each between zero and the checkpoint's own count). Every block matrix is a placeholder and every other
     parameter comes from the checkpoint's extras; the coverage of both is asserted, and so is the MLX
     active memory the build added (under ``MAX_BUILD_ACTIVE_BYTES``).
 
     Raises:
         DFloatFormatError: The groups are not FLUX.1's, an extra is not BF16 or has the wrong shape.
-        DFloatIntegrationError: A depth override exceeds the checkpoint's own block count, an uncovered
-            parameter, an extra without a target, or too much active memory added by the build.
+        DFloatDependencyError: The optional ``mflux`` extra is not installed.
+        DFloatIntegrationError: A depth override is negative or exceeds the checkpoint's own block
+            count, an uncovered parameter, an extra without a target, or too much active memory added
+            by the build.
     """
-    from mlx.utils import tree_flatten
-
-    from mlx_dfloat.integrate.coverage import check_extras_cover, extras_plan, read_extra
-    from mlx_dfloat.integrate.placeholders import PLACEHOLDER, install_placeholders
-    from mlx_dfloat.mflux.flux1.names import DROPPED_EXTRAS, check_flux_groups, flux_name_map
-
     names = flux_name_map() if name_map is None else name_map
     ckpt_double, ckpt_single = check_flux_groups(ckpt)
     n_double = ckpt_double if n_double is None else n_double
     n_single = ckpt_single if n_single is None else n_single
+    if n_double < 0 or n_single < 0:
+        raise DFloatIntegrationError(
+            f"asked for {n_double} double / {n_single} single blocks; a depth cannot be negative"
+        )
     if n_double > ckpt_double or n_single > ckpt_single:
         raise DFloatIntegrationError(
             f"asked for {n_double} double / {n_single} single blocks; the checkpoint has "
@@ -161,6 +175,7 @@ def build_transformer(
     added = int(mx.get_active_memory()) - before
     if added >= MAX_BUILD_ACTIVE_BYTES:
         raise DFloatIntegrationError(
-            f"{added / 1024**3:.2f} GiB active added by the build; a block matrix is probably resident"
+            f"extras added {added / 1024**3:.2f} GiB of active memory "
+            f"(limit {MAX_BUILD_ACTIVE_BYTES / 1024**3:g} GiB)"
         )
     return transformer, shapes

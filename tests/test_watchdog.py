@@ -1,3 +1,4 @@
+import builtins
 import json
 import sys
 import threading
@@ -7,6 +8,7 @@ import pytest
 
 import mlx_dfloat._watchdog as wd
 from mlx_dfloat._watchdog import Watchdog, verdict
+from mlx_dfloat.errors import DFloatDependencyError
 
 
 def test_memory_verdict_uses_process_rss():
@@ -243,3 +245,27 @@ def test_phys_footprint_sees_a_gpu_allocation_that_rss_misses():
     # RSS may pick up a little of a Metal allocation; the point is that it does not grow by the
     # allocation while the footprint does.
     assert deltas["rss"] < 200 * 1024**2
+
+
+def _without_psutil(monkeypatch):
+    real_import = builtins.__import__
+
+    def no_psutil(name, *args, **kwargs):
+        if name == "psutil":
+            raise ImportError("No module named 'psutil'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_psutil)
+
+
+def test_a_missing_psutil_refuses_the_watchdog_up_front(tmp_path, monkeypatch):
+    # Bug caught: psutil imported only inside the sampling try, so a venv without it starts the
+    # watchdog, turns the ImportError into `sample_error`, and exits 70 fifty milliseconds later
+    # with an abort artifact that never names psutil; or default_ceiling() leaking a bare
+    # ImportError instead of the package's dependency error.
+    _without_psutil(monkeypatch)
+    with pytest.raises(DFloatDependencyError, match="psutil"):
+        Watchdog(tmp_path, ceiling=10**15, budget=60)
+    with pytest.raises(DFloatDependencyError, match="psutil"):
+        wd.default_ceiling()
+    assert not (tmp_path / "abort.json").exists()

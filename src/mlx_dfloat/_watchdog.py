@@ -16,8 +16,11 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import mlx.core as mx
+
+from mlx_dfloat.errors import DFloatDependencyError
 
 EXIT_MEMORY = 70
 EXIT_WALL = 71
@@ -61,12 +64,21 @@ class _RusageInfoV2(ctypes.Structure):
     ]
 
 
+def _psutil() -> Any:
+    """The ``psutil`` module, or a package-rooted error naming it (it ships in the mflux extra)."""
+    try:
+        import psutil
+    except ImportError as exc:
+        raise DFloatDependencyError(
+            "the watchdog needs psutil: install mlx-dfloat[mflux] or `pip install psutil`"
+        ) from exc
+    return psutil
+
+
 def phys_footprint() -> int:
     """The OS-accounted footprint of this process (what macOS memory pressure sees); RSS on other platforms."""
     if _LIBPROC is None:
-        import psutil
-
-        return int(psutil.Process().memory_info().rss)
+        return int(_psutil().Process().memory_info().rss)
     info = _RusageInfoV2()
     if _LIBPROC.proc_pid_rusage(os.getpid(), _RUSAGE_INFO_V2, ctypes.byref(info)) != 0:
         raise OSError("proc_pid_rusage failed")
@@ -88,10 +100,12 @@ def verdict(*, rss: int, ceiling: int, elapsed: float, budget: float) -> str | N
 
 
 def default_ceiling() -> int:
-    """Physical memory minus a 4 GiB reserve for the OS and other processes."""
-    import psutil
+    """Physical memory minus a 4 GiB reserve for the OS and other processes.
 
-    return int(psutil.virtual_memory().total) - 4 * 1024**3
+    Raises:
+        DFloatDependencyError: ``psutil`` is not installed.
+    """
+    return int(_psutil().virtual_memory().total) - 4 * 1024**3
 
 
 class Watchdog:
@@ -100,7 +114,13 @@ class Watchdog:
     def __init__(
         self, out_dir: Path, *, ceiling: int, budget: float, interval: float = 0.05
     ) -> None:
-        """Configure the ceiling (bytes), wall budget (seconds) and poll interval."""
+        """Configure the ceiling (bytes), wall budget (seconds) and poll interval.
+
+        Raises:
+            DFloatDependencyError: ``psutil`` (the RSS diagnostic) is not installed; refused here,
+                before any sampling, so a missing module never reads as a sampling failure.
+        """
+        self._psutil = _psutil()
         self.out_dir, self.ceiling, self.budget, self.interval = out_dir, ceiling, budget, interval
         # Peak OS-accounted footprint seen so far: the verdict's own memory number.
         self.peak_footprint = 0
@@ -138,11 +158,9 @@ class Watchdog:
             "elapsed": elapsed,
         }
         try:
-            import psutil
-
             footprint = int(phys_footprint())
             sample["footprint"] = footprint
-            sample["rss"] = int(psutil.Process().memory_info().rss)
+            sample["rss"] = int(self._psutil.Process().memory_info().rss)
             sample["mlx_active"] = int(mx.get_active_memory())
             sample["mlx_cache"] = int(mx.get_cache_memory())
             self.peak_footprint = max(self.peak_footprint, footprint)

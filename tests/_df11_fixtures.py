@@ -46,16 +46,33 @@ def _mx(v):
 
 
 def write_checkpoint(
-    root, *, groups, pattern, sub_paths, version="0.5.0", extras=None, single_file=False
+    root,
+    *,
+    groups,
+    pattern=None,
+    sub_paths=(),
+    patterns=None,
+    version="0.5.0",
+    extras=None,
+    single_file=False,
 ):
-    """Write a DF11 checkpoint: a shard per group (or one file), config.json, optional BF16 extras."""
+    """Write a DF11 checkpoint: a shard per group (or one file), config.json, optional BF16 extras.
+
+    ``patterns`` (pattern -> sub-paths) replaces the single ``pattern``/``sub_paths`` pair when a
+    checkpoint holds more than one group family.
+    """
     root.mkdir(parents=True, exist_ok=True)
+    pattern_dict = (
+        {pattern: list(sub_paths)}
+        if patterns is None
+        else {k: list(v) for k, v in patterns.items()}
+    )
     config = {
         "dfloat11_config": {
             "version": version,
             "threads_per_block": [512],
             "bytes_per_thread": 8,
-            "pattern_dict": {pattern: list(sub_paths)},
+            "pattern_dict": pattern_dict,
         }
     }
     (root / "config.json").write_text(json.dumps(config))

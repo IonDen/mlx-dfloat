@@ -84,15 +84,19 @@ class DF11Provider:
         """Decode the block's group and cut it into views of the block's shapes (no copies, no host read).
 
         Raises:
-            DFloatIntegrationError: The block is not resident, or a matrix's size does not match its shape.
+            DFloatIntegrationError: The block is not resident or has no matrix names (both refused before
+                any decode), or the names do not fit the decoded group: their count, their block, or a
+                matrix's size against its shape.
         """
         group = self._resident.get(block_name)
         if group is None:
             raise DFloatIntegrationError(f"{block_name}: no resident DF11 group")
+        names = self._matrix_names.get(block_name)
+        if names is None:
+            raise DFloatIntegrationError(f"{block_name}: no matrix names for its DF11 group")
         result = self._decode(group)
         self.pending.append((block_name, result.status))
         parts = split_matrices(result.bits, group.split_positions)
-        names = self._matrix_names[block_name]
         if len(names) != len(parts):
             raise DFloatIntegrationError(
                 f"{block_name}: {len(parts)} matrices decoded for {len(names)} names"

@@ -47,10 +47,11 @@ def test_cache_limit_adds_a_group_under_depth2_and_honours_an_override():
 
 
 def test_the_denoise_phase_estimate_lands_in_the_measured_band_for_schnell_1024():
-    # Review focus 5: the estimate must never refuse the configuration it was built on.
-    # 0021 measured 19.2-19.6 GiB with the 16.3 GB set resident, per-block, 2.5 GB cache.
-    # Bug caught: dropping a term from the denoise phase sum (e.g. forgetting the cache limit or the
-    # overhead), which would push the estimate below the measured band.
+    # The estimate must never refuse the configuration it was built on: the 0.1 GiB above the band
+    # is its whole margin of conservatism. Measured 19.2-19.6 GiB with the 16.3 GB set resident,
+    # per-block, 2.5 GB cache; the estimate is 19.66 GiB, just above that band.
+    # Bug caught: a term dropped from (or double-counted in) the denoise sum, the per-block in-flight
+    # buffer taken as the smaller kind, or the VAE phase no longer the peak at this size.
     phases = flux_phases(
         compressed_bytes=16_330_000_000,
         extras_bytes=100_000_000,
@@ -64,9 +65,11 @@ def test_the_denoise_phase_estimate_lands_in_the_measured_band_for_schnell_1024(
         overhead_bytes=int(1.4 * GIB),
     )
     est = fit_estimate(phases, budget_bytes=int(23.0 * GIB))
-    assert 19.0 * GIB <= est.phases["denoise"] <= 20.0 * GIB
+    denoise = 16_330_000_000 + 100_000_000 + 679_000_000 + 2_500_000_000 + int(1.4 * GIB)
+    assert est.phases["denoise"] == denoise
+    assert 19.2 * GIB <= est.phases["denoise"] <= (19.6 + 0.1) * GIB
+    assert est.peak_phase == "vae"
     assert est.fits
-    assert est.peak_phase in {"denoise", "vae"}
 
 
 def test_fit_estimate_refuses_over_budget_with_the_peak_phase_named():

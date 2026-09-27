@@ -40,6 +40,7 @@ from mlx_dfloat.integrate.providers import (
     WeightProvider,
 )
 from mlx_dfloat.integrate.seam import MAX_NONE_POLICY_LAUNCHING_BLOCKS, _async_eval, _eval
+from mlx_dfloat.mflux import require_mflux
 from mlx_dfloat.mflux.flux1.names import DOUBLE_PREFIX, DROPPED_EXTRAS, SINGLE_PREFIX, flux_name_map
 from mlx_dfloat.mflux.flux1.transformer import (
     MAX_BUILD_ACTIVE_BYTES,
@@ -208,8 +209,9 @@ class PrefetchProvider:
         self._inner.verify()
 
     def reset(self) -> None:
-        """Drop the look-ahead (after a step that raised), so the next step starts cold again."""
+        """Drop the look-ahead and the inner status words (after a step that raised); start cold again."""
         self._ready = None
+        self._inner.reset()
 
     def _submit(self, block_name: str) -> dict[str, mx.array]:
         shapes = self._shapes[block_name]
@@ -259,8 +261,10 @@ def build_transformer(
     """The benches' entry: mflux config by short name, reduced depth for the validation rigs.
 
     Raises:
+        DFloatDependencyError: The optional ``mflux`` extra is not installed.
         RigError: ``model`` is not ``"schnell"`` or ``"dev"``.
     """
+    require_mflux()
     from mflux.models.common.config.model_config import ModelConfig
 
     factories = {"schnell": ModelConfig.schnell, "dev": ModelConfig.dev}

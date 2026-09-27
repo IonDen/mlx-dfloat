@@ -12,9 +12,8 @@ from mlx_dfloat.integrate.names import Shapes
 from mlx_dfloat.integrate.placeholders import PLACEHOLDER, get_attr_path
 from mlx_dfloat.integrate.providers import EVAL_POLICIES, WeightProvider
 
-MAX_NONE_POLICY_LAUNCHING_BLOCKS = (
-    2  # "none" with a launching provider keeps every decoded group alive
-)
+# "none" with a launching provider keeps every decoded group alive
+MAX_NONE_POLICY_LAUNCHING_BLOCKS = 2
 
 # The seam calls MLX through these names so a test can record the evaluation order.
 _eval = mx.eval
@@ -68,8 +67,10 @@ def attach_state(
     """Validate the policy for this provider and build the seam's state.
 
     Raises:
-        DFloatIntegrationError: Unknown policy; a policy the provider does not run under; or ``"none"`` with a
-            launching provider over more than ``MAX_NONE_POLICY_LAUNCHING_BLOCKS`` blocks.
+        DFloatIntegrationError: Unknown policy; a policy the provider does not run under; ``"none"`` with a
+            launching provider over more than ``MAX_NONE_POLICY_LAUNCHING_BLOCKS`` blocks; or
+            ``verify_in_call`` with ``"none"`` and a launching provider (reading the status words at the
+            end of the call would force every decode before the caller's own eval).
     """
     if eval_policy not in EVAL_POLICIES:
         raise DFloatIntegrationError(
@@ -89,6 +90,12 @@ def attach_state(
             f"group resident until the final eval; 'none' is for non-launching providers (or at most "
             f"{MAX_NONE_POLICY_LAUNCHING_BLOCKS} blocks)"
         )
+    if verify_in_call and eval_policy == "none" and provider.launching:
+        raise DFloatIntegrationError(
+            "verify_in_call with eval policy 'none' and a launching provider would read the status "
+            "words before the caller's eval, forcing every decode of the step; verify_step() after "
+            "the step's eval instead"
+        )
     return SeamState(
         provider=provider,
         shapes=shapes,
@@ -99,7 +106,18 @@ def attach_state(
 
 
 def begin_step(state: SeamState) -> None:
-    """Open the tracer's step, if one is attached."""
+    """Refuse a step while the last one's status words are unchecked; open the tracer's step.
+
+    Raises:
+        DFloatIntegrationError: The provider still holds status words from an earlier step (nobody
+            called ``verify_step()`` after it); they are kept, so a ``verify_step()`` can still check them.
+    """
+    pending = getattr(state.provider, "pending", None)
+    if pending:
+        raise DFloatIntegrationError(
+            f"{len(pending)} decode status words from an earlier step are unchecked; call "
+            "verify_step() after each step's eval, or attach with verify_in_call=True"
+        )
     if state.tracer is not None:
         state.tracer.begin_step()
 

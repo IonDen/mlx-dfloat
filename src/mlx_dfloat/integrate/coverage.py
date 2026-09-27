@@ -39,8 +39,12 @@ def extras_plan(
     """The extras to load as (module parameter name, file, tensor info), sorted by checkpoint name.
 
     Block extras at an index at or beyond ``counts[kind]`` and names in ``dropped`` are left out.
+
+    Raises:
+        DFloatFormatError: Two checkpoint names map to the same module parameter name.
     """
     plan: list[tuple[str, Path, TensorInfo]] = []
+    source_of: dict[str, str] = {}
     for name, (path, info) in sorted(ckpt.extras.items()):
         if name in dropped:
             continue
@@ -49,7 +53,13 @@ def extras_plan(
             kind, idx = block
             if idx >= counts.get(kind, 0):
                 continue
-        plan.append((name_map.param_name(name), path, info))
+        param = name_map.param_name(name)
+        if param in source_of:
+            raise DFloatFormatError(
+                f"extras {source_of[param]!r} and {name!r} both map to the parameter {param!r}"
+            )
+        source_of[param] = name
+        plan.append((param, path, info))
     return plan
 
 
@@ -58,7 +68,8 @@ def _block_of(name: str, name_map: NameMap) -> tuple[str, int] | None:
     if head not in name_map.kinds:
         return None
     parts = name.split(".")
-    return (head, int(parts[1])) if len(parts) > 2 and parts[1].isdigit() else None
+    index = parts[1] if len(parts) > 2 else ""
+    return (head, int(index)) if index.isascii() and index.isdigit() else None
 
 
 def read_extra(path: Path, info: TensorInfo) -> mx.array:

@@ -5,13 +5,11 @@ The fake transformer mirrors mflux 0.20.0's ``Transformer`` hooks exactly (keywo
 mflux will drive it. No test here imports mflux.
 """
 
-from typing import Any
-
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 from tests._decode_fixtures import encoder_group
-from tests._df11_fixtures import random_bf16
+from tests._df11_fixtures import random_bf16, write_checkpoint
 
 from mlx_dfloat.integrate.names import StaticNameMap
 from mlx_dfloat.integrate.placeholders import get_attr_path
@@ -156,7 +154,11 @@ class FakeSingleBlock(nn.Module):
 
 
 class FakeTransformer(nn.Module):
-    """mflux's Transformer shape: two block lists, plain loops, the two `_apply_*` hooks."""
+    """mflux's Transformer shape: two block lists, plain loops, the two `_apply_*` hooks.
+
+    The hook signatures are mflux 0.20.0's exactly (no ``**kwargs``;
+    mflux/models/flux/model/flux_transformer/transformer.py:82 and :105).
+    """
 
     def __init__(self, recorder, *, n_double, n_single):
         super().__init__()
@@ -197,7 +199,6 @@ class FakeTransformer(nn.Module):
         text_embeddings,
         image_rotary_embeddings,
         controlnet_block_samples,
-        **kwargs: Any,
     ):
         return block(
             hidden_states=hidden_states,
@@ -215,7 +216,6 @@ class FakeTransformer(nn.Module):
         text_embeddings,
         image_rotary_embeddings,
         controlnet_single_block_samples,
-        **kwargs: Any,
     ):
         return block(
             hidden_states=hidden_states,
@@ -266,6 +266,30 @@ def df11_groups(shapes, rng):
         names[block_name] = matrix_names
         source[block_name] = dict(zip(matrix_names, mats, strict=True))
     return groups, names, source
+
+
+def write_flux_checkpoint(
+    root, shapes, rng, *, double_pattern=r"transformer_blocks\.\d+", extras=None
+):
+    """A real DF11 checkpoint of one group per block of ``shapes`` (FLUX sub-paths, pattern_dict order).
+
+    ``double_pattern`` is the double-block pattern's spelling (the 0.2.0 configs leave its dot
+    unescaped); the single-block pattern is always the escaped one. Returns the matrices per group.
+    """
+    groups = {}
+    for block_name, per in shapes.items():
+        subs = DOUBLE_SUBS if block_name.startswith("transformer_blocks.") else SINGLE_SUBS
+        groups[block_name] = [
+            random_bf16(rng, per[FLUX_TABLE.place(f"{block_name}.{sub}.weight").attr])
+            for sub in subs
+        ]
+    write_checkpoint(
+        root,
+        groups=groups,
+        patterns={double_pattern: DOUBLE_SUBS, r"single_transformer_blocks\.\d+": SINGLE_SUBS},
+        extras=extras,
+    )
+    return groups
 
 
 # --- the static name map used by the offline tests -------------------------------------------------

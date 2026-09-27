@@ -1,8 +1,10 @@
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
 
 import conftest  # pytest prepend mode adds tests/ to sys.path
+import pytest
 from conftest import (
     GATED_MARKERS,
     _hard_exit_code,
@@ -94,3 +96,26 @@ def test_mflux_marker_runs_only_when_mflux_is_importable():
     # nothing), or collected where mflux is absent (an ImportError instead of a skip).
     assert _mflux_marker_action(available=True) == "run"
     assert _mflux_marker_action(available=False) == "skip"
+
+
+def test_mflux_marker_tests_skip_with_the_install_hint_where_mflux_is_missing():
+    # Bug caught: the collection hook not skipping `mflux` tests here (they would fail at their
+    # `from mflux ...` import, exit 1) or crashing (exit 3), or a skip reason that no longer tells
+    # the reader which extra to install. The mirror image (the tests run where mflux is present)
+    # is the CI lane's own collected-tests guard.
+    if importlib.util.find_spec("mflux") is not None:
+        pytest.skip("mflux is installed here: the mflux lane runs these tests for real")
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-m", "mflux", "-q", "-rs", "-p", "no:cacheprovider"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-2000:]
+    assert "mflux: install the mlx-dfloat[mflux] extra" in result.stdout
+    summary = result.stdout.strip().splitlines()[-1]
+    assert "skipped" in summary
+    assert "passed" not in summary
+    assert "failed" not in summary

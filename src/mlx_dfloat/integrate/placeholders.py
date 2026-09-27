@@ -11,6 +11,11 @@ from mlx_dfloat.integrate.names import BlockShapes, NameMap, Shapes
 PLACEHOLDER = mx.zeros((0,), dtype=mx.bfloat16)
 
 
+def _is_index(part: str) -> bool:
+    """An ASCII-digit component (``"0"``); ``"²".isdigit()`` is true too, but ``int("²")`` raises."""
+    return part.isascii() and part.isdigit()
+
+
 def get_attr_path(module: Any, path: str) -> Any:
     """Resolve a dotted path on a module; a digit component indexes a list (``attn.to_out.0``).
 
@@ -20,7 +25,7 @@ def get_attr_path(module: Any, path: str) -> Any:
     node = module
     for part in path.split("."):
         try:
-            node = node[int(part)] if part.isdigit() else getattr(node, part)
+            node = node[int(part)] if _is_index(part) else getattr(node, part)
         except (AttributeError, IndexError, KeyError, TypeError) as exc:
             raise DFloatIntegrationError(f"{path!r}: no {part!r} on {type(node).__name__}") from exc
     return node
@@ -30,7 +35,7 @@ def set_attr_path(module: Any, path: str, value: Any) -> None:
     """Assign ``value`` at a dotted path (see ``get_attr_path``)."""
     head, _dot, leaf = path.rpartition(".")
     parent = get_attr_path(module, head) if head else module
-    if leaf.isdigit():
+    if _is_index(leaf):
         parent[int(leaf)] = value
     else:
         setattr(parent, leaf, value)

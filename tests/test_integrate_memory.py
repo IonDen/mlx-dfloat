@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from mlx_dfloat.integrate import memory
 from mlx_dfloat.integrate.memory import budget_bytes, decoded_bytes, largest_decoded_bytes
 
@@ -20,8 +22,9 @@ def test_largest_decoded_bytes_per_kind():
 
     ckpt = SimpleNamespace(
         groups={
-            "transformer_blocks.0": _group("transformer_blocks.0", 300),
-            "transformer_blocks.1": _group("transformer_blocks.1", 340),
+            # The larger double group first: "the last one seen" and "the max" must differ.
+            "transformer_blocks.0": _group("transformer_blocks.0", 340),
+            "transformer_blocks.1": _group("transformer_blocks.1", 300),
             "single_transformer_blocks.0": _group("single_transformer_blocks.0", 140),
         }
     )
@@ -38,3 +41,7 @@ def test_budget_bytes_subtracts_the_reserve_from_the_devices_working_set(monkeyp
     )
     assert budget_bytes() == 8 * 1024**3
     assert budget_bytes(reserve_bytes=1) == 10 * 1024**3 - 1
+    # Bug caught: a positional reserve accepted, so budget_bytes(total) reads a caller's budget as
+    # the reserve and returns a nonsense figure instead of refusing the call.
+    with pytest.raises(TypeError):
+        budget_bytes(1)

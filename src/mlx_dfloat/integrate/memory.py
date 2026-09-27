@@ -23,7 +23,7 @@ def largest_decoded_bytes(ckpt: Any, name_map: NameMap) -> dict[str, int]:
     return largest
 
 
-def budget_bytes(reserve_bytes: int = 2 * 1024**3) -> int:
+def budget_bytes(*, reserve_bytes: int = 2 * 1024**3) -> int:
     """The fit rule's budget: the device's recommended working set minus a reserve for the OS."""
     return int(mx.device_info()["max_recommended_working_set_size"]) - reserve_bytes
 

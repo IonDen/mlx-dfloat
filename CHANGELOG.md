@@ -58,10 +58,12 @@ All notable changes to this project are documented here. The format follows
 - A block-boundary integration layer, `mlx_dfloat.integrate`: zero-size placeholders for a module's matrices, weight
   providers that decode a DFloat11 group just in time, reuse one already decoded, or hand back a resident BF16
   weight, and a seam that assigns one block's weights, runs the block, evaluates by policy and restores the
-  placeholders afterward. A coverage check raises when a name falls outside the map or a weight comes back the wrong
-  shape, instead of leaving it at its placeholder value. The FLUX.1 adapter, `mlx_dfloat.mflux.flux1`, reads mflux's
-  own weight mapping to name each block's matrices and builds mflux's transformer directly from a DFloat11
-  checkpoint; it needs the optional `mlx-dfloat[mflux]` extra, pinned to the mflux 0.20.x line. Three new errors mark
+  placeholders afterward. The seam and the providers raise when a matrix name falls outside the map or a weight
+  comes back the wrong shape, instead of leaving the layer at its placeholder value; a separate coverage check makes
+  sure every other parameter (biases, norm scales, embedders) gets exactly one tensor from the checkpoint. The FLUX.1
+  adapter, `mlx_dfloat.mflux.flux1`, reads mflux's own weight mapping to name each block's matrices and builds mflux's
+  transformer directly from a DFloat11 checkpoint; it needs the optional `mlx-dfloat[mflux]` extra and is tested with
+  mflux 0.20.0. Three new errors mark
   this boundary: `DFloatIntegrationError` for a seam or name-map invariant that failed, `DFloatUnsupportedError` for
   an option this path does not implement, and `DFloatDependencyError` for a missing optional dependency. The step
   bench and the control validation now run through this integration code instead of a separate rig.

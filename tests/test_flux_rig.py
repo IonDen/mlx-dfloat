@@ -36,6 +36,7 @@ def test_the_rig_re_exports_the_package_seam_and_providers():
     # Bug caught: the benches measuring a private copy of the seam instead of what ships.
     assert rig.DF11Provider is providers.DF11Provider
     assert rig.ReuseProvider is providers.ReuseProvider
+    assert rig.ResidentProvider is providers.ResidentProvider
     assert rig.SeamMixin is transformer.SeamMixin
     assert rig._eval is seam._eval
 
@@ -310,7 +311,8 @@ def test_prefetch_provider_refuses_an_unknown_block_with_a_rig_error():
 
 def test_a_step_that_raises_midway_leaves_no_stale_look_ahead():
     # Bug caught: the look-ahead submitted for block k+1 surviving a failed step, so the next
-    # step's block 0 is refused as out of order.
+    # step's block 0 is refused as out of order; or reset() keeping the inner provider's status
+    # words from the failed step (the next step would then be refused as unverified).
     class BoomOnce(FakeDoubleBlock):
         def __init__(self, recorder):
             super().__init__(recorder)
@@ -335,8 +337,10 @@ def test_a_step_that_raises_midway_leaves_no_stale_look_ahead():
         ),
         shapes,
     )
+    inner = provider._inner
     tf.attach(provider, shapes, eval_policy="per-block")
     with pytest.raises(RuntimeError, match="boom"):
         tf(*inputs())
+    assert inner.pending == []
     mx.eval(tf(*inputs()))  # block 0 is served again, not refused
     tf.verify_step()

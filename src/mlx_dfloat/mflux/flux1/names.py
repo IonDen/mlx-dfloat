@@ -4,6 +4,7 @@ from typing import Any
 
 from mlx_dfloat.errors import DFloatFormatError, DFloatIntegrationError
 from mlx_dfloat.integrate.names import StaticNameMap
+from mlx_dfloat.mflux import require_mflux
 
 DOUBLE_PREFIX = "transformer_blocks"
 SINGLE_PREFIX = "single_transformer_blocks"
@@ -17,9 +18,11 @@ def flux_name_map() -> StaticNameMap:
     """The block-matrix map read from mflux's ``FluxWeightMapping`` (a pure rename; imports mflux).
 
     Raises:
+        DFloatDependencyError: The optional ``mflux`` extra is not installed.
         DFloatIntegrationError: A block matrix target has several source patterns or a transform, which this
             adapter cannot express.
     """
+    require_mflux()
     from mflux.models.flux.weights.flux_weight_mapping import FluxWeightMapping
 
     tables: dict[str, dict[str, str]] = {DOUBLE_PREFIX: {}, SINGLE_PREFIX: {}}
@@ -60,7 +63,7 @@ def check_flux_groups(ckpt: Any) -> tuple[int, int]:
     seen: dict[str, set[int]] = {DOUBLE_PREFIX: set(), SINGLE_PREFIX: set()}
     for name, group in ckpt.groups.items():
         kind, _dot, idx = name.partition(".")
-        if kind not in seen or not idx.isdigit():
+        if kind not in seen or not (idx.isascii() and idx.isdigit()):
             raise DFloatFormatError(f"{name}: not a FLUX block group")
         n = len(group.matrix_names)
         if n != MATRICES_PER_KIND[kind]:

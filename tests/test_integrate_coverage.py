@@ -13,6 +13,7 @@ from mlx_dfloat.errors import DFloatFormatError, DFloatIntegrationError
 from mlx_dfloat.format import MxGroup, open_checkpoint
 from mlx_dfloat.integrate import seam
 from mlx_dfloat.integrate.coverage import (
+    _block_of,
     check_extras_cover,
     decode_resident,
     extras_plan,
@@ -149,6 +150,28 @@ def test_extras_plan_renames_block_extras_skips_out_of_range_blocks_and_the_drop
         ckpt, FLUX_TABLE, counts={"transformer_blocks": 2, "single_transformer_blocks": 0}
     )
     assert [n for n, _p, _i in wider].count("transformer_blocks.1.attn.to_q.bias") == 1
+
+
+def test_only_an_ascii_index_makes_a_block_extra():
+    # Bug caught: str.isdigit() accepting "\u00b2" (int() then raises a bare ValueError through
+    # build_transformer) or "\u0663" (int() reads it as 3, so the extra is planned for block 3).
+    assert _block_of("transformer_blocks.3.attn.to_q.bias", FLUX_TABLE) == ("transformer_blocks", 3)
+    assert _block_of("transformer_blocks.\u0663.attn.to_q.bias", FLUX_TABLE) is None
+    assert _block_of("transformer_blocks.\u00b2.attn.to_q.bias", FLUX_TABLE) is None
+
+
+def test_extras_plan_refuses_two_checkpoint_names_for_one_parameter(tmp_path):
+    # Bug caught: two extras mapping onto the same module parameter (the renamed DF11 bias and a
+    # tensor already carrying the module's name), so one silently overrides the other in
+    # load_weights and the coverage check sees a single name.
+    rng = np.random.default_rng(2)
+    extras = {
+        "transformer_blocks.0.ff.net.0.proj.bias": random_bf16(rng, (FF,)),
+        "transformer_blocks.0.ff.linear1.bias": random_bf16(rng, (FF,)),
+    }
+    ckpt, _ = _ckpt(tmp_path, extras=extras)
+    with pytest.raises(DFloatFormatError, match=r"transformer_blocks\.0\.ff\.linear1\.bias"):
+        extras_plan(ckpt, FLUX_TABLE, counts={"transformer_blocks": 2})
 
 
 def test_check_extras_cover_passes_only_when_every_non_matrix_parameter_has_an_extra():

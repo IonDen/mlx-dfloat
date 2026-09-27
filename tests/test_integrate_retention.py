@@ -1,22 +1,29 @@
-"""Pins the per-block eval policy's bounded decoded footprint against the real Metal decoder.
+"""Pins the bounded decoded footprint of the seam's eval policies against the real Metal decoder.
 
 The fake transformer's default hidden width (`D=4`) makes a block's decoded footprint under 1 KB,
-far below MLX's own allocation granularity and the bound's slack -- an injected run-ahead bug
-(the exact regression this test exists to catch) is invisible at that scale (measured peak_above
-under 11 KB above baseline, comfortably under the 1 MB-dominated bound; see the task report for
-the full numbers). This module scales the fake's width up before measuring, so the bound reflects
-real retention instead of noise.
+far below MLX's own allocation granularity, so an injected run-ahead bug (the regression this module
+exists to catch) would be invisible at that scale: the measured peak stayed under 11 KB above
+baseline either way. This module widens the fake to `D=128` before measuring, where one block's
+decoded group is about 0.7 MB and the bound below reflects real retention instead of noise.
 """
 
 import gc
+from functools import partial
 
 import mlx.core as mx
 import numpy as np
 import pytest
-from mlx.utils import tree_flatten
 from tests import _flux_fakes
-from tests._flux_fakes import FLUX_TABLE, FakeSeamTransformer, block_lists, df11_groups, inputs
+from tests._flux_fakes import (
+    FLUX_TABLE,
+    FakeSeamTransformer,
+    all_block_weights,
+    block_lists,
+    df11_groups,
+    inputs,
+)
 
+from mlx_dfloat.decode import decode_group
 from mlx_dfloat.integrate.placeholders import install_placeholders
 from mlx_dfloat.integrate.providers import DF11Provider
 
@@ -60,17 +67,22 @@ def _scale_fake_width(monkeypatch, width):
 
 
 @pytest.mark.metal
-def test_per_block_evaluation_keeps_the_decoded_footprint_under_three_blocks(monkeypatch):
+@pytest.mark.parametrize("policy", ["per-block", "depth2"])
+def test_block_evaluation_keeps_the_decoded_footprint_bounded_and_drops_it_after_the_step(
+    monkeypatch, policy
+):
     # Bug caught: one lazy eval over every block's decode (every decoded group allocated at once,
-    # the run-ahead the per-block eval exists to prevent), or a decoded array retained on a module
-    # attribute after the step.
+    # the run-ahead the per-block and depth-2 evals exist to prevent), or a decoded array retained
+    # on a module attribute or in the seam's state after the step.
     _scale_fake_width(monkeypatch, _WIDTH)
     tf = FakeSeamTransformer(_MeasuringRecorder(), n_double=6, n_single=4)
     shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
     groups, names, _source = df11_groups(shapes, np.random.default_rng(31))
     per_block = sum(2 * g.n_elements for g in groups.values()) / len(groups)
-    provider = DF11Provider(groups, names, FLUX_TABLE)  # the Metal backend
-    tf.attach(provider, shapes, eval_policy="per-block")
+    provider = DF11Provider(
+        groups, names, FLUX_TABLE, decode=partial(decode_group, backend="metal")
+    )
+    tf.attach(provider, shapes, eval_policy=policy)
     gc.collect()
     mx.clear_cache()
     mx.reset_peak_memory()
@@ -78,14 +90,15 @@ def test_per_block_evaluation_keeps_the_decoded_footprint_under_three_blocks(mon
     mx.eval(tf(*inputs()))
     tf.verify_step()
     peak_above = int(mx.get_peak_memory()) - base
-    # Measured (mlx 0.32.2, this Mac, D=128/FF=256, 6 double + 4 single blocks, seed 31, warm
-    # kernel): per_block == 694_681.6, peak_above == 997_564 (~1.44x per_block, well under the
-    # 3-block bound below). An injected run-ahead bug on this same fixture (the seam's per-block
-    # `mx.eval` replaced by a single eval at the very end -- exactly this test's target regression)
-    # measured peak_above == 7_643_666, ~2.5x the bound. Both numbers reproduced exactly across
-    # repeated runs.
-    assert peak_above < 3 * per_block + 1_000_000  # three blocks of decoded output plus activations
+    # Measured (mlx 0.32.2, M1 Max, D=128/FF=256, 6 double + 4 single blocks, seed 31, warm kernel):
+    # per_block == 694_681.6; per-block peak_above == 997_564 (~1.44x per_block), depth-2 peaked at
+    # ~2.85x per_block. The bound is 3 blocks plus 1 MB of activations, about 4.4 blocks here. An
+    # injected run-ahead bug on this fixture (the seam's per-block `mx.eval` replaced by a single
+    # eval at the very end) measured peak_above == 7_643_666, ~2.5x the bound.
+    assert peak_above < 3 * per_block + 1_000_000
     assert provider.launches == 10
     gc.collect()
-    for name, param in tree_flatten(tf.parameters()):
-        assert param.dtype != mx.bfloat16 or param.size == 0 or "norm" in name, name
+    # After the step nothing decoded stays resident: every block matrix is a placeholder again and
+    # the active memory is back near the base (measured ~17 KB above it).
+    assert all(w.size == 0 for w in all_block_weights(tf))
+    assert int(mx.get_active_memory()) - base < per_block // 4

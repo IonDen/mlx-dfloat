@@ -62,7 +62,10 @@ class StaticNameMap:
         """Keep one table per kind, checkpoint sub-path -> attribute path, in the given order."""
         self._tables = {k: dict(v) for k, v in tables.items()}
         self.kinds = tuple(self._tables)
-        self._block = re.compile(rf"^({'|'.join(re.escape(k) for k in self.kinds)})\.(\d+)\.(.+)$")
+        # `[0-9]`, not `\d`: `\d` matches any Unicode digit, and int("٣") == 3 would alias block 3.
+        self._block = re.compile(
+            rf"^({'|'.join(re.escape(k) for k in self.kinds)})\.([0-9]+)\.(.+)$"
+        )
 
     def attrs_of(self, kind: str) -> tuple[str, ...]:
         """Attribute paths of every matrix module of a block of ``kind``, in table order."""
@@ -95,7 +98,7 @@ class StaticNameMap:
             DFloatIntegrationError: ``block_name`` is not a block name of a known kind.
         """
         kind, _dot, idx = block_name.partition(".")
-        if kind not in self._tables or not idx.isdigit():
+        if kind not in self._tables or not (idx.isascii() and idx.isdigit()):
             raise DFloatIntegrationError(f"{block_name!r} is not a block name")
         return kind
 

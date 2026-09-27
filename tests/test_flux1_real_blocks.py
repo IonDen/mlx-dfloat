@@ -2,15 +2,15 @@
 
 The slow, mflux-gated test below decodes the checkpoint's first double and single DF11 groups
 through the package's own seam-facing surface (``build_transformer`` / ``DF11Provider``) and
-compares every decoded matrix against the base BF16 shards bit for bit -- the one check the
-offline, reduced-width fakes used elsewhere in the suite cannot make: a matrix landing on the
-wrong layer, a wrong split, or a seam path that only diverges from mflux's own loader at FLUX.1's
-real width (3072). Both mflux and ``ModelConfig`` are imported inside the test function so the
-module collects cleanly without the mflux extra installed.
+compares every decoded matrix, on the attribute a hand table says it belongs to, against the base
+BF16 shards bit for bit -- the one check the offline, reduced-width fakes used elsewhere in the
+suite cannot make at FLUX.1's real width (3072). It does not run a block. Both mflux and
+``ModelConfig`` are imported inside the test function so the module collects cleanly without the
+mflux extra installed.
 
 The ungated test above it proves the selection helper the slow test relies on
 (``_block_matrix_shards``) picks exactly the checkpoint's own recorded matrix names, using header
-reads only -- so a selection bug is caught even when nobody runs the slow test.
+reads only. It too needs the local snapshots and skips without them.
 """
 
 import json
@@ -20,6 +20,7 @@ from pathlib import Path
 import mlx.core as mx
 import numpy as np
 import pytest
+from tests._flux_fakes import EXPECTED_PATHS
 
 from mlx_dfloat._safetensors import read_array, read_header
 from mlx_dfloat.format import open_checkpoint
@@ -32,6 +33,19 @@ from mlx_dfloat.mflux.flux1.names import (
     flux_name_map,
 )
 from mlx_dfloat.mflux.flux1.transformer import build_transformer
+
+
+def _at_block_0(name: str) -> str:
+    kind, _idx, rest = name.split(".", 2)
+    return f"{kind}.0.{rest}"
+
+
+# The 20 FLUX.1 matrices of the first double and single block and the attribute each lands on,
+# from the hand-copied run-record table (re-indexed to block 0), never from the map under test.
+_EXPECTED_ATTR_AT_0 = {
+    _at_block_0(name): (f"{block.partition('.')[0]}.0", attr)
+    for name, (block, attr) in EXPECTED_PATHS
+}
 
 
 def _env(name: str) -> Path:
@@ -74,6 +88,8 @@ def _bf16_block(base: Path, block: str) -> dict[str, np.ndarray]:
 
 
 def test_bf16_block_selects_exactly_the_checkpoints_own_matrix_names() -> None:
+    # Runs only where the schnell DF11 and base snapshots are present (the two env vars); skips
+    # elsewhere.
     # Bug caught: a filter that lets an RMSNorm scale (`attn.norm_q.weight`, `attn.norm_k.weight`,
     # ...) through, drops a real matrix, or otherwise disagrees with the DF11 group's own recorded
     # `matrix_names`, would make the slow test below compare the wrong set of names -- or raise a
@@ -97,9 +113,10 @@ def test_bf16_block_selects_exactly_the_checkpoints_own_matrix_names() -> None:
 
 @pytest.mark.slow
 @pytest.mark.mflux
-def test_real_first_blocks_decode_and_run_bit_identically_to_mflux_over_bf16() -> None:
-    # Bug caught: a matrix landing on the wrong layer, a wrong split, or a seam path that differs
-    # from mflux's own loader at full width; the offline fakes cannot see any of these at width 3072.
+def test_real_first_blocks_decode_bit_identically_to_the_bf16_shard() -> None:
+    # Bug caught: a name map that swaps two same-shaped matrices (to_q/to_k, or linear1/linear2 of
+    # a transposed pair) or a group cut at the wrong split, so a real matrix lands on the wrong
+    # attribute of block 0; the expected attribute comes from the hand table, not from the map.
     from mflux.models.common.config.model_config import ModelConfig
 
     df11 = _env("MLX_DFLOAT_SCHNELL_DF11")
@@ -112,8 +129,10 @@ def test_real_first_blocks_decode_and_run_bit_identically_to_mflux_over_bf16() -
     for block in resident:
         decoded = provider.weights_for(block, shapes[block])
         bf16 = _bf16_block(base, block)
+        assert set(bf16) == {n for n, (b, _a) in _EXPECTED_ATTR_AT_0.items() if b == block}
         for matrix_name, bits in bf16.items():
-            attr = names.place(matrix_name).attr
+            block_name, attr = _EXPECTED_ATTR_AT_0[matrix_name]
+            assert block_name == block
             assert np.array_equal(np.array(decoded[attr].view(mx.uint16)), bits), matrix_name
     provider.verify()
     assert provider.launches == 2
