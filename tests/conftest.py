@@ -37,7 +37,7 @@ def _metal_marker_action(system: str, machine: str) -> Literal["run", "skip"]:
     return "run" if (system == "Darwin" and machine == "arm64") else "skip"
 
 
-def _mflux_marker_action(*, available: bool) -> Literal["run", "skip"]:
+def _mflux_marker_action(available: bool) -> Literal["run", "skip"]:
     """`mflux` tests run where mflux is importable and skip elsewhere (the extra is optional)."""
     return "run" if available else "skip"
 
