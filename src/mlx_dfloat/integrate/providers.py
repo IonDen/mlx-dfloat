@@ -2,7 +2,7 @@
 
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
-from typing import Protocol
+from typing import Protocol, cast
 
 import mlx.core as mx
 
@@ -123,9 +123,9 @@ class ReuseProvider:
     launching = False
     policies = EVAL_POLICIES
 
-    def __init__(self, per_kind: Mapping[str, dict[str, mx.array]], name_map: NameMap) -> None:
+    def __init__(self, per_kind: Mapping[str, Mapping[str, mx.array]], name_map: NameMap) -> None:
         """Keep one dict per kind, handed back as-is (by identity) for every block of that kind."""
-        self._per_kind = dict(per_kind)
+        self._per_kind: dict[str, Mapping[str, mx.array]] = dict(per_kind)
         self._name_map = name_map
         self.launches = 0
 
@@ -146,7 +146,7 @@ class ReuseProvider:
         if weights is None:
             raise DFloatIntegrationError(f"{block_name}: no reusable block of kind {kind!r}")
         _check_shapes(block_name, weights, shapes)
-        return weights
+        return cast("dict[str, mx.array]", weights)
 
 
 class ResidentProvider:
@@ -155,9 +155,9 @@ class ResidentProvider:
     launching = False
     policies = EVAL_POLICIES
 
-    def __init__(self, per_block: Mapping[str, dict[str, mx.array]]) -> None:
+    def __init__(self, per_block: Mapping[str, Mapping[str, mx.array]]) -> None:
         """Keep the per-block dicts, handed back as-is (by identity) for their own block."""
-        self._per_block = dict(per_block)
+        self._per_block: dict[str, Mapping[str, mx.array]] = dict(per_block)
         self.launches = 0
 
     def verify(self) -> None:
@@ -176,7 +176,7 @@ class ResidentProvider:
         if weights is None:
             raise DFloatIntegrationError(f"{block_name}: not resident")
         _check_shapes(block_name, weights, shapes)
-        return weights
+        return cast("dict[str, mx.array]", weights)
 
 
 def _check_shapes(block_name: str, weights: Mapping[str, mx.array], shapes: BlockShapes) -> None:
