@@ -23,6 +23,7 @@ from mlx_dfloat.integrate.placeholders import (
 
 @pytest.mark.parametrize(("matrix_name", "expected"), EXPECTED_PATHS)
 def test_static_map_places_every_flux_matrix_name(matrix_name, expected):
+    # Bug caught: a missing or wrong rename (ff.net.0.proj must become ff.linear1, not ff.net.0.proj).
     block, attr = expected
     assert FLUX_TABLE.place(matrix_name) == Placement(block=block, attr=attr)
 
@@ -37,11 +38,15 @@ def test_static_map_places_every_flux_matrix_name(matrix_name, expected):
     ],
 )
 def test_static_map_refuses_names_outside_the_block_matrix_grammar(name):
+    # Bug caught: an unknown or non-matrix name (a bias, a non-block name, an unmapped sub-path)
+    # passing through as itself and landing on the wrong attribute instead of being refused.
     with pytest.raises(DFloatIntegrationError):
         FLUX_TABLE.place(name)
 
 
 def test_static_map_kind_and_attrs():
+    # Bug caught: `kind_of` accepting a non-block name (e.g. a norm_out weight) as if it named a
+    # block, or `attrs_of` returning attributes out of order so a shape lands on the wrong matrix.
     assert FLUX_TABLE.kinds == ("transformer_blocks", "single_transformer_blocks")
     assert FLUX_TABLE.kind_of("single_transformer_blocks.37") == "single_transformer_blocks"
     assert FLUX_TABLE.attrs_of("single_transformer_blocks") == (
@@ -65,15 +70,25 @@ def test_static_map_kind_and_attrs():
     ],
 )
 def test_static_map_renames_only_the_mapped_block_extras(df11_name, expected):
+    # Bug caught: a block bias that keeps its DF11 name would be dropped by load_weights(strict=False)
+    # and leave the module's random init in place; a non-block name "renamed" by mistake would go
+    # missing the same way.
     assert FLUX_TABLE.param_name(df11_name) == expected
 
 
 def test_get_and_set_attr_path_walk_list_indices():
+    # Bug caught: a digit component looked up with getattr instead of indexing, so `attn.to_out.0`
+    # raises instead of indexing into the list.
     block = FakeDoubleBlock(Recorder())
     assert get_attr_path(block, "attn.to_out.0") is block.attn.to_out[0]
     new = nn.Linear(4, 4)
     set_attr_path(block, "attn.to_out.0", new)
     assert block.attn.to_out[0] is new
+    # Bug caught: a non-digit leaf assigned onto the wrong parent (the head split one level too
+    # shallow), leaving the block's own attribute holding its old value.
+    plain = nn.Linear(4, 4)
+    set_attr_path(block, "attn.to_q", plain)
+    assert block.attn.to_q is plain
     with pytest.raises(DFloatIntegrationError, match="no 'nope'"):
         get_attr_path(block, "attn.nope")
 
@@ -107,6 +122,8 @@ def test_install_placeholders_fails_on_a_linear_the_map_does_not_cover():
 
 
 def test_install_placeholders_fails_when_a_mapped_matrix_is_missing():
+    # Bug caught: a renamed or removed attribute (say ff.linear2 -> ff.out) going unnoticed until the
+    # first step crashes inside a matmul instead of being refused up front.
     tf = FakeTransformer(Recorder(), n_double=1, n_single=0)
     del tf.transformer_blocks[0].ff.linear2
     with pytest.raises(DFloatIntegrationError, match=r"missing from the block: \['ff.linear2'\]"):
@@ -114,5 +131,7 @@ def test_install_placeholders_fails_when_a_mapped_matrix_is_missing():
 
 
 def test_placeholder_is_a_zero_size_bf16_array():
+    # Bug caught: a placeholder of the wrong dtype promoting a block's matmul to float32, or a
+    # non-zero-size placeholder keeping real memory resident before any weight is assigned.
     assert PLACEHOLDER.size == 0
     assert PLACEHOLDER.dtype == mx.bfloat16
