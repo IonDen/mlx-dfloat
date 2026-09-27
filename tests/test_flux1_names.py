@@ -97,6 +97,14 @@ def test_flux_name_map_derived_from_mflux_equals_the_measured_table():
     derived = flux_name_map()
     assert derived.kinds == FLUX_TABLE.kinds
     for kind in FLUX_TABLE.kinds:
-        assert derived.attrs_of(kind) == FLUX_TABLE.attrs_of(kind)
+        # Bug caught: a matrix missing from (or a norm scale leaking into) the derived table for this
+        # kind. attrs_of's own order is the map's construction order (mflux's WeightTarget declaration
+        # order), not the checkpoint's concatenation order, so this compares as sets — length-equal too,
+        # so a duplicate can't hide a missing name — and leaves the real per-matrix check to place()
+        # below.
+        derived_attrs, table_attrs = derived.attrs_of(kind), FLUX_TABLE.attrs_of(kind)
+        assert len(derived_attrs) == len(table_attrs)
+        assert set(derived_attrs) == set(table_attrs)
     for matrix_name, (block, attr) in EXPECTED_PATHS:
+        # Bug caught: a matrix name mapped to the wrong block or the wrong attribute path.
         assert derived.place(matrix_name) == Placement(block=block, attr=attr)

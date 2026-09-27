@@ -27,7 +27,11 @@ class NameMap(Protocol):
     kinds: tuple[str, ...]
 
     def attrs_of(self, kind: str) -> tuple[str, ...]:
-        """Attribute paths of every matrix module of a block of ``kind``, in checkpoint order."""
+        """Attribute paths of every matrix module of a block of ``kind``, in the map's own order.
+
+        The order is the map's construction order, not the checkpoint's: a checkpoint group's own
+        concatenation order lives in its ``matrix_names``, recovered per matrix through ``place()``.
+        """
         ...
 
     def place(self, matrix_name: str) -> Placement:
