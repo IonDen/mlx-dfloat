@@ -861,7 +861,14 @@ def orchestrate(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     """Entry point."""
     args = parse_args(argv)
-    return orchestrate(args) if args.orchestrate else run_one(args)
+    if not args.orchestrate:
+        return run_one(args)
+    try:
+        return orchestrate(args)
+    except Exception as exc:  # a setup or report error is a tool error (2), never 1
+        traceback.print_exc()
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return EXIT_ERROR
 
 
 if __name__ == "__main__":  # pragma: no cover

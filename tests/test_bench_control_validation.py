@@ -154,6 +154,14 @@ def test_report_lists_each_rounds_medians():
     assert rounds[3] == {"T_bf16": pytest.approx(5.0)}
 
 
+def test_report_lists_the_paired_control_bias_of_each_complete_round():
+    # Bug caught: a consistent small bias hidden behind a passing pooled verdict, a signed value,
+    # or the stopped round 3 (bf16 only) given a value. By hand: r1 |1.00 - 1.01| / 1.01,
+    # r2 |1.02 - 1.02| / 1.02 = 0.
+    per_round = report(FIXTURES)["control_vs_bf16_per_round"]
+    assert per_round == {1: pytest.approx(0.01 / 1.01), 2: pytest.approx(0.0)}
+
+
 def test_report_pools_every_timed_step_of_the_complete_rounds_only():
     # Bug caught: round 3's lone bf16 pooled (median 1.02, n 9), or per-round medians pooled
     # instead of the steps (bf16 spread would be (1.02 - 1.00) / 1.01).
@@ -344,3 +352,25 @@ def test_out_of_range_depths_and_counts_are_usage_errors(extra):
 def test_the_edge_depths_are_accepted():
     args = parse_args(_args("--double", "1", "--single", "38", "--mode", "df11", "--round", "1"))
     assert (args.double, args.single, args.mode, args.round) == (1, 38, "df11", 1)
+
+
+# --- orchestrator setup errors -----------------------------------------------------------------------
+
+
+def test_an_orchestrator_setup_error_exits_2_and_launches_nothing(tmp_path, monkeypatch, capsys):
+    # Bug caught: a mistyped --embeds escaping main as a traceback with exit 1, the bit-mismatch
+    # kill signal of the exit-code contract, instead of the tool error 2.
+    import scripts.bench_control_validation as cv
+    from scripts.bench_control_validation import main
+
+    calls = []
+    monkeypatch.setattr(cv.subprocess, "run", lambda *a, **k: calls.append(a))
+    code = main(
+        [
+            *("--df11", str(tmp_path / "ckpt"), "--out", str(tmp_path / "out")),
+            *("--embeds", str(tmp_path / "missing.safetensors")),
+        ]
+    )
+    assert code == 2
+    assert calls == []
+    assert "missing.safetensors" in capsys.readouterr().err

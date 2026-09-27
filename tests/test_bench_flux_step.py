@@ -618,3 +618,21 @@ def test_run_one_records_a_failed_measurement_as_exit_2_with_its_key(tmp_path, r
     assert written["exit_code"] == 2
     assert "boom" in written["error"]
     assert written["key"] == {"double": 4}
+
+
+def test_an_orchestrator_setup_error_exits_2_and_launches_nothing(tmp_path, monkeypatch, capsys):
+    # Bug caught: a mistyped --embeds escaping main as a traceback with exit 1, the bit-mismatch
+    # kill signal of the exit-code contract, instead of the tool error 2.
+    import scripts.bench_flux_step as bfs
+
+    calls = []
+    monkeypatch.setattr(bfs.subprocess, "run", lambda *a, **k: calls.append(a))
+    code = bfs.main(
+        [
+            *("--orchestrate", "--out-dir", str(tmp_path / "out"), "--df11", str(tmp_path / "c")),
+            *("--embeds", str(tmp_path / "missing.safetensors")),
+        ]
+    )
+    assert code == 2
+    assert calls == []
+    assert "missing.safetensors" in capsys.readouterr().err

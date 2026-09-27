@@ -29,6 +29,9 @@ medians and spreads pooled over the timed steps of the rounds in which all three
   whether it is at most ``max(spread_bf16, spread_control)``, the larger pooled spread
   (``(max - min) / median`` over those steps, so it spans step-to-step and run-to-run variation);
 - ``df11_vs_bf16 = (T_df11 - T_bf16) / T_bf16``, DF11's overhead over plain BF16.
+Each complete round's paired ``control_vs_bf16`` is listed too (``control_vs_bf16_per_round``), so a
+consistent small bias stays visible when the pooled verdict passes. A setup or report error in the
+orchestrator (a missing ``--embeds``, an unwritable ``--out``) is exit 2.
 
 Usage (from the repository root of a synced checkout, ``--group bench``):
     uv run python -m scripts.bench_control_validation --df11 DIR --embeds FILE --out DIR \
@@ -42,6 +45,7 @@ import argparse
 import subprocess
 import sys
 import time
+import traceback
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -176,6 +180,11 @@ def report(
         for rnd, modes in sorted(by_round.items())
     }
     complete = sorted(rnd for rnd, modes in by_round.items() if all(m in modes for m in MODES))
+    # The paired bias per complete round: a consistent small offset stays visible even when the
+    # pooled verdict passes.
+    per_round_bias = {
+        rnd: control_vs_bf16(rounds[rnd]["T_bf16"], rounds[rnd]["T_control"]) for rnd in complete
+    }
     pooled: dict[str, dict[str, Any]] = {}
     for mode in MODES:
         stats = pooled_stats(by_round, mode, complete)
@@ -199,6 +208,7 @@ def report(
     return {
         "rounds": rounds,
         "complete_rounds": complete,
+        "control_vs_bf16_per_round": per_round_bias,
         "pooled": pooled,
         **verdict,
         "stopped": dict(stopped) if stopped is not None else None,
@@ -396,7 +406,9 @@ def _print_report(rep: Mapping[str, Any]) -> None:
         print(f"stopped at round {st['round']} {st['mode']} (exit {st['exit_code']}): no verdict")
     for rnd, medians in rep["rounds"].items():
         text = ", ".join(f"{name} {value:.3f} s" for name, value in medians.items())
-        print(f"round {rnd}: {text}")
+        bias = rep["control_vs_bf16_per_round"].get(rnd)
+        bias_text = f", |T_bf16 - T_control| / T_control {bias:.2%}" if bias is not None else ""
+        print(f"round {rnd}: {text}{bias_text}")
     for mode, stats in rep["pooled"].items():
         print(
             f"pooled {mode}: median {stats['median']:.3f} s spread {stats['spread']:.3f} "
@@ -479,9 +491,14 @@ def orchestrate(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     """Entry point."""
     args = parse_args(argv)
-    if args.mode is None:
+    if args.mode is not None:
+        return step_bench.run_one(args, measure=run_mode, key=current_key)
+    try:
         return orchestrate(args)
-    return step_bench.run_one(args, measure=run_mode, key=current_key)
+    except Exception as exc:  # a setup or report error is a tool error (2), never 1
+        traceback.print_exc()
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return EXIT_ERROR
 
 
 if __name__ == "__main__":  # pragma: no cover
