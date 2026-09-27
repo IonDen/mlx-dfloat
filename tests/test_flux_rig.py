@@ -421,29 +421,38 @@ def test_seam_runs_each_block_on_the_provider_weight_and_restores_the_placeholde
 
 def test_seam_restores_the_placeholder_when_the_block_raises(monkeypatch):
     # Bug caught: a missing try/finally leaving a decoded weight assigned after a failed step, or
-    # the failed step's `prev` surviving into the next one (it would show up as an extra eval).
+    # the failed step's depth2 `prev` (block 0's output, already queued with async_eval when block 1
+    # raises) surviving into the next step, where the first block's eval would drain it.
     class BoomOnce(FakeDoubleBlock):
+        def __init__(self, recorder):
+            super().__init__(recorder)
+            self._armed = True
+
         def __call__(self, **kwargs):
-            if not self._recorder.seen:
+            if self._armed:
+                self._armed = False
                 self._recorder.seen.append(self.attn.to_q.weight)
                 raise RuntimeError("boom")
             return super().__call__(**kwargs)
 
     rec = Recorder()
     tf = FakeSeamTransformer(rec, n_double=2, n_single=0)
-    tf.transformer_blocks[0] = BoomOnce(rec)
+    tf.transformer_blocks[1] = BoomOnce(rec)
     shapes = install_placeholders(tf)
     tf.attach(ResidentProvider(_resident_dicts(shapes)), shapes, eval_policy="depth2")
     _patch_eval_recorders(monkeypatch, rec)
     with pytest.raises(RuntimeError, match="boom"):
         tf(*_inputs())
-    assert rec.seen[0].size > 0  # the weight was assigned when the block ran
+    assert rec.seen[1].size > 0  # the weight was assigned when the raising block ran
     assert all(w.size == 0 for w in _all_block_weights(tf))
-    assert rec.events == []
-    # The second step starts clean: the depth2 sequence of a fresh step, nothing from the failed one.
+    failed = [key for kind, key in rec.events if kind == "run"]
+    # Block 0 ran and was queued; block 1 raised before any eval.
+    assert rec.events == [("run", failed[0]), ("async", failed[0])]
+    # The second step starts clean: the depth2 sequence of a fresh step, and the failed step's queued
+    # block-0 output is never evaluated (a surviving `prev` would put ("eval", failed[0]) first).
     tf(*_inputs())
-    o = [key for kind, key in rec.events if kind == "run"]
-    assert rec.events == [
+    o = [key for kind, key in rec.events[2:] if kind == "run"]
+    assert rec.events[2:] == [
         ("run", o[0]),
         ("async", o[0]),
         ("run", o[1]),
@@ -451,6 +460,7 @@ def test_seam_restores_the_placeholder_when_the_block_raises(monkeypatch):
         ("eval", o[0]),
         ("eval", o[1]),
     ]
+    assert ("eval", failed[0]) not in rec.events
 
 
 def test_seam_refuses_a_provider_dict_that_does_not_match_the_block():
@@ -588,6 +598,30 @@ def test_df11_provider_decodes_each_block_once_into_bit_exact_views():
         want = source["transformer_blocks.1"][f"transformer_blocks.1.{sub}.weight"]
         assert w[attr].shape == want.shape
         assert np.array_equal(np.array(w[attr].view(mx.uint16)), want)
+
+
+@pytest.mark.metal
+def test_df11_provider_with_the_metal_backend_feeds_the_seam_bit_exact_weights():
+    # Bug caught: a Metal decode whose lazy views the seam mishandles (evaluated after the placeholder is
+    # restored, or cut at the wrong split), or a status word the step never checks; the reference-backed
+    # tests above cannot see either, since only this path launches the kernel through the seam.
+    from functools import partial
+
+    rec = Recorder()
+    tf = FakeSeamTransformer(rec, n_double=2, n_single=1)
+    shapes = install_placeholders(tf)
+    groups, names, source = _df11_groups(shapes, np.random.default_rng(11))
+    provider = DF11Provider(groups, names, decode=partial(decode_group, backend="metal"))
+    tf.attach(provider, shapes, eval_policy="per-block")
+    mx.eval(tf(*_inputs()))
+    tf.verify_step()
+    assert provider.launches == 3
+    assert provider.pending == []
+    for seen, block_name in zip(rec.seen, shapes, strict=True):
+        want = source[block_name][f"{block_name}.attn.to_q.weight"]
+        assert seen.shape == want.shape
+        assert np.array_equal(np.array(seen.view(mx.uint16)), want)
+    assert all(w.size == 0 for w in _all_block_weights(tf))
 
 
 def test_df11_provider_refuses_a_matrix_whose_size_does_not_match_the_shape():

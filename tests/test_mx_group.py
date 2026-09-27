@@ -45,6 +45,15 @@ def test_oversized_elements_is_a_backend_error(monkeypatch):
         arrays.to_mx()
 
 
+def test_elements_exactly_at_the_bound_are_accepted(monkeypatch):
+    # Bug caught: `>=` for `>` on the int32 bound (a group of exactly 2^31-1 elements refused).
+    import mlx_dfloat.format as fmt
+
+    arrays = encoder_group(random_bf16(np.random.default_rng(2), (500,)))
+    monkeypatch.setattr(fmt, "MAX_ARRAY_ELEMENTS", arrays.n_elements)
+    assert arrays.to_mx().n_elements == 500
+
+
 def test_oversized_bytes_is_a_backend_error(monkeypatch):
     # Bug caught: only the element bound being checked (bytes are checked first, so the message names bytes).
     import mlx_dfloat.format as fmt

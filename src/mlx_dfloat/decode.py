@@ -30,6 +30,7 @@ class DecodeResult:
 
     ``threadgroup_bytes`` is the static threadgroup memory the kernel instantiation reserves (0 for
     the reference), not a per-block figure: every launched block reserves it, staged or direct.
+    The bits of a block whose status word has an error bit are undefined; call ``check`` first.
     """
 
     bits: mx.array
@@ -51,7 +52,12 @@ def _to_arrays(group: MxGroup) -> GroupArrays:
 
 
 def available_backends() -> tuple[Backend, ...]:
-    """Backends that can run here; "metal" appears only after its kernel warm-up succeeds."""
+    """Backends that can run here; "metal" appears only after its kernel warm-up succeeds.
+
+    The warm-up compiles and checks a pipeline for every input-binding signature a group can
+    present (many blocks, one block, all-tiny), so once "metal" is listed every group's decode
+    reuses a pipeline that already decoded bit-exactly here.
+    """
     from mlx_dfloat import _metal_decode  # lazy: importing the package must not touch the GPU
 
     return ("reference", "metal") if _metal_decode.metal_ready() else ("reference",)

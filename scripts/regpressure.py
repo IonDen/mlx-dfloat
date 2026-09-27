@@ -77,7 +77,7 @@ def _capture_fd_stdout() -> Iterator[IO[str]]:
 
 
 def probe_group() -> MxGroup:
-    """The decoder's warm-up group: seven blocks, every input bound in ``device`` memory."""
+    """The decoder's seven-block warm-up group: every input bound in ``device`` memory."""
     return md._warmup_group()
 
 

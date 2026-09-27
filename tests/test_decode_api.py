@@ -52,10 +52,11 @@ def test_split_matrices_is_copy_free_and_cuts_at_the_stored_positions():
 
 
 @pytest.mark.parametrize(
-    ("word", "text"), [(1, "invalid code"), (2, "count"), (4, "chain"), (5, "invalid code")]
+    ("word", "text"),
+    [(1, "invalid code"), (2, "count"), (4, "chain"), (5, "invalid code.*chain")],
 )
 def test_check_names_the_block_and_the_reason(word, text):
-    # Bug caught: check() ignoring the status, or masking the wrong bits.
+    # Bug caught: check() ignoring the status, masking the wrong bits, or naming only the first of two reasons.
     res = decode_group(
         encoder_group(random_bf16(np.random.default_rng(3), (100,))).to_mx(), backend="reference"
     )

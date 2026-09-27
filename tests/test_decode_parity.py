@@ -6,6 +6,7 @@ from hypothesis import strategies as st
 from tests._decode_fixtures import (
     encoder_group,
     fibonacci_group,
+    h1,
     hand_fixtures,
     short_form_group,
     slice_group,
@@ -89,21 +90,48 @@ def test_warmup_prefills_its_output_so_an_unwritten_element_cannot_pass(monkeypa
     monkeypatch.setattr(_metal_decode, "_dispatch", recording)
     _metal_decode.ensure_pipeline(force_direct=True)
     _metal_decode.ensure_pipeline(force_direct=False)
-    assert seen == [0, 0]
+    assert seen == [0] * (2 * N_WARMUP_SIGNATURES)
 
 
-def _fake_warmup(monkeypatch, status_words):
-    # The warm-up's own expected bits with a chosen status word per block: only the status check can refuse it.
+def test_warmup_dispatches_every_input_binding_signature(monkeypatch):
+    # Bug caught: a warm-up that dispatches only the seven-block group, so a group that binds `positions`
+    # (or every small input) `constant` compiles its pipeline at the caller's eval, as a raw RuntimeError.
     monkeypatch.setattr(_metal_decode, "_PIPELINES", {})
-    good = mx.array(_metal_decode._warmup_expected())
-    monkeypatch.setattr(
-        _metal_decode,
-        "_dispatch",
-        lambda *a, **k: (good, mx.array(status_words, dtype=mx.uint32)),
-    )
+    real = _metal_decode._dispatch
+    launched = []
+
+    def recording(group, **kwargs):
+        launched.append((group.n_launch, group.n_bytes, group.n_elements, group.positions.shape[0]))
+        return real(group, **kwargs)
+
+    monkeypatch.setattr(_metal_decode, "_dispatch", recording)
+    _metal_decode.ensure_pipeline(force_direct=False)
+    # (n_launch, n_bytes, n_elements, positions entries): all-device; positions-only constant; all-tiny constant.
+    assert launched == [(7, 28672, 78848, 8), (1, 8, 22, 2), (1, 1, 3, 2)]
+
+
+def _fake_warmup(monkeypatch, status_words, *, later=None, flip_later=False):
+    # Each warm-up group's own expected bits with a chosen status word per block, so only the status (or the
+    # `flip_later` bit flip) can refuse it. `status_words` is the seven-block group's; `later` is every
+    # one-block group's (default: clean, on the instantiation's own path).
+    monkeypatch.setattr(_metal_decode, "_PIPELINES", {})
+    expected = {g.name: e for g, e in _metal_decode._warmup_groups()}
+
+    def fake(group, **kwargs):
+        bits = expected[group.name].copy()
+        if group.n_launch == N_WARMUP_BLOCKS:
+            words = status_words
+        else:
+            words = later if later is not None else [8 if kwargs["force_direct"] else 0]
+            if flip_later:
+                bits[0] ^= 1
+        return mx.array(bits), mx.array(words, dtype=mx.uint32)
+
+    monkeypatch.setattr(_metal_decode, "_dispatch", fake)
 
 
 N_WARMUP_BLOCKS = 7
+N_WARMUP_SIGNATURES = 3
 
 
 @pytest.mark.parametrize(
@@ -133,12 +161,47 @@ def test_warmup_refuses_an_error_bit_on_any_block(monkeypatch, error_bit):
         _metal_decode.ensure_pipeline(force_direct=False)
 
 
+@pytest.mark.parametrize("error_bit", [1, 2, 4])
+def test_warmup_refuses_an_error_bit_on_a_later_signature(monkeypatch, error_bit):
+    # Bug caught: only the first warm-up group's status checked, so a pipeline that decodes the seven-block
+    # group cleanly and flags the constant-bound groups still passes readiness.
+    _fake_warmup(monkeypatch, [0] * N_WARMUP_BLOCKS, later=[error_bit])
+    with pytest.raises(DFloatBackendError, match="wrong bits"):
+        _metal_decode.ensure_pipeline(force_direct=False)
+
+
+def test_warmup_refuses_wrong_bits_on_a_later_signature(monkeypatch):
+    # Bug caught: only the first warm-up group's bits compared with its expectation.
+    _fake_warmup(monkeypatch, [0] * N_WARMUP_BLOCKS, flip_later=True)
+    with pytest.raises(DFloatBackendError, match="wrong bits"):
+        _metal_decode.ensure_pipeline(force_direct=False)
+
+
+@pytest.mark.parametrize("force_direct", PATHS)
+def test_warmup_refuses_the_wrong_write_path_on_a_later_signature(monkeypatch, force_direct):
+    # Bug caught: the path bit checked on the seven-block group only.
+    _fake_warmup(
+        monkeypatch, [8 if force_direct else 0] * N_WARMUP_BLOCKS, later=[0 if force_direct else 8]
+    )
+    with pytest.raises(DFloatBackendError, match="path"):
+        _metal_decode.ensure_pipeline(force_direct=force_direct)
+
+
 def test_the_real_warmup_passes_on_both_paths(monkeypatch):
     # Bug caught: a warm-up expectation or path check the real kernel cannot meet (readiness always False).
     monkeypatch.setattr(_metal_decode, "_PIPELINES", {})
     _metal_decode.ensure_pipeline(force_direct=True)
     _metal_decode.ensure_pipeline(force_direct=False)
     assert _metal_decode._warmup_group().n_launch == N_WARMUP_BLOCKS
+
+
+def test_the_warmup_expectations_are_the_reference_decoders_bits():
+    # Bug caught: a hand-derivation slip in a warm-up expectation (the real warm-up would refuse a correct
+    # kernel, and readiness would read False everywhere with a misleading "wrong bits").
+    from mlx_dfloat import reference
+
+    for warm in _metal_decode._warmups():
+        assert reference.decode_group(warm.arrays).tolist() == warm.expected.tolist(), warm.name
 
 
 @pytest.mark.parametrize("force_direct", PATHS)
@@ -225,14 +288,33 @@ def _compiled_kernel_name(group, *, force_direct):
     ]
 
 
-@pytest.mark.parametrize("force_direct", PATHS)
-def test_warmup_compiles_the_same_pipeline_a_real_group_uses(force_direct):
-    # MLX names the kernel after its input binding (a `constant`-bound input adds a `c` to the type suffix) and
-    # compiles one pipeline per name. Bug caught: a warm-up group small enough to bind `constant`, so readiness
-    # proves a pipeline no real decode reuses and the production one first compiles at the caller's eval.
-    bits = random_bf16(np.random.default_rng(1), (70_000,), exponent_low=100, exponent_high=130)
-    real = encoder_group(bits).to_mx(name="real")
-    warm = _metal_decode._warmup_group()
-    assert _compiled_kernel_name(warm, force_direct=force_direct) == _compiled_kernel_name(
-        real, force_direct=force_direct
+def _representative_groups():
+    """One real group per input-binding signature, in the warm-up's order.
+
+    A 70,000-element group binds every input `device`; a one-block encoder group (3,000 elements) has two
+    `positions` entries, which MLX binds `constant`; the H1 hand fixture binds `encoded`, `sm` and
+    `positions` `constant`.
+    """
+    many = random_bf16(np.random.default_rng(1), (70_000,), exponent_low=100, exponent_high=130)
+    one_block = encoder_group(random_bf16(np.random.default_rng(2), (3_000,))).to_mx(
+        name="one-block"
     )
+    assert one_block.positions.shape == (2,)
+    return [encoder_group(many).to_mx(name="many-blocks"), one_block, h1()[0].to_mx(name="h1")]
+
+
+@pytest.mark.parametrize("force_direct", PATHS)
+def test_warmup_compiles_the_same_pipeline_each_real_signature_uses(force_direct):
+    # MLX names the kernel after its input binding (a `constant`-bound input adds a `c` to the type suffix) and
+    # compiles one pipeline per name. Bug caught: a warm-up set that misses a signature real groups use (a
+    # one-block group, or an all-tiny one), so readiness proves pipelines those decodes never reuse and the
+    # production one first compiles at the caller's eval.
+    warm_names = [
+        _compiled_kernel_name(g, force_direct=force_direct)
+        for g, _e in _metal_decode._warmup_groups()
+    ]
+    real_names = [
+        _compiled_kernel_name(g, force_direct=force_direct) for g in _representative_groups()
+    ]
+    assert warm_names == real_names
+    assert len(set(warm_names)) == N_WARMUP_SIGNATURES  # three signatures, not one repeated
