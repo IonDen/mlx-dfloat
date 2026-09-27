@@ -6,8 +6,8 @@ DFloat11 is lossless compression for BF16 model weights. Each weight is 16 bits.
 as a short variable-length code, the same idea a zip file uses, and keeps the other 8 bits (the sign and the
 fraction) exactly as they are. The DFloat11 authors report models at about 70% of their BF16 size with output that is
 bit for bit the same as the original.[^size] Their decoder runs on NVIDIA GPUs only. This project is an independent
-reader and decoder for Apple Silicon. Once decoding is implemented, the weights will stay compressed in memory and be
-decoded on the GPU right before they are used.
+reader and decoder for Apple Silicon. The weights stay compressed in memory and a Metal kernel decodes them on the
+GPU right before they are used; wiring that into mflux is the next step.
 
 ```
 one BF16 weight, 16 bits:    s   eeeeeeee   mmmmmmm
@@ -30,10 +30,10 @@ Pre-alpha. Nothing to install yet, and not on PyPI. Two milestones decide whethe
    exactly the BF16 originals. That covers all four published versions of the checkpoint format.
 2. A Metal decode kernel fast enough to run inside an image-generation step. **Done.** The kernel decodes the
    published checkpoints bit-exactly at 50 GB/s on an M1 Max, and decoding every block just in time adds 5 %
-   (FLUX.1-dev) to 6 % (FLUX.1-schnell, with a one-block evaluation run-ahead; 8.5 % with per-block evaluation) to a
-   1024² denoise step, well under the project's ~25 % threshold. That is measured against a control that agrees
-   within 0.13 % with a run whose BF16 weights are all resident, on a reduced-depth transformer and through the
-   same per-block path. The recipe and numbers are in the changelog.
+   (FLUX.1-dev) to 6.1 % (FLUX.1-schnell, with a one-block evaluation run-ahead; 8.5 % with per-block evaluation)
+   to a 1024² denoise step, well under the project's ~25 % threshold. That is measured against a control which,
+   on a reduced-depth transformer, agrees within 0.13 % with a run whose BF16 weights are all resident, through
+   the same per-block path. The recipe and numbers are in the changelog.
 
 Both milestones are done; the next step is the mflux integration.
 
