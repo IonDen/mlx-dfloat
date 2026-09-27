@@ -59,6 +59,7 @@ try:
     from scripts import bench_flux_step as step_bench
     from scripts._bench_common import Timing, overhead, provenance, write_json_atomic
     from scripts._flux_rig import (
+        FLUX_CACHE_LIMIT,
         DF11Provider,
         ResidentProvider,
         WeightProvider,
@@ -312,6 +313,7 @@ def current_key(args: argparse.Namespace) -> dict[str, Any]:
         embeds_meta=step_bench.embeds_metadata(args.embeds),
         source=source_hash(),
         mlx=mx.__version__,
+        cache_limit=FLUX_CACHE_LIMIT,
         double=args.double,
         single=args.single,
     )

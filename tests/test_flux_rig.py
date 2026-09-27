@@ -898,3 +898,113 @@ def test_check_extras_cover_passes_only_when_every_non_matrix_parameter_has_an_e
             },
             matrices,
         )
+
+
+# --- trace ----------------------------------------------------------------------------------------
+
+
+def test_seam_trace_records_one_ordered_event_per_block_per_step():
+    # Bug caught: a block with no event (a hook path that skips the tracer), stamps taken out of
+    # order (decode after encode), or events not tagged with the step they belong to.
+    rec = Recorder()
+    tf = FakeSeamTransformer(rec, n_double=2, n_single=1)
+    shapes = install_placeholders(tf)
+    tracer = rig.Tracer()
+    tf.attach(
+        ResidentProvider(_resident_dicts(shapes)), shapes, eval_policy="per-block", tracer=tracer
+    )
+    mx.eval(tf(*_inputs()))
+    mx.eval(tf(*_inputs()))
+    assert [(e.step, e.block) for e in tracer.events] == [
+        (s, name) for s in range(2) for name in shapes
+    ]
+    assert len(tracer.steps) == 2
+    for e in tracer.events:
+        assert e.t_decode_start <= e.t_decode_end <= e.t_encode_end <= e.t_eval_end
+        start, end = tracer.steps[e.step]
+        assert start <= e.t_decode_start
+        assert e.t_eval_end <= end
+
+
+def test_seam_trace_attributes_the_provider_time_to_the_decode_phase():
+    # Bug caught: the decode stamp taken after run() so weights_for time lands in the encode phase.
+    import time
+
+    class Slow(ResidentProvider):
+        def weights_for(self, block_name, shapes):
+            time.sleep(0.01)
+            return super().weights_for(block_name, shapes)
+
+    tf = FakeSeamTransformer(Recorder(), n_double=1, n_single=0)
+    shapes = install_placeholders(tf)
+    tracer = rig.Tracer()
+    tf.attach(Slow(_resident_dicts(shapes)), shapes, eval_policy="per-block", tracer=tracer)
+    mx.eval(tf(*_inputs()))
+    (event,) = tracer.events
+    assert event.t_decode_end - event.t_decode_start >= 0.009
+    assert event.t_encode_end - event.t_decode_end < 0.009
+
+
+def test_seam_without_a_tracer_records_nothing_and_still_runs():
+    tf = FakeSeamTransformer(Recorder(), n_double=1, n_single=0)
+    shapes = install_placeholders(tf)
+    tf.attach(ResidentProvider(_resident_dicts(shapes)), shapes)
+    mx.eval(tf(*_inputs()))
+    assert tf._seam.tracer is None
+
+
+def test_summarize_trace_splits_a_step_into_named_seconds():
+    # Bug caught: a phase summed from the wrong pair of stamps, the gap counted from the wrong
+    # neighbour, or the head/tail measured against the wrong step boundary.
+    ev = rig.BlockEvent
+    events = [
+        ev(
+            step=0,
+            block="a",
+            t_decode_start=1.0,
+            t_decode_end=1.2,
+            t_encode_end=1.5,
+            t_eval_end=2.5,
+        ),
+        ev(
+            step=0,
+            block="b",
+            t_decode_start=2.6,
+            t_decode_end=2.7,
+            t_encode_end=2.9,
+            t_eval_end=3.9,
+        ),
+    ]
+    got = rig.summarize_trace(events, step=(0.5, 4.4))
+    want = {
+        "n_blocks": 2,
+        "host_decode_s": 0.3,
+        "host_encode_s": 0.5,
+        "eval_wait_s": 2.0,
+        "restore_gap_s": 0.1,  # eval end of a -> decode start of b
+        "gpu_idle_gap_s": 0.4,  # eval end of a -> encode end of b (host work while the GPU waits)
+        "head_s": 0.5,  # step start -> first decode start
+        "tail_s": 0.5,  # last eval end -> step end
+        "step_s": 3.9,
+    }
+    assert got.keys() == want.keys()
+    for key, value in want.items():
+        assert got[key] == pytest.approx(value), key
+
+
+def test_summarize_trace_of_an_empty_step_has_zero_blocks_and_only_the_step_time():
+    got = rig.summarize_trace([], step=(1.0, 3.0))
+    assert got["n_blocks"] == 0
+    assert got["step_s"] == pytest.approx(2.0)
+    assert got["host_decode_s"] == 0.0
+    assert got["gpu_idle_gap_s"] == 0.0
+
+
+def test_summarize_trace_refuses_events_from_more_than_one_step():
+    ev = rig.BlockEvent
+    events = [
+        ev(step=0, block="a", t_decode_start=1, t_decode_end=1, t_encode_end=1, t_eval_end=1),
+        ev(step=1, block="a", t_decode_start=2, t_decode_end=2, t_encode_end=2, t_eval_end=2),
+    ]
+    with pytest.raises(RigError, match="one step"):
+        rig.summarize_trace(events, step=(0.0, 3.0))

@@ -14,9 +14,11 @@ block), ``ReuseProvider`` and ``ResidentProvider`` hand back pre-decoded weights
 """
 
 import re
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cache, partial
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -378,11 +380,108 @@ def decode_resident(provider: DF11Provider, shapes: Shapes) -> dict[str, dict[st
 # --- the seam ----------------------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BlockEvent:
+    """One block of one step: ``perf_counter`` stamps at the seam's phase boundaries.
+
+    ``t_decode_start`` → ``t_decode_end`` is ``weights_for`` (the provider's host work and launch
+    queuing); → ``t_encode_end`` is the block's graph build (``run()``); → ``t_eval_end`` is the
+    eval policy's wait. The placeholder restore comes after ``t_eval_end``.
+    """
+
+    step: int
+    block: str
+    t_decode_start: float
+    t_decode_end: float
+    t_encode_end: float
+    t_eval_end: float
+
+
+class Tracer:
+    """Collects ``BlockEvent``s and the ``(start, end)`` stamps of every traced step.
+
+    Pass one to ``SeamMixin.attach``; the seam records into it. The stamps are cheap (four
+    ``perf_counter`` calls per block) and no host-device sync is added: the eval-wait phase is
+    whatever the policy already waited for.
+    """
+
+    def __init__(self) -> None:
+        self.events: list[BlockEvent] = []
+        self.steps: list[tuple[float, float]] = []
+        self._step_start: float | None = None
+
+    @property
+    def step(self) -> int:
+        """Index of the step being recorded (or of the next one, between steps)."""
+        return len(self.steps)
+
+    def begin_step(self) -> None:
+        self._step_start = time.perf_counter()
+
+    def end_step(self) -> None:
+        if self._step_start is None:
+            raise RigError("end_step without begin_step")
+        self.steps.append((self._step_start, time.perf_counter()))
+        self._step_start = None
+
+    def record(
+        self,
+        block: str,
+        *,
+        decode_start: float,
+        decode_end: float,
+        encode_end: float,
+        eval_end: float,
+    ) -> None:
+        self.events.append(
+            BlockEvent(
+                step=self.step,
+                block=block,
+                t_decode_start=decode_start,
+                t_decode_end=decode_end,
+                t_encode_end=encode_end,
+                t_eval_end=eval_end,
+            )
+        )
+
+
+def summarize_trace(events: Sequence[BlockEvent], *, step: tuple[float, float]) -> dict[str, Any]:
+    """Split one step's events into named seconds.
+
+    ``host_decode_s``, ``host_encode_s`` and ``eval_wait_s`` sum the three phases over the blocks.
+    ``restore_gap_s`` sums, from the second block on, the time between the previous block's eval
+    end and this block's decode start (the placeholder restore and the hook's own overhead);
+    ``gpu_idle_gap_s`` sums the previous eval end to this block's encode end, which under the
+    per-block policy is host work done while the GPU has nothing queued. ``head_s`` and ``tail_s``
+    are the step's time before the first decode and after the last eval; ``step_s`` is the whole
+    ``step`` window.
+
+    Raises:
+        RigError: The events come from more than one step.
+    """
+    if len({e.step for e in events}) > 1:
+        raise RigError("summarize_trace takes the events of one step")
+    start, end = step
+    out: dict[str, Any] = {
+        "n_blocks": len(events),
+        "host_decode_s": sum(e.t_decode_end - e.t_decode_start for e in events),
+        "host_encode_s": sum(e.t_encode_end - e.t_decode_end for e in events),
+        "eval_wait_s": sum(e.t_eval_end - e.t_encode_end for e in events),
+        "restore_gap_s": sum(e.t_decode_start - prev.t_eval_end for prev, e in pairwise(events)),
+        "gpu_idle_gap_s": sum(e.t_encode_end - prev.t_eval_end for prev, e in pairwise(events)),
+        "head_s": events[0].t_decode_start - start if events else 0.0,
+        "tail_s": end - events[-1].t_eval_end if events else 0.0,
+        "step_s": end - start,
+    }
+    return out
+
+
 @dataclass(slots=True)
 class _SeamState:
     provider: WeightProvider
     shapes: Shapes
     policy: str
+    tracer: Tracer | None = None
     prev: Any = None  # depth2: the previous block's output, evaluated after the next is queued
 
 
@@ -401,9 +500,17 @@ class SeamMixin:
     _seam: _SeamState
 
     def attach(
-        self, provider: WeightProvider, shapes: Shapes, *, eval_policy: str = "per-block"
+        self,
+        provider: WeightProvider,
+        shapes: Shapes,
+        *,
+        eval_policy: str = "per-block",
+        tracer: Tracer | None = None,
     ) -> None:
         """Bind the provider, the block shapes (from ``install_placeholders``) and the eval policy.
+
+        With a ``tracer`` every block of every step records a ``BlockEvent`` and every step its
+        ``(start, end)``.
 
         Raises:
             RigError: Unknown eval policy, or ``"none"`` with a launching provider over more than
@@ -422,7 +529,7 @@ class SeamMixin:
                 f"every decoded group resident until the final eval; 'none' is for ReuseProvider "
                 f"(or at most {MAX_NONE_POLICY_LAUNCHING_BLOCKS} blocks)"
             )
-        self._seam = _SeamState(provider=provider, shapes=shapes, policy=eval_policy)
+        self._seam = _SeamState(provider=provider, shapes=shapes, policy=eval_policy, tracer=tracer)
 
     def verify_step(self) -> None:
         """Run the provider's deferred checks; call it after the step's final ``mx.eval``.
@@ -441,10 +548,14 @@ class SeamMixin:
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Run mflux's step, then drain the depth2 tail; a failed step leaves no stale state."""
         state = self._seam_state()
+        if state.tracer is not None:
+            state.tracer.begin_step()
         try:
             out = super().__call__(*args, **kwargs)  # type: ignore[misc]
             if state.prev is not None:
                 _eval(state.prev)
+            if state.tracer is not None:
+                state.tracer.end_step()
             return out
         finally:
             state.prev = None
@@ -462,7 +573,9 @@ class SeamMixin:
     def _seam_run(self, block_name: str, block: Any, run: Callable[[], Any]) -> Any:
         state = self._seam_state()
         shapes = state.shapes[block_name]
+        t_decode_start = time.perf_counter()
         weights = state.provider.weights_for(block_name, shapes)
+        t_decode_end = time.perf_counter()
         if weights.keys() != shapes.keys():
             raise RigError(
                 f"{block_name}: provider returned {sorted(weights)}; the block needs "
@@ -472,7 +585,16 @@ class SeamMixin:
             for attr, weight in weights.items():
                 get_attr_path(block, attr).weight = weight
             out = run()
+            t_encode_end = time.perf_counter()
             self._seam_eval(out)
+            if state.tracer is not None:
+                state.tracer.record(
+                    block_name,
+                    decode_start=t_decode_start,
+                    decode_end=t_decode_end,
+                    encode_end=t_encode_end,
+                    eval_end=time.perf_counter(),
+                )
             return out
         finally:
             for attr in shapes:
@@ -668,12 +790,14 @@ __all__ = [
     "MAX_NONE_POLICY_LAUNCHING_BLOCKS",
     "PLACEHOLDER",
     "SINGLE_MAP",
+    "BlockEvent",
     "DF11Provider",
     "EvalPolicy",
     "ResidentProvider",
     "ReuseProvider",
     "RigError",
     "SeamMixin",
+    "Tracer",
     "WeightProvider",
     "build_transformer",
     "check_extras_cover",
@@ -688,4 +812,5 @@ __all__ = [
     "seam_transformer_class",
     "set_attr_path",
     "split_block_name",
+    "summarize_trace",
 ]

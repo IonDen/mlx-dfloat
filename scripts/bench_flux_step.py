@@ -51,6 +51,7 @@ error, a rig error, a child's failure), 70/71 watchdog abort (footprint ceiling 
 """
 
 import argparse
+import dataclasses
 import json
 import subprocess
 import sys
@@ -81,9 +82,11 @@ try:
         SINGLE_PREFIX,
         DF11Provider,
         ReuseProvider,
+        Tracer,
         WeightProvider,
         build_transformer,
         load_resident_set,
+        summarize_trace,
     )
     from scripts._watchdog import Watchdog, default_ceiling, phys_footprint
     from scripts.verify_checkpoint import source_hash
@@ -161,12 +164,15 @@ def expected_launches(mode: str, *, n_double: int, n_single: int, steps: int) ->
     return (n_double + n_single) * steps if is_df11(mode) else 0
 
 
-def limits_in_force(caps: Sequence[int], cache_limit: int) -> bool:
-    """Whether both memory caps installed (non-zero GB) and the MLX cache limit is the rig's.
+def limits_in_force(
+    caps: Sequence[int], cache_limit: int, *, expected: int = FLUX_CACHE_LIMIT
+) -> bool:
+    """Whether both memory caps installed (non-zero GB) and the MLX cache limit is ``expected``.
 
     ``caps`` is what ``install_memory_caps`` returned; a 0 means that cap failed to install.
+    ``expected`` is the rig's limit unless the run asked for another (``--cache-limit``).
     """
-    return len(caps) == 2 and all(c > 0 for c in caps) and cache_limit == FLUX_CACHE_LIMIT
+    return len(caps) == 2 and all(c > 0 for c in caps) and cache_limit == expected
 
 
 def compressed_set_loaded(resident: Mapping[str, Any], shapes: Mapping[str, Any]) -> bool:
@@ -220,11 +226,13 @@ def run_key(
     embeds_meta: Mapping[str, str],
     source: str,
     mlx: str,
+    cache_limit: int,
 ) -> dict[str, Any]:
     """The settings a run's JSON is keyed on; two runs may share an out dir only when they agree.
 
     The checkpoint path is resolved so the same checkpoint reached from another cwd matches; the
     embeddings metadata (prompt, seed, model, synthetic, versions) identifies the file's content.
+    The MLX cache limit is part of the key because it changes what a step allocates.
     """
     return {
         "model": model,
@@ -237,6 +245,7 @@ def run_key(
         "embeds_meta": dict(embeds_meta),
         "source": source,
         "mlx": mlx,
+        "cache_limit": cache_limit,
     }
 
 
@@ -278,9 +287,11 @@ def child_command(
     size: int,
     seed: int,
     wall_budget: float,
+    cache_limit: int,
+    trace: bool,
 ) -> list[str]:
     """The subprocess argv for one mode of one round (never ``--orchestrate``; run with the repository root as cwd)."""
-    return [
+    cmd = [
         sys.executable,
         "-m",
         "scripts.bench_flux_step",
@@ -306,7 +317,12 @@ def child_command(
         str(seed),
         "--wall-budget",
         str(wall_budget),
+        "--cache-limit",
+        str(cache_limit),
     ]
+    if trace:
+        cmd.append("--trace")
+    return cmd
 
 
 def check_embeds_shapes(
@@ -339,13 +355,21 @@ def pooled_stats(
         return None
     steps = [float(s) for rnd in over for s in by_round[rnd][mode]["step_s"]]
     verify = [float(s) for rnd in over for s in by_round[rnd][mode].get("verify_s", ())]
+    traced = [t for rnd in over for t in by_round[rnd][mode].get("trace_steps", ())]
     t = Timing(reps=tuple(steps))
     return {
         "median": t.median,
         "spread": t.spread,
         "n": len(steps),
         "verify_median_s": Timing(reps=tuple(verify)).median if verify else None,
+        "trace": trace_medians(traced) if traced else None,
     }
+
+
+def trace_medians(steps: Sequence[Mapping[str, Any]]) -> dict[str, float]:
+    """Per-phase medians over per-step trace summaries (``summarize_trace`` dicts)."""
+    keys = list(steps[0]) if steps else []
+    return {k: Timing(reps=tuple(float(s[k]) for s in steps)).median for k in keys}
 
 
 def report(
@@ -457,6 +481,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--size", type=int, default=1024, help="image side in pixels (multiple of 16)")
     p.add_argument("--seed", type=int, default=42, help="seed of the packed latent noise")
     p.add_argument(
+        "--cache-limit",
+        type=int,
+        default=FLUX_CACHE_LIMIT,
+        help="MLX buffer-cache limit in bytes for this process (part of the resume key)",
+    )
+    p.add_argument(
+        "--trace",
+        action="store_true",
+        help="record per-block phase timestamps (decode / encode / eval wait) into the run JSON",
+    )
+    p.add_argument(
         "--wall-budget", type=float, default=3600.0, help="seconds before the watchdog aborts"
     )
     args = p.parse_args(argv)
@@ -497,6 +532,7 @@ def current_key(args: argparse.Namespace) -> dict[str, Any]:
         embeds_meta=embeds_metadata(args.embeds),
         source=source_hash(),
         mlx=mx.__version__,
+        cache_limit=args.cache_limit,
     )
 
 
@@ -626,8 +662,13 @@ def time_steps(
     limits_recorded: bool,
     watchdog: Watchdog,
     label: str,
+    tracer: Tracer | None = None,
 ) -> dict[str, Any]:
     """Warm up, assert the parity conditions, time the steps; the measured fields of the run JSON.
+
+    With a ``tracer`` (the one attached to the transformer's seam) the result also carries
+    ``trace_events`` (the timed steps' block events), ``trace_steps`` (one ``summarize_trace``
+    dict per timed step) and ``trace_medians``.
 
     ``per_step`` is the decode launches every step must make (``label`` names the mode in errors);
     ``compressed_loaded`` and ``limits_recorded`` are the two conditions the caller establishes
@@ -681,7 +722,20 @@ def time_steps(
     if not bool(mx.isfinite(latents).all().item()):
         raise BenchError("the final latents are not finite")
     timing = Timing(reps=tuple(step_s))
+    traced: dict[str, Any] = {}
+    if tracer is not None:
+        timed_steps = range(warmup, warmup + steps)
+        trace_steps = [
+            summarize_trace([e for e in tracer.events if e.step == s], step=tracer.steps[s])
+            for s in timed_steps
+        ]
+        traced = {
+            "trace_events": [dataclasses.asdict(e) for e in tracer.events if e.step >= warmup],
+            "trace_steps": trace_steps,
+            "trace_medians": trace_medians(trace_steps),
+        }
     return {
+        **traced,
         "step_s": step_s,
         "warmup_s": warmup_s,
         "median_s": timing.median,
@@ -726,7 +780,8 @@ def run_mode(
     start = time.perf_counter()
     provider = make_provider(mode, ckpt, resident, shapes)
     timings["provider_s"] = time.perf_counter() - start
-    transformer.attach(provider, shapes, eval_policy=policy)
+    tracer = Tracer() if args.trace else None
+    transformer.attach(provider, shapes, eval_policy=policy, tracer=tracer)
     config, latents, prompt, pooled, inputs = step_inputs(args)
     measured = time_steps(
         transformer,
@@ -742,11 +797,13 @@ def run_mode(
         limits_recorded=limits_recorded,
         watchdog=watchdog,
         label=mode,
+        tracer=tracer,
     )
     return {
         "exit_code": EXIT_OK,
         "mode": mode,
         "policy": policy,
+        "traced": tracer is not None,
         "round": args.round,
         "model": args.model,
         "size": args.size,
@@ -771,19 +828,21 @@ def run_one(
     *,
     measure: Measure | None = None,
     key: Callable[[argparse.Namespace], dict[str, Any]] | None = None,
+    cache_limit: int = FLUX_CACHE_LIMIT,
 ) -> int:
     """Run one mode under the caps, the cache limit and the watchdog; write ``--out``.
 
     ``measure(args, watchdog, limits_recorded=...)`` returns the run's result dict (default
     ``run_mode``) and ``key(args)`` its resume key (default ``current_key``); another bench with the
-    same run discipline (the reduced-depth control validation) passes its own.
+    same run discipline (the reduced-depth control validation) passes its own. ``cache_limit`` is
+    the MLX buffer-cache limit to set for the process (``--cache-limit``; the rig's by default).
     """
     measure = run_mode if measure is None else measure
     key_of = current_key if key is None else key
     caps = list(install_memory_caps())
-    mx.set_cache_limit(FLUX_CACHE_LIMIT)
-    cache_limit = int(mx.set_cache_limit(FLUX_CACHE_LIMIT))  # the limit now in force
-    limits_recorded = limits_in_force(caps, cache_limit)
+    mx.set_cache_limit(cache_limit)
+    in_force = int(mx.set_cache_limit(cache_limit))  # the limit now in force
+    limits_recorded = limits_in_force(caps, in_force, expected=cache_limit)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     move_stale_abort_aside(args.out.parent)
     watchdog = Watchdog(args.out.parent, ceiling=default_ceiling(), budget=args.wall_budget).start()
@@ -808,7 +867,7 @@ def run_one(
             "mode": args.mode,
             "round": args.round,
             "memory_caps_gb": caps,
-            "cache_limit_bytes": cache_limit,
+            "cache_limit_bytes": in_force,
             "key": this_key,
         }
     )
@@ -851,6 +910,11 @@ def _print_report(rep: Mapping[str, Any]) -> None:
             f"pooled {mode}: median {stats['median']:.3f} s spread {stats['spread']:.3f} "
             f"(n={stats['n']}{verify_text})"
         )
+    for mode, stats in rep["pooled"].items():
+        trace = stats.get("trace")
+        if trace:
+            phases = ", ".join(f"{k[:-2]} {v:.3f}" for k, v in trace.items() if k.endswith("_s"))
+            print(f"trace {mode} (median s/step): {phases}")
     for label, value in rep["overhead"].items():
         print(f"overhead {label}: {value:+.1%}")
     cost = rep["eval_policy_cost_s"]
@@ -890,6 +954,8 @@ def orchestrate(args: argparse.Namespace) -> int:
             size=args.size,
             seed=args.seed,
             wall_budget=args.wall_budget,
+            cache_limit=args.cache_limit,
+            trace=args.trace,
         )
         print(f"round {round_no} {mode}: {' '.join(cmd)}", flush=True)
         code = subprocess.run(cmd, cwd=_REPO, check=False).returncode
@@ -920,7 +986,7 @@ def main(argv: list[str] | None = None) -> int:
     """Entry point."""
     args = parse_args(argv)
     if not args.orchestrate:
-        return run_one(args)
+        return run_one(args, cache_limit=args.cache_limit)
     try:
         return orchestrate(args)
     except Exception as exc:  # a setup or report error is a tool error (2), never 1
