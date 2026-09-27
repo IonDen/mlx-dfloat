@@ -26,7 +26,11 @@ _STATUS_TEXT = {
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class DecodeResult:
-    """One decoded group: its BF16 bits, a per-block status word and how it was decoded."""
+    """One decoded group: its BF16 bits, a per-block status word and how it was decoded.
+
+    ``threadgroup_bytes`` is the static threadgroup memory the kernel instantiation reserves (0 for
+    the reference), not a per-block figure: every launched block reserves it, staged or direct.
+    """
 
     bits: mx.array
     status: mx.array

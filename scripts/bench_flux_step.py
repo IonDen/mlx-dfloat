@@ -55,7 +55,8 @@ from pathlib import Path
 from typing import Any
 
 # Run as a file, Python puts scripts/ (not the repository root) first on sys.path.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+_REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO))
 
 try:
     import mlx.core as mx
@@ -253,7 +254,7 @@ def child_command(
     seed: int,
     wall_budget: float,
 ) -> list[str]:
-    """The subprocess argv for one mode of one round (never ``--orchestrate``)."""
+    """The subprocess argv for one mode of one round (never ``--orchestrate``; run with the repository root as cwd)."""
     return [
         sys.executable,
         "-m",
@@ -445,6 +446,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         # The first step carries the real-group pipeline compile and the lazy scheduler
         # construction, so at least one warm-up step is required.
         p.error("--steps and --warmup must be >= 1, --rounds >= 0")
+    # Children run with the repository root as cwd, so every path they receive must be absolute.
+    for name in ("out", "out_dir", "df11", "embeds"):
+        if getattr(args, name) is not None:
+            setattr(args, name, Path(getattr(args, name)).resolve())
     return args
 
 
@@ -834,7 +839,7 @@ def orchestrate(args: argparse.Namespace) -> int:
             wall_budget=args.wall_budget,
         )
         print(f"round {round_no} {mode}: {' '.join(cmd)}", flush=True)
-        code = subprocess.run(cmd, check=False).returncode
+        code = subprocess.run(cmd, cwd=_REPO, check=False).returncode
         if code != 0:
             stopped = {"round": round_no, "mode": mode, "exit_code": code}
             print(f"error: round {round_no} {mode} exited {code}; stopping", file=sys.stderr)

@@ -3,15 +3,15 @@
 For each selected group: load it, decode it with the NumPy reference, and check every requested
 Metal variant against those bits (``view(uint16)`` equality, never a tolerance). Before the first
 full-group dispatch, the per-dispatch guard projects that dispatch's time from ``--rate-from``, or,
-without it, from a calibration ramp: dispatches of the first k blocks for k = 1, 2, 4, 8, ...,
-each projected at the previous step's rate through the same guard before it runs, until a step
-takes at least 10 ms (long enough to measure throughput, not launch latency) or covers the whole
-group, unless that step's rate fell below the previous step's (a transient slow dispatch). Each
-step runs once untimed and then keeps the fastest of three timed runs per variant, so neither a
-pipeline compile nor a one-off slow dispatch sets a rate. The last step's rate (slowest requested variant) is the calibration rate. Each variant
-that passes parity then
-gets one warm-up and ``--reps`` timed decodes, each ending in ``mx.eval``. A variant that fails
-parity gets no timing: a wrong kernel's speed means nothing.
+without it, from a calibration ramp: dispatches of the first k blocks for k = 1, 2, 4, 8, ..., each
+projected at the previous step's rate through the same guard before it runs, until a step takes at
+least 10 ms (long enough to measure throughput, not launch latency) or covers the whole group,
+unless that step's rate fell below the previous step's (a transient slow dispatch). Each step runs
+once untimed and then keeps the fastest of three timed runs per variant, so neither a pipeline
+compile nor a one-off slow dispatch sets a rate. The last step's rate (slowest requested variant) is
+the calibration rate. Each variant that passes parity then gets one warm-up and ``--reps`` timed
+decodes, each ending in ``mx.eval``. A variant that fails parity gets no timing: a wrong kernel's
+speed means nothing.
 
 Variants: ``direct`` (every block writes straight to device memory), ``staged`` (the production
 path: blocks that fit the threadgroup buffer are staged, the rest go direct) and ``reference``
@@ -19,11 +19,12 @@ path: blocks that fit the threadgroup buffer are staged, the rest go direct) and
 
 Results go to ``--out`` atomically after every group, so an interrupted run resumes by skipping
 groups already in the file's ``groups`` map. The file carries a run ``key`` (resolved checkpoint
-path, variants, reps, source hash, mlx version); resuming into a file whose key differs, or that
-has none, exits 2 and asks for a fresh ``--out``, so different runs never mix. The top-level ``gbps`` is the slowest Metal median
-over every recorded group, the conservative rate ``verify_checkpoint --rate-from`` reads.
-``--t-step S`` also reports the kill-equivalent throughput for the whole checkpoint's bytes per
-step and whether each Metal variant's aggregate throughput clears it.
+path, variants, reps, source hash, mlx version); resuming into a file whose key differs, or that has
+none, exits 2 and asks for a fresh ``--out``, so different runs never mix. The top-level ``gbps`` is
+the slowest Metal median over every recorded group, the conservative rate
+``verify_checkpoint --rate-from`` reads. ``--t-step S`` also reports the kill-equivalent throughput
+for the whole checkpoint's bytes per step and whether each Metal variant's aggregate throughput
+clears it.
 
 Usage (from the repository root of a synced checkout):
     uv run python -m scripts.bench_decode_kernel --df11 DIR --groups a,b --out FILE \

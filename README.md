@@ -30,8 +30,9 @@ Pre-alpha. Nothing to install yet, and not on PyPI. Two milestones decide whethe
    exactly the BF16 originals. That covers all four published versions of the checkpoint format.
 2. A Metal decode kernel fast enough to run inside an image-generation step. **Done.** The kernel decodes the
    published checkpoints bit-exactly at 50 GB/s on an M1 Max, and decoding every block just in time adds 5 %
-   (FLUX.1-dev) to 6 % (FLUX.1-schnell) to a 1024² denoise step, measured against a control that agrees with a real
-   BF16 run within 0.13 %. The recipe and numbers are in the changelog.
+   (FLUX.1-dev) to 6 % (FLUX.1-schnell, with a one-block evaluation run-ahead; 8.5 % with per-block evaluation) to a
+   1024² denoise step, measured against a control that agrees with a real BF16 run within 0.13 %. The recipe and
+   numbers are in the changelog.
 
 Both milestones passed; the next step is the mflux integration.
 

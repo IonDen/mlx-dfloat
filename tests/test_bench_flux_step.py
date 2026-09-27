@@ -262,7 +262,7 @@ def test_report_pools_every_timed_step_of_a_mode_across_rounds():
 
 
 def test_report_pools_the_status_validation_time_outside_the_step_window():
-    # Bug caught: verify_s folded into step_s (df11's pooled median would read 1.37 instead of
+    # Bug caught: verify_s folded into step_s (df11's pooled median would read 1.38 instead of
     # 1.35), or the validation median taken per round (r1 0.02, r2 0.03) instead of over 6 reps.
     pooled = report(FIXTURES)["pooled"]
     assert pooled["df11"]["median"] == pytest.approx(1.35)
@@ -303,7 +303,7 @@ def test_report_from_a_single_mode_has_no_overheads_and_nothing_pooled():
 
 def test_report_pools_only_rounds_where_both_modes_of_the_pair_completed():
     # Bug caught: round 3's unpaired df11 (9.0 s) pulled into the pool: the df11 median would jump
-    # from 1.35 to 1.45 and the overhead from 0.35 to 0.45.
+    # from 1.35 to 1.5 and the overhead from 0.35 to 0.5.
     out = report(FIXTURES)
     assert out["pooled"]["df11"]["n"] == 6
     assert out["pooled"]["df11"]["median"] == pytest.approx(1.35)
@@ -636,3 +636,41 @@ def test_an_orchestrator_setup_error_exits_2_and_launches_nothing(tmp_path, monk
     assert code == 2
     assert calls == []
     assert "missing.safetensors" in capsys.readouterr().err
+
+
+def test_the_orchestrator_launches_children_from_the_repository_root_with_absolute_paths(
+    tmp_path, monkeypatch
+):
+    # Children run `python -m scripts.bench_flux_step`, which only resolves with the repository root as cwd.
+    # Bug caught: launching from the caller's cwd (an orchestration started elsewhere fails every child), or
+    # handing the root-cwd children relative paths that then point inside the repository.
+    from types import SimpleNamespace
+
+    import scripts.bench_flux_step as bfs
+
+    calls = []
+
+    def run(cmd, **kwargs):
+        if (
+            "scripts.bench_flux_step" in cmd
+        ):  # a child; provenance's git calls pass through the stub too
+            calls.append((cmd, kwargs))
+        return SimpleNamespace(returncode=3, stdout="")  # the first child fails: stop there
+
+    monkeypatch.setattr(bfs, "current_key", lambda args: {"model": "schnell"})
+    monkeypatch.setattr(bfs.subprocess, "run", run)
+    monkeypatch.chdir(tmp_path)
+    code = bfs.main(
+        [
+            *("--orchestrate", "--out-dir", "out", "--df11", "c", "--embeds", "e.safetensors"),
+        ]
+    )
+    assert code == 2
+    assert len(calls) == 1
+    cmd, kwargs = calls[0]
+    assert kwargs["cwd"] == Path(__file__).resolve().parents[1]
+    flags = dict(zip(cmd[3::2], cmd[4::2], strict=False))
+    here = tmp_path.resolve()
+    assert flags["--df11"] == str(here / "c")
+    assert flags["--embeds"] == str(here / "e.safetensors")
+    assert Path(flags["--out"]).parent == here / "out"
