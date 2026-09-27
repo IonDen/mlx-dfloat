@@ -57,6 +57,9 @@ checkpoint that is already on disk, `scripts/verify_checkpoint.py` (run the same
 directories) checks every tensor and writes one result file per group, so an interrupted run resumes where it
 stopped.
 
+The FLUX.1 adapter needs the optional `mlx-dfloat[mflux]` extra (`uv sync --extra mflux` from a checkout) and is
+tested against mflux 0.20.x.
+
 ## Relationship to DFloat11
 
 This is not a fork and not affiliated with the DFloat11 authors. It reads the checkpoint format they publish. Credit

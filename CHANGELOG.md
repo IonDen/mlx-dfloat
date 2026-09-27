@@ -55,6 +55,16 @@ All notable changes to this project are documented here. The format follows
   cache limit instead. A timed process peaks at about 19 GiB of memory, 20.3 GiB with the look-ahead.
 - The scripts' memory watchdog now enforces its ceiling on the process footprint the OS reports rather than on RSS
   plus MLX memory, which counted loaded arrays twice.
+- A block-boundary integration layer, `mlx_dfloat.integrate`: zero-size placeholders for a module's matrices, weight
+  providers that decode a DFloat11 group just in time, reuse one already decoded, or hand back a resident BF16
+  weight, and a seam that assigns one block's weights, runs the block, evaluates by policy and restores the
+  placeholders afterward. A coverage check raises when a name falls outside the map or a weight comes back the wrong
+  shape, instead of leaving it at its placeholder value. The FLUX.1 adapter, `mlx_dfloat.mflux.flux1`, reads mflux's
+  own weight mapping to name each block's matrices and builds mflux's transformer directly from a DFloat11
+  checkpoint; it needs the optional `mlx-dfloat[mflux]` extra, pinned to the mflux 0.20.x line. Three new errors mark
+  this boundary: `DFloatIntegrationError` for a seam or name-map invariant that failed, `DFloatUnsupportedError` for
+  an option this path does not implement, and `DFloatDependencyError` for a missing optional dependency. The step
+  bench and the control validation now run through this integration code instead of a separate rig.
 
 ### Changed
 
