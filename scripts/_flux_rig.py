@@ -68,8 +68,9 @@ MAX_BUILD_ACTIVE_BYTES = 2 * 1024**3
 # MLX cache limit every FLUX rig process sets before building (the smoke and the step bench share it).
 # At this limit the activation buffers each block frees already fill the cache, so a freed decode
 # output (679 MB double, 283 MB single) is released to the OS instead of kept, and the next block's
-# is allocated fresh: about 30 ms per double and 14 ms per single block, 1.29 s per 1024² step
-# (measured 2026-09-27). A 2.5e9 limit leaves room for a decoded buffer next to the activations and
+# is allocated fresh: about 30 ms per double and 14 ms per single block on the per-block stamps,
+# 1.29 s per 1024² step as the difference between two limits (measured 2026-09-27). A 2.5e9 limit
+# leaves room for a decoded buffer next to the activations and
 # removes that cost for +1 GiB of footprint. The bench keeps 1.4e9 as the recorded default so new
 # runs stay comparable with the earlier record; `--cache-limit` sets another.
 FLUX_CACHE_LIMIT = int(1.4e9)

@@ -45,8 +45,9 @@ All notable changes to this project are documented here. The format follows
   measurement on schnell (one round of five timed steps per mode, with the bench's new `--trace` and `--cache-limit`
   options) attributes most of that difference to memory allocation: at the bench's 1.4 GB cache limit the activation
   buffers each block frees already fill MLX's buffer cache, so every block's decoded output is released instead of
-  kept and allocated fresh for the next block, about 30 ms for a double block and 14 ms for a single one, 1.29 s of a
-  step. With a 2.5 GB limit, large enough that a decoded buffer survives in the cache next to those activations, the
+  kept and allocated fresh for the next block: about 30 ms for a double block and 14 ms for a single one on the
+  per-block stamps, and 1.29 s of a step as the difference between two cache limits. With a 2.5 GB limit, large enough
+  that a decoded buffer survives in the cache next to those activations, the
   per-block overhead on schnell is 4.0 % for one more GiB of memory, and the in-step decode time is 1.5 times the
   isolated prediction. Decoding the next block on a second GPU stream (`df11-prefetch`, submitted after the previous
   block's evaluation returns) hides about a fifth of the kernel's time and, at that submission point, none of the

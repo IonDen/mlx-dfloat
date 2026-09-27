@@ -1192,7 +1192,9 @@ def test_a_step_that_raises_midway_leaves_no_stale_look_ahead():
 
     rec = Recorder()
     tf = FakeSeamTransformer(rec, n_double=2, n_single=0)
-    tf.transformer_blocks[1] = BoomOnce(rec)
+    # The boom sits in block 0, whose look-ahead is block 1: without reset() the next step's block 0
+    # is refused as out of order. (A boom in the last block would already have wrapped to block 0.)
+    tf.transformer_blocks[0] = BoomOnce(rec)
     shapes = install_placeholders(tf)
     groups, names, _source = _df11_groups(shapes, np.random.default_rng(26))
     provider = rig.PrefetchProvider(
