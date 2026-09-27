@@ -2,9 +2,11 @@ import json
 import sys
 import threading
 
+import psutil
 import pytest
-import scripts._watchdog as wd
-from scripts._watchdog import Watchdog, verdict
+
+import mlx_dfloat._watchdog as wd
+from mlx_dfloat._watchdog import Watchdog, verdict
 
 
 def test_memory_verdict_uses_process_rss():
@@ -34,7 +36,10 @@ class _FixedRssProcess:
 
 
 def _stub_memory(monkeypatch, *, rss, mlx_active, mlx_cache):
-    monkeypatch.setattr(wd.psutil, "Process", _FixedRssProcess(rss))
+    # `psutil` is imported inside the functions that need it (never at module top level), so
+    # there is no `wd.psutil` attribute to patch; patching the real, shared `psutil` module here
+    # still reaches the watchdog's own `import psutil`, since Python caches modules by name.
+    monkeypatch.setattr(psutil, "Process", _FixedRssProcess(rss))
     monkeypatch.setattr(wd.mx, "get_active_memory", lambda: mlx_active)
     monkeypatch.setattr(wd.mx, "get_cache_memory", lambda: mlx_cache)
 
@@ -120,7 +125,7 @@ def test_watchdog_sample_error_still_aborts(tmp_path, monkeypatch):
     def boom():
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(wd.psutil, "Process", boom)
+    monkeypatch.setattr(psutil, "Process", boom)
     exit_codes = _run_watchdog_to_abort(tmp_path, monkeypatch, ceiling=10**15, budget=1e9)
     assert exit_codes
     assert exit_codes[0] == 70
@@ -149,7 +154,7 @@ def test_verdict_uses_the_os_footprint_not_rss_plus_mlx(monkeypatch, tmp_path):
     # Bug caught: counting mx.load'ed arrays twice (RSS and MLX active) and false-aborting at half
     # the real ceiling.
     monkeypatch.setattr(wd, "phys_footprint", lambda: 10**9)
-    monkeypatch.setattr(wd.psutil, "Process", _FixedRssProcess(rss=10**12))
+    monkeypatch.setattr(psutil, "Process", _FixedRssProcess(rss=10**12))
     monkeypatch.setattr(wd.mx, "get_active_memory", lambda: 10**12)
     monkeypatch.setattr(wd.mx, "get_cache_memory", lambda: 0)
     reason, sample = wd.Watchdog(tmp_path, ceiling=5 * 10**9, budget=60)._sample()
@@ -190,6 +195,16 @@ def test_a_failing_footprint_read_aborts_as_a_sample_error(monkeypatch, tmp_path
     monkeypatch.setattr(wd, "phys_footprint", lambda: (_ for _ in ()).throw(OSError("rusage")))
     reason, _ = wd.Watchdog(tmp_path, ceiling=10**11, budget=60)._sample()
     assert reason == "sample_error"
+
+
+def test_the_scripts_watchdog_module_is_the_package_one():
+    # Bug caught: the compatibility shim re-implementing or re-defining Watchdog instead of
+    # re-exporting the package's own class, which would let the two drift apart silently.
+    import scripts._watchdog as script_side
+
+    from mlx_dfloat import _watchdog as package_side
+
+    assert script_side.Watchdog is package_side.Watchdog
 
 
 _FOOTPRINT_RUNNER = """

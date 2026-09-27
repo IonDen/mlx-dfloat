@@ -123,7 +123,7 @@ enable_error_code = ["redundant-expr", "truthy-bool", "ignore-without-code"]
 files = ["src/mlx_dfloat"]
 
 [[tool.mypy.overrides]]
-module = ["mlx.*", "mlx_lm.*", "mflux.*"]
+module = ["mlx.*", "mlx_lm.*", "mflux.*", "psutil.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
