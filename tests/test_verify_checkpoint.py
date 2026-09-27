@@ -720,3 +720,14 @@ def test_rate_from_an_unreadable_bench_json_is_exit_2(pair, tmp_path, monkeypatc
     out = tmp_path / "o"
     assert main(_metal_argv(pair[0], out, "--rate-from", str(rate))) == 2
     assert "cannot read the bench JSON" in capsys.readouterr().err
+
+
+def test_rate_from_with_the_reference_decoder_is_a_usage_error(pair, tmp_path, capsys):
+    # The per-dispatch guard only exists on the Metal path. Bug caught: --rate-from accepted and silently
+    # ignored under --decoder reference, so the caller believes a guard is armed that never runs.
+    out = tmp_path / "o"
+    rate = _rate_file(tmp_path, {"gbps": 10.0})
+    argv = ["--df11", str(pair[0]), "--out", str(out), "--no-watchdog", "--rate-from", str(rate)]
+    assert main(argv) == 2
+    assert "--rate-from needs --decoder metal" in capsys.readouterr().err
+    assert not (out / "summary.json").exists()

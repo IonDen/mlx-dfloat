@@ -4,6 +4,7 @@ from typing import Any
 
 import mlx.core as mx
 import numpy as np
+import numpy.typing as npt
 
 from mlx_dfloat.decode import DecodeResult
 from mlx_dfloat.errors import DFloatBackendError
@@ -203,37 +204,75 @@ def _dispatch(
     return out, status
 
 
-def _warmup_group() -> MxGroup:
-    # H1: three elements, one LUT level: enough to compile and dispatch every code path once.
+# The warm-up group: seven full 4096-byte blocks, so `positions` has eight entries and every input clears
+# MLX's small-array binding (a read-only input of fewer than 8 entries is bound `constant`, which compiles a
+# different pipeline from the `device`-bound one real groups get). Each thread's 8 bytes FF FF FF FF FF FF FF FE
+# decode under the H1 tables (0xxxxxxx -> exponent 127, length 1; 10xxxxxx -> 126, length 2; 11xxxxxx -> 128,
+# length 3) to 21 codes `111` (exponent 128) then one `0` (exponent 127): 22 elements per thread, 11,264 per
+# block, under CAP, so the staged instantiation stages every block. An all-zero stream would decode to 64
+# elements per thread, 32,768 per block, over CAP, and never exercise staging.
+_WARMUP_BLOCKS = 7
+_WARMUP_CODES_PER_THREAD = 22
+_WARMUP_ELEMENTS_PER_BLOCK = THREADS * _WARMUP_CODES_PER_THREAD
+_WARMUP_THREAD_BYTES = (0xFF,) * 7 + (0xFE,)
+
+
+def _warmup_arrays() -> GroupArrays:
+    """The warm-up group as host arrays: H1 LUTs, seven blocks, zero gaps, sign_mantissa[i] = i & 0xFF."""
     row0 = np.zeros(256, np.uint8)
     row0[0:128], row0[128:192], row0[192:256] = 127, 126, 128
     lens = np.zeros(256, np.uint8)
     lens[126], lens[127], lens[128] = 2, 1, 3
+    n_elements = _WARMUP_BLOCKS * _WARMUP_ELEMENTS_PER_BLOCK
     return GroupArrays(
-        encoded_exponent=np.array([0x9B], np.uint8),
-        sign_mantissa=np.array([0, 0x80, 0x7F], np.uint8),
+        encoded_exponent=np.tile(
+            np.array(_WARMUP_THREAD_BYTES, np.uint8), _WARMUP_BLOCKS * THREADS
+        ),
+        sign_mantissa=(np.arange(n_elements) & 0xFF).astype(np.uint8),
         luts=np.stack([row0, lens]),
-        gaps=np.zeros(320, np.uint8),
-        output_positions=np.array([0, 3], np.uint32),
+        gaps=np.zeros(320 * _WARMUP_BLOCKS, np.uint8),
+        output_positions=(np.arange(_WARMUP_BLOCKS + 1) * _WARMUP_ELEMENTS_PER_BLOCK).astype(
+            np.uint32
+        ),
         split_positions=np.zeros(0, np.int64),
-    ).to_mx(name="warmup")
+    )
+
+
+def _warmup_expected() -> npt.NDArray[np.uint16]:
+    """The warm-up group's BF16 bits, derived by hand from the stream and tables above (none equals 0)."""
+    n = _WARMUP_BLOCKS * _WARMUP_ELEMENTS_PER_BLOCK
+    i = np.arange(n, dtype=np.uint32)
+    exponent = np.where(i % _WARMUP_CODES_PER_THREAD == _WARMUP_CODES_PER_THREAD - 1, 127, 128)
+    sm = i & 0xFF
+    return (((sm & 0x80) << 8) | (exponent.astype(np.uint32) << 7) | (sm & 0x7F)).astype(np.uint16)
+
+
+def _warmup_group() -> MxGroup:
+    """The warm-up group as evaluated MLX arrays (also the register-pressure probe's launch group)."""
+    return _warmup_arrays().to_mx(name="warmup")
 
 
 def ensure_pipeline(
     *, force_direct: bool, poison_buf: bool = False, unguarded_gap_read: bool = False
 ) -> None:
-    """Compile and dispatch one tiny group for this instantiation, alone.
+    """Compile this instantiation's production pipeline and prove it decodes a multi-block group bit-exactly.
 
     Each distinct template tuple is its own JIT compile, so each is warmed once and the result
-    is cached in `_PIPELINES`. The warm-up output is prefilled with 0, which none of the expected
-    words equals, so an element the kernel fails to write cannot pass on recycled memory. The
-    3-element warm-up group must run staged unless `force_direct` is set, so the status word's
-    path bit is checked too. `unguarded_gap_read` is a test-only mutant (see `decode`).
+    is cached in `_PIPELINES`. The warm-up group has seven blocks and at least eight entries in
+    every input, so MLX binds every input in `device` memory exactly as it does for a real group:
+    the pipeline compiled here is the one the caller's decodes reuse, not a small-input variant.
+    Readiness means that pipeline compiled, dispatched 512-thread groups, and wrote every element
+    of the seven blocks bit-exactly, with no error bit on any block and every block on the
+    expected write path (staged unless `force_direct`; every warm-up block fits under `CAP`).
+    The output is prefilled with 0, which no expected word equals, so an element the kernel
+    fails to write cannot pass on recycled memory. `unguarded_gap_read` is a test-only mutant
+    (see `decode`).
 
     Raises:
         DFloatBackendError: Metal is unavailable, the kernel fails to compile or dispatch here
             (a pipeline ceiling below 512 threads, a driver refusal), the warm-up group
-            decodes to the wrong bits, or it runs on the wrong write path.
+            decodes to the wrong bits or reports an error bit on any block, or any block
+            runs on the wrong write path.
     """
     key = (force_direct, poison_buf, unguarded_gap_read)
     if _PIPELINES.get(key):
@@ -251,10 +290,10 @@ def ensure_pipeline(
         mx.eval(out, status)
     except Exception as exc:  # compile error, pipeline ceiling below 512, driver refusal
         raise DFloatBackendError(f"the Metal decode kernel cannot run here: {exc}") from exc
-    word = int(np.array(status)[0])
-    if np.array(out).tolist() != [0x3F00, 0xBF80, 0x407F] or word & 7:
+    words = np.array(status)
+    if not np.array_equal(np.array(out), _warmup_expected()) or np.any(words & 7):
         raise DFloatBackendError("the Metal decode kernel produced wrong bits on the warm-up group")
-    if (word & 8) != (8 if force_direct else 0):
+    if np.any((words & 8) != (8 if force_direct else 0)):
         want = "direct" if force_direct else "staged"
         raise DFloatBackendError(
             f"the Metal decode kernel took the wrong write path on the warm-up group (want {want})"
@@ -263,7 +302,11 @@ def ensure_pipeline(
 
 
 def metal_ready() -> bool:
-    """Whether both kernel instantiations (direct and staged) compile and pass their warm-up here."""
+    """Whether both production pipelines (direct and staged) compile here and decode the warm-up group.
+
+    True means each instantiation compiled with the same input binding real groups get and decoded
+    a seven-block group bit-exactly on its expected write path (see `ensure_pipeline`).
+    """
     try:
         ensure_pipeline(force_direct=True)
         ensure_pipeline(force_direct=False)

@@ -18,9 +18,10 @@ How it works: the kernel is launched once with ``verbose=True``, which makes MLX
 MSL it compiled. That dump comes from MLX's C++ layer straight to file descriptor 1, so it is
 captured at the descriptor level. The banner line and code fences are stripped, the prelude MLX's
 own compile step supplies is prepended, and the text is recompiled standalone with PyObjC's Metal
-bindings. The probe group is zero-filled and seven blocks long, so every input has at least eight
-entries: MLX binds smaller read-only inputs in the ``constant`` address space, which would compile
-a different signature from the one real groups get.
+bindings. The probe launches the decoder's own warm-up group (``_metal_decode._warmup_group``):
+seven blocks long, so every input has at least eight entries. MLX binds smaller read-only inputs in
+the ``constant`` address space, which would compile a different signature from the one real groups
+get.
 
 Adapted from mlx-train-perf's register-pressure probe. Needs the ``bench`` dependency group:
     uv run --group bench python scripts/regpressure.py
@@ -36,14 +37,11 @@ from collections.abc import Iterator
 from typing import IO, Any
 
 import mlx.core as mx
-import numpy as np
 
 from mlx_dfloat import _metal_decode as md
-from mlx_dfloat.format import GroupArrays, MxGroup
+from mlx_dfloat.format import MxGroup
 
 MIN_THREADS = md.THREADS
-_BLOCKS = 7  # 8 output positions: every input clears MLX's small-array `constant` binding
-_ELEMENTS_PER_BLOCK = md.THREADS * 64  # an all-zero stream is 64 one-bit codes per thread
 _BANNER_RE = re.compile(r"Generated source code for `[^`]+`:\s*\n")
 _PRELUDE = "#include <metal_stdlib>\nusing namespace metal;\n"
 # (label, FORCE_DIRECT, the threadgroup bytes _metal_decode declares for that path)
@@ -79,16 +77,8 @@ def _capture_fd_stdout() -> Iterator[IO[str]]:
 
 
 def probe_group() -> MxGroup:
-    """A structurally valid, zero-filled seven-block group using the warm-up group's LUTs."""
-    luts = np.array(md._warmup_group().luts)
-    return GroupArrays(
-        encoded_exponent=np.zeros(_BLOCKS * 4096, np.uint8),
-        sign_mantissa=np.zeros(_BLOCKS * _ELEMENTS_PER_BLOCK, np.uint8),
-        luts=luts,
-        gaps=np.zeros(320 * _BLOCKS, np.uint8),
-        output_positions=(np.arange(_BLOCKS + 1) * _ELEMENTS_PER_BLOCK).astype(np.uint32),
-        split_positions=np.zeros(0, np.int64),
-    ).to_mx(name="regpressure-probe")
+    """The decoder's warm-up group: seven blocks, every input bound in ``device`` memory."""
+    return md._warmup_group()
 
 
 def capture_msl(group: MxGroup, *, force_direct: bool) -> str:

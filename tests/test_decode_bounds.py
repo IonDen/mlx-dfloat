@@ -28,7 +28,7 @@ def _run(mode):
         check=False,
     )
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() == "ok", proc.stdout
+    assert proc.stdout.strip() == "ok", f"stdout: {proc.stdout!r}\nstderr: {proc.stderr}"
     return proc.stderr
 
 
@@ -39,10 +39,13 @@ def test_validator_reports_the_positive_control():
 
 def test_validator_reports_our_unguarded_gap_mutant():
     # Bug caught: our own over-read being invisible (buffer slack), which would make the clean run prove nothing.
-    assert "Invalid" in _run("mutant")
+    # Offset 640 is the two-block fixture's one-byte read past its 640-byte `gaps`; the warm-up's own dispatch
+    # over-reads at offset 2240 (7 blocks x 320 bytes), so it cannot satisfy this assertion.
+    assert "at offset 640" in _run("mutant")
 
 
 def test_our_kernel_is_clean_under_validation():
-    # Bug caught: any out-of-bounds load or store in the real kernel on either path (the gap guard removed, a
-    # lookahead byte read past `encoded`, a staged copy past `out`).
+    # No out-of-bounds access reported on these small groups (every checked buffer is allocated at its exact
+    # size); larger groups' page slack is not covered. Bug caught: the gap guard removed, a lookahead byte read
+    # past `encoded`, a staged copy past `out`, on either path.
     assert "Invalid" not in _run("kernel")

@@ -13,7 +13,8 @@ Usage (from the repository root of a synced checkout):
         [--df11-revision SHA] [--bf16-revision SHA] [--groups a,b] [--ignore-original NAME ...] \
         [--decoder {reference,metal}] [--rate-from BENCH_JSON]
 ``uv run python scripts/verify_checkpoint.py ...`` works too. ``--rate-from`` takes a bench JSON
-whose top-level ``gbps`` sets the per-dispatch guard for ``--decoder metal``.
+whose top-level ``gbps`` sets the per-dispatch guard for ``--decoder metal``; with ``--decoder
+reference`` it is a usage error (exit 2).
 Exit codes: 0 equal and complete, 1 mismatch, 2 error/coverage, 70/71 watchdog abort.
 """
 
@@ -498,6 +499,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-watchdog", action="store_true", help="tests only")
     args = parser.parse_args(argv)
     watchdog = None
+    if args.rate_from is not None and args.decoder != "metal":
+        print(
+            "error: --rate-from needs --decoder metal (the reference decoder has no per-dispatch guard)",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
     try:
         if args.decoder == "metal" and "metal" not in available_backends():
             print("error: --decoder metal: the Metal backend cannot run here", file=sys.stderr)

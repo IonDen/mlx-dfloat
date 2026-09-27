@@ -77,7 +77,7 @@ def test_warmup_failure_becomes_a_backend_error(monkeypatch):
 
 def test_warmup_prefills_its_output_so_an_unwritten_element_cannot_pass(monkeypatch):
     # Bug caught: the warm-up dispatching with init_value=None, so a recycled buffer that already holds the
-    # expected bits (the allocator reuses the 3-element buffer between warm-ups) hides a kernel that skips a write.
+    # expected bits (the allocator reuses the warm-up buffer between warm-ups) hides a kernel that skips a write.
     monkeypatch.setattr(_metal_decode, "_PIPELINES", {})
     real = _metal_decode._dispatch
     seen = []
@@ -92,19 +92,53 @@ def test_warmup_prefills_its_output_so_an_unwritten_element_cannot_pass(monkeypa
     assert seen == [0, 0]
 
 
-@pytest.mark.parametrize(("force_direct", "status_word"), [(False, 8), (True, 0)])
-def test_warmup_refuses_the_wrong_write_path(monkeypatch, force_direct, status_word):
-    # Bug caught: a staged instantiation silently running direct (or the reverse) passing its warm-up because
-    # only the error bits are checked; the 3-element warm-up group must run staged unless forced direct.
+def _fake_warmup(monkeypatch, status_words):
+    # The warm-up's own expected bits with a chosen status word per block: only the status check can refuse it.
     monkeypatch.setattr(_metal_decode, "_PIPELINES", {})
-    good = mx.array([0x3F00, 0xBF80, 0x407F], dtype=mx.uint16)
+    good = mx.array(_metal_decode._warmup_expected())
     monkeypatch.setattr(
         _metal_decode,
         "_dispatch",
-        lambda *a, **k: (good, mx.array([status_word], dtype=mx.uint32)),
+        lambda *a, **k: (good, mx.array(status_words, dtype=mx.uint32)),
     )
+
+
+N_WARMUP_BLOCKS = 7
+
+
+@pytest.mark.parametrize(
+    ("force_direct", "status_words"),
+    [
+        pytest.param(False, [8] * N_WARMUP_BLOCKS, id="staged-all-direct"),
+        pytest.param(True, [0] * N_WARMUP_BLOCKS, id="direct-all-staged"),
+        pytest.param(False, [0] * (N_WARMUP_BLOCKS - 1) + [8], id="staged-last-block-direct"),
+        pytest.param(True, [8] * (N_WARMUP_BLOCKS - 1) + [0], id="direct-last-block-staged"),
+    ],
+)
+def test_warmup_refuses_the_wrong_write_path(monkeypatch, force_direct, status_words):
+    # Bug caught: a staged instantiation silently running direct (or the reverse) passing its warm-up because
+    # only the error bits, or only the first block's word, are checked. Every warm-up block fits under CAP, so
+    # every block must run staged unless forced direct.
+    _fake_warmup(monkeypatch, status_words)
     with pytest.raises(DFloatBackendError, match="path"):
         _metal_decode.ensure_pipeline(force_direct=force_direct)
+
+
+@pytest.mark.parametrize("error_bit", [1, 2, 4])
+def test_warmup_refuses_an_error_bit_on_any_block(monkeypatch, error_bit):
+    # Bug caught: the warm-up reading only status[0], so a block after the first that reports an invalid code, a
+    # count mismatch or a broken chain still passes readiness.
+    _fake_warmup(monkeypatch, [0] * (N_WARMUP_BLOCKS - 1) + [error_bit])
+    with pytest.raises(DFloatBackendError, match="wrong bits"):
+        _metal_decode.ensure_pipeline(force_direct=False)
+
+
+def test_the_real_warmup_passes_on_both_paths(monkeypatch):
+    # Bug caught: a warm-up expectation or path check the real kernel cannot meet (readiness always False).
+    monkeypatch.setattr(_metal_decode, "_PIPELINES", {})
+    _metal_decode.ensure_pipeline(force_direct=True)
+    _metal_decode.ensure_pipeline(force_direct=False)
+    assert _metal_decode._warmup_group().n_launch == N_WARMUP_BLOCKS
 
 
 @pytest.mark.parametrize("force_direct", PATHS)
@@ -179,3 +213,26 @@ def test_metal_equals_reference_on_random_geometric_groups(seed, n, low, ratio):
     for force_direct in (True, False):
         out, _ = metal_bits(arrays, bits, force_direct=force_direct)
         assert np.array_equal(out, bits)
+
+
+def _compiled_kernel_name(group, *, force_direct):
+    import re
+
+    from scripts.regpressure import capture_msl
+
+    return re.search(r"void (custom_kernel_\w+)\(", capture_msl(group, force_direct=force_direct))[
+        1
+    ]
+
+
+@pytest.mark.parametrize("force_direct", PATHS)
+def test_warmup_compiles_the_same_pipeline_a_real_group_uses(force_direct):
+    # MLX names the kernel after its input binding (a `constant`-bound input adds a `c` to the type suffix) and
+    # compiles one pipeline per name. Bug caught: a warm-up group small enough to bind `constant`, so readiness
+    # proves a pipeline no real decode reuses and the production one first compiles at the caller's eval.
+    bits = random_bf16(np.random.default_rng(1), (70_000,), exponent_low=100, exponent_high=130)
+    real = encoder_group(bits).to_mx(name="real")
+    warm = _metal_decode._warmup_group()
+    assert _compiled_kernel_name(warm, force_direct=force_direct) == _compiled_kernel_name(
+        real, force_direct=force_direct
+    )

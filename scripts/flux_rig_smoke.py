@@ -16,8 +16,10 @@ Usage (from the repository root of a synced checkout, ``--group bench``):
         [--model schnell|dev] [--double 1] [--single 1] [--size 256] [--steps 1] \
         [--policy per-block|depth2|none] [--out DIR] [--wall-budget S] [--seed N]
 ``--embeds`` is a safetensors file with ``prompt_embeds`` and ``pooled_prompt_embeds``.
-Exit codes: 0 finite outputs, 1 a non-finite output, 2 an input, format or tool error,
-70/71 watchdog abort (footprint ceiling / wall budget).
+Exit codes: 0 finite outputs, 2 a non-finite output or an input, format or tool error (1 is
+reserved for a real bit mismatch and never used here), 70/71 watchdog abort (footprint ceiling /
+wall budget). The guidance is the step bench's (mflux's 3.5 default; inert for schnell) and is
+recorded in the report.
 """
 
 import argparse
@@ -43,17 +45,18 @@ try:
         load_resident_set,
     )
     from scripts._watchdog import Watchdog, default_ceiling, phys_footprint
+    from scripts.bench_flux_step import GUIDANCE
 
     from mlx_dfloat._memory_caps import install_memory_caps
     from mlx_dfloat.format import open_checkpoint
-except Exception as exc:  # a broken environment is 2, never the non-finite signal (1)
+except Exception as exc:  # a broken environment is a tool error (2)
     print(
         f"error: cannot import the project modules ({exc}); run from a synced checkout",
         file=sys.stderr,
     )
     raise SystemExit(2) from exc
 
-EXIT_OK, EXIT_NONFINITE, EXIT_ERROR = 0, 1, 2
+EXIT_OK, EXIT_ERROR = 0, 2
 LATENT_CHANNELS = 64  # packed FLUX.1 latents: (1, (H/16)*(W/16), 64)
 POOLED_DIM = 768
 T5_DIM = 4096
@@ -82,6 +85,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--wall-budget", type=float, default=900.0, help="seconds before the watchdog aborts"
     )
     return p.parse_args(argv)
+
+
+def verdict(*, finite: bool) -> int:
+    """The exit code for the outputs: 0 when every output is finite, else 2 (1 means a bit mismatch)."""
+    return EXIT_OK if finite else EXIT_ERROR
+
+
+def config_kwargs(args: argparse.Namespace) -> dict[str, int | float]:
+    """The keywords of mflux's ``Config``: at least four scheduler steps, the image side, the bench guidance."""
+    return {
+        "num_inference_steps": max(4, args.steps),
+        "height": args.size,
+        "width": args.size,
+        "guidance": GUIDANCE,
+    }
 
 
 def make_inputs(args: argparse.Namespace) -> tuple[mx.array, mx.array, mx.array]:
@@ -166,13 +184,7 @@ def smoke(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, object]:
     resident = load_resident_set(ckpt, names)
     timings["load_resident_s"] = time.perf_counter() - start
     model_config = ModelConfig.schnell() if args.model == "schnell" else ModelConfig.dev()
-    config = Config(
-        model_config,
-        num_inference_steps=max(4, args.steps),
-        height=args.size,
-        width=args.size,
-        guidance=3.5 if args.model == "dev" else 0.0,
-    )
+    config = Config(model_config, **config_kwargs(args))
     inputs = make_inputs(args)
 
     df11 = DF11Provider(resident, {n: ckpt.groups[n].matrix_names for n in names})
@@ -196,8 +208,9 @@ def smoke(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, object]:
 
     finite = finite_df11 and finite_control
     return {
-        "exit_code": EXIT_OK if finite else EXIT_NONFINITE,
+        "exit_code": verdict(finite=finite),
         "model": args.model,
+        "guidance": GUIDANCE,
         "blocks": names,
         "size": args.size,
         "steps": args.steps,
