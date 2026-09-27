@@ -622,18 +622,20 @@ def test_time_steps_records_the_timed_steps_own_peaks_apart_from_the_lifetime_pe
 
 
 @pytest.mark.parametrize(
-    ("caps", "cache_limit", "want"),
+    ("caps", "want"),
     [
-        ((20, 22), FLUX_CACHE_LIMIT, True),
-        ((0, 22), FLUX_CACHE_LIMIT, False),  # the wired cap failed to install
-        ((20, 0), FLUX_CACHE_LIMIT, False),  # the memory cap failed to install
-        ((0, 0), FLUX_CACHE_LIMIT, False),
-        ((20, 22), FLUX_CACHE_LIMIT + 1, False),  # another cache limit is in force
+        ((20, 22), True),
+        ((0, 22), False),  # the wired cap failed to install
+        ((20, 0), False),  # the memory cap failed to install
+        ((0, 0), False),
+        ((20,), False),  # one cap missing
     ],
 )
-def test_limits_in_force_needs_both_caps_and_the_cache_limit(caps, cache_limit, want):
-    # Bug caught: checking caps[0] alone (a failed memory cap passes), or ignoring the cache limit.
-    assert limits_in_force(caps, cache_limit) is want
+def test_limits_in_force_needs_both_caps(caps, want):
+    # Bug caught: checking caps[0] alone (a failed memory cap passes). The MLX cache limit is not
+    # part of the condition: mlx 0.32.2 has no getter, so a read-back would compare the requested
+    # value with itself.
+    assert limits_in_force(caps) is want
 
 
 def _fake_rig(rng, *, n_double=2, n_single=2):
@@ -915,8 +917,12 @@ def test_time_steps_with_a_tracer_summarises_only_the_timed_steps():
     assert len(tracer.events) == 5
     assert [e["step"] for e in out["trace_events"]] == [2, 3, 4]
     assert [s["n_blocks"] for s in out["trace_steps"]] == [1, 1, 1]
-    for summary, (start, end) in zip(out["trace_steps"], tracer.steps[2:], strict=True):
+    for summary, (start, end), event in zip(
+        out["trace_steps"], tracer.steps[2:], out["trace_events"], strict=True
+    ):
         assert summary["step_s"] == pytest.approx(end - start)
+        assert summary["head_s"] == pytest.approx(event["t_decode_start"] - start)
+        assert summary["head_s"] >= 0  # an off-by-one in the step filter goes negative here
     assert out["trace_medians"].keys() == out["trace_steps"][0].keys()
 
 
@@ -955,11 +961,20 @@ def test_report_pools_the_trace_phases_over_the_paired_rounds():
     assert pooled["control"]["trace"] is None
 
 
-def test_limits_in_force_accepts_the_cache_limit_the_run_asked_for():
-    # Bug caught: a --cache-limit run reporting its limits as not in force (or the default
-    # accepted when another limit was requested).
-    assert limits_in_force((20, 22), 2_500_000_000, expected=2_500_000_000) is True
-    assert limits_in_force((20, 22), FLUX_CACHE_LIMIT, expected=2_500_000_000) is False
+@pytest.mark.parametrize("value", ["-1", "0", "18446744073709551616", "abc"])
+def test_a_cache_limit_that_is_not_a_positive_size_is_a_usage_error(value):
+    # Bug caught: a negative or oversized value reaching mx.set_cache_limit (a TypeError outside
+    # run_one's guard, exit 1, which this project reserves for a real bit mismatch), or 0 silently
+    # turning the buffer cache off.
+    with pytest.raises(SystemExit) as exc:
+        parse_args(
+            [
+                *("--mode", "df11", "--out", "r.json", "--df11", "d", "--embeds", "e"),
+                "--cache-limit",
+                value,
+            ]
+        )
+    assert exc.value.code == 2
 
 
 def test_run_one_sets_and_records_the_requested_cache_limit(tmp_path, restore_cache_limit):
@@ -997,7 +1012,6 @@ def test_run_one_sets_and_records_the_requested_cache_limit(tmp_path, restore_ca
 def test_prefetch_modes_are_df11_modes_under_the_per_block_policy():
     from scripts.bench_flux_step import EXTRA_MODES, PAIRS
 
-    assert EXTRA_MODES == ("df11-prefetch", "df11-prefetch-inline")
     for mode in EXTRA_MODES:
         assert mode_policy(mode) == "per-block"
         assert expected_launches(mode, n_double=19, n_single=38, steps=2) == 114
@@ -1013,20 +1027,27 @@ def test_make_provider_for_prefetch_modes_wraps_the_decoder_with_the_right_strea
     import numpy as np
     from scripts._flux_rig import PrefetchProvider
 
+    from mlx_dfloat.decode import decode_group
+
     ckpt, groups, shapes, _source = _fake_rig(np.random.default_rng(5), n_double=1, n_single=1)
-    calls = []
-    two = make_provider(
-        "df11-prefetch", ckpt, groups, shapes, decode=_counting_reference_decode(calls)
-    )
-    one = make_provider(
-        "df11-prefetch-inline", ckpt, groups, shapes, decode=_counting_reference_decode(calls)
-    )
+    streams = []
+
+    def recording_decode(group):
+        streams.append(mx.default_stream(mx.gpu))  # the stream a kernel launched here would use
+        return decode_group(group, backend="reference")
+
+    two = make_provider("df11-prefetch", ckpt, groups, shapes, decode=recording_decode)
+    one = make_provider("df11-prefetch-inline", ckpt, groups, shapes, decode=recording_decode)
     assert isinstance(two, PrefetchProvider)
     assert isinstance(one, PrefetchProvider)
     assert two.stream is not None
     assert two.stream != mx.default_stream(mx.gpu)
     assert one.stream is None
-    assert calls == []  # nothing decoded before the first step
+    assert streams == []  # nothing decoded before the first step
+    two.weights_for("transformer_blocks.0", shapes["transformer_blocks.0"])
+    assert streams == [two.stream, two.stream]  # the cold decode and the look-ahead
+    one.weights_for("transformer_blocks.0", shapes["transformer_blocks.0"])
+    assert streams[2:] == [mx.default_stream(mx.gpu)] * 2
 
 
 def test_orchestrate_runs_only_the_requested_modes(tmp_path, monkeypatch):
@@ -1036,10 +1057,12 @@ def test_orchestrate_runs_only_the_requested_modes(tmp_path, monkeypatch):
     import scripts.bench_flux_step as bfs
 
     launched = []
+    commands = []
 
     def run(cmd, **kwargs):
         if "scripts.bench_flux_step" in cmd:
             launched.append(cmd[cmd.index("--mode") + 1])
+            commands.append(cmd)
             out = Path(cmd[cmd.index("--out") + 1])
             write_json_atomic(
                 out, {"exit_code": 0, "step_s": [1.0], "mode": launched[-1], "round": 1}
@@ -1053,9 +1076,81 @@ def test_orchestrate_runs_only_the_requested_modes(tmp_path, monkeypatch):
             *("--orchestrate", "--rounds", "1", "--out-dir", str(tmp_path / "out")),
             *("--df11", "c", "--embeds", "e.safetensors"),
             *("--modes", "df11-prefetch", "control"),
+            *("--trace", "--cache-limit", "2500000000"),
         ]
     )
     assert code == 0
     assert launched == ["df11-prefetch", "control"]
+    for cmd in commands:  # the children run what the orchestration asked for
+        assert cmd[-1] == "--trace"
+        assert cmd[cmd.index("--cache-limit") + 1] == "2500000000"
     rep = json.loads((tmp_path / "out" / "report.json").read_text())
     assert rep["overhead"] == {"prefetch": pytest.approx(0.0)}
+
+
+def test_modes_without_orchestrate_is_a_usage_error():
+    # Bug caught: `--modes` silently ignored on a single-mode run.
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                *("--mode", "df11", "--out", "r.json", "--df11", "d", "--embeds", "e"),
+                "--modes",
+                "df11",
+            ]
+        )
+
+
+def test_main_runs_one_mode_at_the_requested_cache_limit(tmp_path, monkeypatch):
+    # Bug caught: main dropping the kwarg, so a --cache-limit child runs at the rig's default
+    # while its key and limits still claim the requested one.
+    import scripts.bench_flux_step as bfs
+
+    seen = {}
+
+    def run_one(args, **kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(bfs, "run_one", run_one)
+    code = bfs.main(
+        [
+            *("--mode", "df11", "--out", str(tmp_path / "r.json"), "--df11", "d", "--embeds", "e"),
+            *("--cache-limit", "2000000000"),
+        ]
+    )
+    assert code == 0
+    assert seen["cache_limit"] == 2_000_000_000
+
+
+def test_current_key_carries_the_cache_limit(tmp_path, monkeypatch):
+    import scripts.bench_flux_step as bfs
+
+    monkeypatch.setattr(bfs, "embeds_metadata", lambda path: {"synthetic": "true"})
+    monkeypatch.setattr(bfs, "source_hash", lambda: "abc")
+    args = parse_args(
+        [
+            *("--mode", "df11", "--out", "r.json", "--df11", "d", "--embeds", "e"),
+            *("--cache-limit", "2500000000"),
+        ]
+    )
+    assert bfs.current_key(args)["cache_limit"] == 2_500_000_000
+
+
+def test_report_pools_a_shared_control_over_each_pairs_own_rounds():
+    # Bug caught: control pooled once, over the rounds of whichever pair came last, so the per-block
+    # overhead compared df11 over rounds 1-2 with a control over round 1 only (+40 % here instead of
+    # -6.7 %).
+    results = [
+        {"round": 1, "mode": "df11", "step_s": [1.2]},
+        {"round": 1, "mode": "control", "step_s": [1.0]},
+        {"round": 1, "mode": "df11-prefetch", "step_s": [1.1]},
+        {"round": 2, "mode": "df11", "step_s": [1.6]},
+        {"round": 2, "mode": "control", "step_s": [2.0]},
+    ]
+    out = report(results)
+    assert out["paired_rounds"]["per-block"] == [1, 2]
+    assert out["paired_rounds"]["prefetch"] == [1]
+    assert out["overhead"]["per-block"] == pytest.approx((1.4 - 1.5) / 1.5)
+    assert out["overhead"]["prefetch"] == pytest.approx(0.1)
+    assert out["pooled"]["control"]["n"] == 2  # the per-block pair's rounds
+    assert out["pooled"]["df11-prefetch"]["n"] == 1

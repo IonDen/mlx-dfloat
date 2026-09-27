@@ -469,11 +469,15 @@ def test_seam_refuses_a_provider_dict_that_does_not_match_the_block():
     class Partial:
         launches = 0
         launching = False
+        policies = rig.EVAL_POLICIES
 
         def weights_for(self, block_name, shapes):
             return {k: mx.zeros(v, dtype=mx.bfloat16) for k, v in list(shapes.items())[:-1]}
 
         def verify(self):
+            pass
+
+        def reset(self):
             pass
 
     tf = FakeSeamTransformer(Recorder(), n_double=1, n_single=0)
@@ -496,12 +500,16 @@ class _Launching:
 
     launches = 0
     launching = True
+    policies = rig.EVAL_POLICIES
 
     def weights_for(self, block_name, shapes):
         self.launches += 1
         return {k: mx.zeros(v, dtype=mx.bfloat16) for k, v in shapes.items()}
 
     def verify(self):
+        pass
+
+    def reset(self):
         pass
 
 
@@ -942,15 +950,55 @@ def test_seam_trace_attributes_the_provider_time_to_the_decode_phase():
     mx.eval(tf(*_inputs()))
     (event,) = tracer.events
     assert event.t_decode_end - event.t_decode_start >= 0.009
-    assert event.t_encode_end - event.t_decode_end < 0.009
 
 
-def test_seam_without_a_tracer_records_nothing_and_still_runs():
-    tf = FakeSeamTransformer(Recorder(), n_double=1, n_single=0)
+def test_seam_trace_attributes_the_block_and_the_eval_to_their_own_phases(monkeypatch):
+    # Bug caught: t_encode_end stamped before run() (the graph build would land in eval wait) or
+    # t_eval_end stamped before the policy's eval (the wait would vanish from the trace).
+    import time
+
+    class SlowBlock(FakeDoubleBlock):
+        def __call__(self, **kwargs):
+            time.sleep(0.01)
+            return super().__call__(**kwargs)
+
+    rec = Recorder()
+    tf = FakeSeamTransformer(rec, n_double=1, n_single=0)
+    tf.transformer_blocks = [SlowBlock(rec)]
     shapes = install_placeholders(tf)
-    tf.attach(ResidentProvider(_resident_dicts(shapes)), shapes)
+    real_eval = rig._eval
+    monkeypatch.setattr(rig, "_eval", lambda x: (time.sleep(0.01), real_eval(x)))
+    tracer = rig.Tracer()
+    tf.attach(
+        ResidentProvider(_resident_dicts(shapes)), shapes, eval_policy="per-block", tracer=tracer
+    )
     mx.eval(tf(*_inputs()))
-    assert tf._seam.tracer is None
+    (event,) = tracer.events
+    assert event.t_encode_end - event.t_decode_end >= 0.009
+    assert event.t_eval_end - event.t_encode_end >= 0.009
+
+
+def test_seam_trace_under_depth2_keeps_the_drained_tail_inside_the_step(monkeypatch):
+    # Bug caught: end_step stamped before the depth2 drain of the last block, so its wait would
+    # fall outside the step window.
+    import time
+
+    evals = []
+    real_eval = rig._eval
+    monkeypatch.setattr(rig, "_eval", lambda x: (evals.append(time.perf_counter()), real_eval(x)))
+    tf = FakeSeamTransformer(Recorder(), n_double=2, n_single=1)
+    shapes = install_placeholders(tf)
+    tracer = rig.Tracer()
+    tf.attach(
+        ResidentProvider(_resident_dicts(shapes)), shapes, eval_policy="depth2", tracer=tracer
+    )
+    mx.eval(tf(*_inputs()))
+    assert [e.block for e in tracer.events] == list(shapes)
+    (start, end) = tracer.steps[0]
+    assert len(evals) == 3  # two inside the blocks, one drain after the last block
+    assert evals[-1] > tracer.events[-1].t_eval_end  # the drain came after the last event
+    assert evals[-1] <= end  # and inside the step window
+    assert all(start <= e.t_decode_start for e in tracer.events)
 
 
 def test_summarize_trace_splits_a_step_into_named_seconds():
@@ -1108,3 +1156,50 @@ def test_prefetch_provider_on_a_second_stream_feeds_the_seam_bit_exact_weights()
     for seen, block_name in zip(rec.seen, list(shapes) * 2, strict=True):
         want = source[block_name][f"{block_name}.attn.to_q.weight"]
         assert np.array_equal(np.array(seen.view(mx.uint16)), want)
+
+
+def test_prefetch_provider_is_refused_under_any_policy_but_per_block():
+    # Bug caught: prefetch attached under depth2, where block i-1's weights are still held by its
+    # in-flight command buffers, so three decoded groups sit resident instead of two.
+    _rec, tf, shapes, _source, provider = _prefetch_over(1, 0, np.random.default_rng(27))
+    with pytest.raises(RigError, match="per-block"):
+        tf.attach(provider, shapes, eval_policy="depth2")
+    tf.attach(provider, shapes, eval_policy="per-block")
+    tf.attach(
+        ResidentProvider(_resident_dicts(shapes)), shapes, eval_policy="depth2"
+    )  # others: fine
+
+
+def test_prefetch_provider_refuses_an_unknown_block_with_a_rig_error():
+    _rec, _tf, shapes, _source, provider = _prefetch_over(1, 0, np.random.default_rng(25))
+    with pytest.raises(RigError, match="no such block"):
+        provider.weights_for("transformer_blocks.9", shapes["transformer_blocks.0"])
+
+
+def test_a_step_that_raises_midway_leaves_no_stale_look_ahead():
+    # Bug caught: the look-ahead submitted for block k+1 surviving a failed step, so the next
+    # step's block 0 is refused as out of order.
+    class BoomOnce(FakeDoubleBlock):
+        def __init__(self, recorder):
+            super().__init__(recorder)
+            self.boomed = False
+
+        def __call__(self, **kwargs):
+            if not self.boomed:
+                self.boomed = True
+                raise RuntimeError("boom")
+            return super().__call__(**kwargs)
+
+    rec = Recorder()
+    tf = FakeSeamTransformer(rec, n_double=2, n_single=0)
+    tf.transformer_blocks[1] = BoomOnce(rec)
+    shapes = install_placeholders(tf)
+    groups, names, _source = _df11_groups(shapes, np.random.default_rng(26))
+    provider = rig.PrefetchProvider(
+        DF11Provider(groups, names, decode=lambda g: decode_group(g, backend="reference")), shapes
+    )
+    tf.attach(provider, shapes, eval_policy="per-block")
+    with pytest.raises(RuntimeError, match="boom"):
+        tf(*_inputs())
+    mx.eval(tf(*_inputs()))  # block 0 is served again, not refused
+    tf.verify_step()

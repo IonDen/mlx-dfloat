@@ -332,16 +332,24 @@ def test_success_summary_records_partial_and_selected_groups(tmp_path, pair):
         "scripts/_watchdog.py",
         "scripts/verify_checkpoint.py",
         "scripts/_bench_common.py",
+        "scripts/_flux_rig.py",
+        "scripts/bench_flux_step.py",
     ],
 )
 def test_source_hash_covers_package_watchdog_and_script(tmp_path, monkeypatch, edited):
     # Bug caught: hashing only src/mlx_dfloat/*.py (top level) lets an edit to a subpackage,
-    # verify_checkpoint.py or _watchdog.py go unnoticed, so a stale resumed result is reused.
-    # Runs on a throwaway copy: the tracked files are never touched.
+    # verify_checkpoint.py, _watchdog.py or the FLUX rig / step bench go unnoticed, so a stale
+    # resumed result is reused. Runs on a throwaway copy: the tracked files are never touched.
     for rel in ["src/mlx_dfloat/format.py", *[e for e in [edited] if e.endswith(".py")]]:
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / rel).write_text(f"# {rel}\n")
-    for rel in ["scripts/_watchdog.py", "scripts/verify_checkpoint.py", "scripts/_bench_common.py"]:
+    for rel in [
+        "scripts/_watchdog.py",
+        "scripts/verify_checkpoint.py",
+        "scripts/_bench_common.py",
+        "scripts/_flux_rig.py",
+        "scripts/bench_flux_step.py",
+    ]:
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / rel).write_text(f"# {rel}\n")
     monkeypatch.setattr(vc, "_SRC", tmp_path / "src" / "mlx_dfloat")

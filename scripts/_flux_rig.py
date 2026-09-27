@@ -66,20 +66,22 @@ DROPPED_EXTRAS: frozenset[str] = frozenset({"norm_out.linear.bias"})
 PLACEHOLDER = mx.zeros((0,), dtype=mx.bfloat16)
 MAX_BUILD_ACTIVE_BYTES = 2 * 1024**3
 # MLX cache limit every FLUX rig process sets before building (the smoke and the step bench share it).
-# At this limit the decode outputs (679 MB double, 283 MB single) miss the exact-size buffer cache at
-# every size switch; the misses cost 1.29 s per 1024² step (measured 2026-09-27) and a 2.5e9 limit
-# removes them for +1 GiB of footprint. The bench keeps 1.4e9 as the recorded default so runs stay
-# comparable with the 0003 numbers; `--cache-limit` sets another.
+# At this limit the activation buffers each block frees already fill the cache, so a freed decode
+# output (679 MB double, 283 MB single) is released to the OS instead of kept, and the next block's
+# is allocated fresh: about 30 ms per double and 14 ms per single block, 1.29 s per 1024² step
+# (measured 2026-09-27). A 2.5e9 limit leaves room for a decoded buffer next to the activations and
+# removes that cost for +1 GiB of footprint. The bench keeps 1.4e9 as the recorded default so new
+# runs stay comparable with the earlier record; `--cache-limit` sets another.
 FLUX_CACHE_LIMIT = int(1.4e9)
 EvalPolicy = Literal["per-block", "depth2", "none"]
 # "per-block": mx.eval each block's output. "depth2": async_eval it, then eval the previous block's.
 # The depth2 look-ahead is bounded by MLX's command-buffer window: the encoding thread blocks once
 # enough committed buffers are in flight, so async_eval(out_i) returns only near the end of block i,
 # and the next block's decode never overlaps block i's matmuls on the same in-order stream. What it
-# hides is host-side work done while the GPU still runs block i, above all the allocation of decode
-# outputs that miss the buffer cache (measured: 0.80 s per FLUX.1-schnell step on the DF11 side,
-# 0.03 s on the control side, at the 1.4 GB limit); it is not a decode/compute overlap. A cache
-# limit that holds one buffer of each decoded size removes that cost for both policies.
+# hides is host-side work done while the GPU still runs block i, above all the fresh allocation of
+# a decode output the full buffer cache did not keep (measured: 0.80 s per FLUX.1-schnell step on
+# the DF11 side, 0.03 s on the control side, at the 1.4 GB limit); it is not a decode/compute
+# overlap. A cache limit with room for a decoded buffer removes that cost for both policies.
 # "none": no evaluation inside the step; for ReuseProvider (the
 # control-noeval run) only, since a launching provider would keep every decoded group alive until
 # the final eval (~24 GB on FLUX.1).
@@ -220,6 +222,7 @@ class WeightProvider(Protocol):
 
     launches: int
     launching: bool
+    policies: tuple[str, ...]  # the eval policies the provider may run under
 
     def weights_for(self, block_name: str, shapes: BlockShapes) -> dict[str, mx.array]:
         """Weights for ``block_name``; ``shapes`` is that block's entry from ``install_placeholders``."""
@@ -227,6 +230,10 @@ class WeightProvider(Protocol):
 
     def verify(self) -> None:
         """Check what ``weights_for`` deferred (the decode status words); call it after the step's eval."""
+        ...
+
+    def reset(self) -> None:
+        """Drop any per-step state (a look-ahead) after a step that raised."""
         ...
 
 
@@ -247,6 +254,7 @@ class DF11Provider:
     """
 
     launching = True
+    policies = EVAL_POLICIES
 
     def __init__(
         self,
@@ -274,6 +282,9 @@ class DF11Provider:
         pending, self.pending = self.pending, []
         for block_name, status in pending:
             check_status(status, name=block_name)
+
+    def reset(self) -> None:
+        """No per-step state."""
 
     def weights_for(self, block_name: str, shapes: BlockShapes) -> dict[str, mx.array]:
         """Decode the block's group and cut it into ``(out, in)`` bf16 views (no copies, no host read).
@@ -312,12 +323,17 @@ class PrefetchProvider:
     next step's first block is ready as well. ``stream`` is where the look-ahead decode is
     submitted: a second GPU stream (``mx.new_stream(mx.gpu)``), so the kernel may overlap the
     current block's compute, or None for the default stream, where the look-ahead can only hide
-    host work. Each look-ahead is submitted with ``mx.async_eval``; MLX orders the streams. One
-    decoded group beyond the current block stays resident. ``launches`` counts the steady-state
-    decodes (one per block per step); the single cold inline decode is ``cold_launches``.
+    host work. Each look-ahead is submitted with ``mx.async_eval``; MLX orders the streams (the
+    block's matmuls wait on the decode's event on the GPU, not on the host). The look-ahead is
+    submitted at the top of the block, after the previous block's per-block eval returned, so its
+    output allocation runs while the GPU is idle; under the per-block policy exactly one decoded
+    group beyond the current block stays resident, which is why ``policies`` allows no other
+    (depth-2 would hold three). ``launches`` counts the steady-state decodes (one per block per
+    step); the single cold inline decode is ``cold_launches``.
     """
 
     launching = True
+    policies = ("per-block",)
 
     def __init__(
         self, inner: DF11Provider, shapes: Shapes, *, stream: mx.Stream | None = None
@@ -341,6 +357,10 @@ class PrefetchProvider:
         """Read every pending status word (the current step's and the look-ahead's)."""
         self._inner.verify()
 
+    def reset(self) -> None:
+        """Drop the look-ahead (after a step that raised), so the next step starts cold again."""
+        self._ready = None
+
     def _submit(self, block_name: str) -> dict[str, mx.array]:
         shapes = self._shapes[block_name]
         if self.stream is None:
@@ -348,17 +368,21 @@ class PrefetchProvider:
         else:
             with mx.stream(self.stream):
                 weights = self._inner.weights_for(block_name, shapes)
-        mx.async_eval(*weights.values())
+        _async_eval(*weights.values())
         return weights
 
     def weights_for(self, block_name: str, shapes: BlockShapes) -> dict[str, mx.array]:
         """The weights submitted for ``block_name`` earlier, then submit the next block's.
 
         Raises:
-            RigError: ``block_name`` is not the block the look-ahead was submitted for (blocks
-                must be requested in the order of ``shapes``), or its shapes differ.
+            RigError: ``block_name`` is not a block of the step, or not the one the look-ahead
+                was submitted for (blocks must be requested in the order of ``shapes``), or its
+                shapes differ.
         """
-        if shapes.keys() != self._shapes[block_name].keys():
+        expected = self._shapes.get(block_name)
+        if expected is None:
+            raise RigError(f"{block_name}: no such block in the prefetch order")
+        if shapes.keys() != expected.keys():
             raise RigError(f"{block_name}: shapes differ from the ones the prefetch was built for")
         if self._ready is None:
             self.cold_launches += 1
@@ -383,6 +407,7 @@ class ReuseProvider:
     """
 
     launching = False
+    policies = EVAL_POLICIES
 
     def __init__(self, double: Mapping[str, mx.array], single: Mapping[str, mx.array]) -> None:
         """Keep the two dicts; they are handed back as-is."""
@@ -391,6 +416,9 @@ class ReuseProvider:
 
     def verify(self) -> None:
         """Nothing deferred: no decode happened."""
+
+    def reset(self) -> None:
+        """No per-step state."""
 
     def weights_for(self, block_name: str, shapes: BlockShapes) -> dict[str, mx.array]:
         """The double or single dict, by the block's kind.
@@ -413,6 +441,7 @@ class ResidentProvider:
     """
 
     launching = False
+    policies = EVAL_POLICIES
 
     def __init__(self, per_block: Mapping[str, Mapping[str, mx.array]]) -> None:
         """Keep the per-block dicts."""
@@ -421,6 +450,9 @@ class ResidentProvider:
 
     def verify(self) -> None:
         """Nothing deferred: no decode happened."""
+
+    def reset(self) -> None:
+        """No per-step state."""
 
     def weights_for(self, block_name: str, shapes: BlockShapes) -> dict[str, mx.array]:
         """The block's resident dict.
@@ -597,6 +629,11 @@ class SeamMixin:
         """
         if eval_policy not in EVAL_POLICIES:
             raise RigError(f"unknown eval policy {eval_policy!r}; choose from {EVAL_POLICIES}")
+        if eval_policy not in provider.policies:
+            raise RigError(
+                f"{type(provider).__name__} runs only under {provider.policies}, not "
+                f"{eval_policy!r}"
+            )
         if (
             eval_policy == "none"
             and provider.launching
@@ -635,6 +672,9 @@ class SeamMixin:
             if state.tracer is not None:
                 state.tracer.end_step()
             return out
+        except BaseException:
+            state.provider.reset()
+            raise
         finally:
             state.prev = None
 
