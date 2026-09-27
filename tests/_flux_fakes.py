@@ -5,6 +5,8 @@ The fake transformer mirrors mflux 0.20.0's ``Transformer`` hooks exactly (keywo
 mflux will drive it. No test here imports mflux.
 """
 
+from typing import Any
+
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
@@ -13,6 +15,7 @@ from tests._df11_fixtures import random_bf16
 
 from mlx_dfloat.integrate.names import StaticNameMap
 from mlx_dfloat.integrate.placeholders import get_attr_path
+from mlx_dfloat.mflux.flux1.transformer import SeamMixin
 
 D, FF = 4, 8  # hidden width and feed-forward width of the fakes
 
@@ -194,6 +197,7 @@ class FakeTransformer(nn.Module):
         text_embeddings,
         image_rotary_embeddings,
         controlnet_block_samples,
+        **kwargs: Any,
     ):
         return block(
             hidden_states=hidden_states,
@@ -211,12 +215,17 @@ class FakeTransformer(nn.Module):
         text_embeddings,
         image_rotary_embeddings,
         controlnet_single_block_samples,
+        **kwargs: Any,
     ):
         return block(
             hidden_states=hidden_states,
             text_embeddings=text_embeddings,
             rotary_embeddings=image_rotary_embeddings,
         )
+
+
+class FakeSeamTransformer(SeamMixin, FakeTransformer):
+    """What `seam_transformer_class()` builds over mflux, composed over the fake instead."""
 
 
 def inputs():
