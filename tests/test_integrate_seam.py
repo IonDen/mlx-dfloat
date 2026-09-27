@@ -291,6 +291,29 @@ def test_verify_in_call_reads_the_status_words_before_the_call_returns():
     assert provider.pending == []
 
 
+@pytest.mark.metal
+def test_df11_provider_with_the_metal_backend_feeds_the_seam_bit_exact_weights():
+    # Bug caught: a Metal decode whose lazy views the seam mishandles (evaluated after the placeholder
+    # is restored, or cut at the wrong split), or a status word the step never checks; the
+    # reference-backed tests above cannot see either, since only this path launches the kernel
+    # through the seam.
+    rec = Recorder()
+    tf = FakeSeamTransformer(rec, n_double=2, n_single=1)
+    shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
+    groups, names, source = df11_groups(shapes, np.random.default_rng(11))
+    provider = DF11Provider(groups, names, FLUX_TABLE)  # default decode: the Metal backend
+    tf.attach(provider, shapes, eval_policy="per-block")
+    mx.eval(tf(*inputs()))
+    tf.verify_step()
+    assert provider.launches == 3
+    assert provider.pending == []
+    for seen, block_name in zip(rec.seen, shapes, strict=True):
+        want = source[block_name][f"{block_name}.attn.to_q.weight"]
+        assert seen.shape == want.shape
+        assert np.array_equal(np.array(seen.view(mx.uint16)), want)
+    assert all(w.size == 0 for w in all_block_weights(tf))
+
+
 def test_hooks_forward_unknown_keywords_to_mflux():
     # Bug caught: a keyword mflux adds to its per-block hooks raising TypeError in the seam.
     tf = FakeSeamTransformer(Recorder(), n_double=1, n_single=0)
