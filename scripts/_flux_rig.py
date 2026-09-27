@@ -298,6 +298,77 @@ class DF11Provider:
         return weights
 
 
+class PrefetchProvider:
+    """Decodes block i+1 while block i runs: ``DF11Provider`` with one group of look-ahead.
+
+    ``shapes`` fixes the step's block order (its keys); the last block prefetches the first, so the
+    next step's first block is ready as well. ``stream`` is where the look-ahead decode is
+    submitted: a second GPU stream (``mx.new_stream(mx.gpu)``), so the kernel may overlap the
+    current block's compute, or None for the default stream, where the look-ahead can only hide
+    host work. Each look-ahead is submitted with ``mx.async_eval``; MLX orders the streams. One
+    decoded group beyond the current block stays resident. ``launches`` counts the steady-state
+    decodes (one per block per step); the single cold inline decode is ``cold_launches``.
+    """
+
+    launching = True
+
+    def __init__(
+        self, inner: DF11Provider, shapes: Shapes, *, stream: mx.Stream | None = None
+    ) -> None:
+        self._inner = inner
+        self._shapes = shapes
+        self._order = list(shapes)
+        self.stream = stream
+        self.cold_launches = 0
+        self._ready: tuple[str, dict[str, mx.array]] | None = None
+
+    @property
+    def launches(self) -> int:
+        return self._inner.launches - self.cold_launches
+
+    @property
+    def pending(self) -> list[tuple[str, mx.array]]:
+        return self._inner.pending
+
+    def verify(self) -> None:
+        """Read every pending status word (the current step's and the look-ahead's)."""
+        self._inner.verify()
+
+    def _submit(self, block_name: str) -> dict[str, mx.array]:
+        shapes = self._shapes[block_name]
+        if self.stream is None:
+            weights = self._inner.weights_for(block_name, shapes)
+        else:
+            with mx.stream(self.stream):
+                weights = self._inner.weights_for(block_name, shapes)
+        mx.async_eval(*weights.values())
+        return weights
+
+    def weights_for(self, block_name: str, shapes: BlockShapes) -> dict[str, mx.array]:
+        """The weights submitted for ``block_name`` earlier, then submit the next block's.
+
+        Raises:
+            RigError: ``block_name`` is not the block the look-ahead was submitted for (blocks
+                must be requested in the order of ``shapes``), or its shapes differ.
+        """
+        if shapes.keys() != self._shapes[block_name].keys():
+            raise RigError(f"{block_name}: shapes differ from the ones the prefetch was built for")
+        if self._ready is None:
+            self.cold_launches += 1
+            weights = self._submit(block_name)
+        else:
+            ready_name, weights = self._ready
+            if ready_name != block_name:
+                raise RigError(
+                    f"{block_name} requested out of order; expected {ready_name} (the prefetch "
+                    "follows the block order)"
+                )
+        self._ready = None
+        nxt = self._order[(self._order.index(block_name) + 1) % len(self._order)]
+        self._ready = (nxt, self._submit(nxt))
+        return weights
+
+
 class ReuseProvider:
     """One pre-decoded double-block dict and one single-block dict, returned for every block.
 
@@ -793,6 +864,7 @@ __all__ = [
     "BlockEvent",
     "DF11Provider",
     "EvalPolicy",
+    "PrefetchProvider",
     "ResidentProvider",
     "ReuseProvider",
     "RigError",

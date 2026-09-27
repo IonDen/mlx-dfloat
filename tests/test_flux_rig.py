@@ -1008,3 +1008,103 @@ def test_summarize_trace_refuses_events_from_more_than_one_step():
     ]
     with pytest.raises(RigError, match="one step"):
         rig.summarize_trace(events, step=(0.0, 3.0))
+
+
+# --- prefetch -------------------------------------------------------------------------------------
+
+
+def _prefetch_over(n_double, n_single, rng, *, decode=None, stream=None):
+    rec = Recorder()
+    tf = FakeSeamTransformer(rec, n_double=n_double, n_single=n_single)
+    shapes = install_placeholders(tf)
+    groups, names, source = _df11_groups(shapes, rng)
+    inner = DF11Provider(groups, names, decode=decode)
+    provider = rig.PrefetchProvider(inner, shapes, stream=stream)
+    tf.attach(provider, shapes, eval_policy="per-block")
+    return rec, tf, shapes, source, provider
+
+
+def test_prefetch_provider_decodes_the_next_block_one_ahead_and_cycles_to_the_first():
+    # Bug caught: the block decoded when it is asked for (no look-ahead), the wrong next block, the
+    # last block not prefetching the next step's first, or the cold inline decode counted as a
+    # steady-state launch (the bench's launches-per-step parity check would then refuse every run).
+    calls = []
+
+    def counting_decode(group: MxGroup):
+        calls.append(group.name)
+        return decode_group(group, backend="reference")
+
+    rec, tf, shapes, source, provider = _prefetch_over(
+        2, 1, np.random.default_rng(21), decode=counting_decode
+    )
+    order = list(shapes)
+    assert provider.launching is True
+    mx.eval(tf(*_inputs()))
+    tf.verify_step()
+    assert calls == [order[0], order[1], order[2], order[0]]
+    assert provider.cold_launches == 1
+    assert provider.launches == 3
+    mx.eval(tf(*_inputs()))
+    tf.verify_step()
+    assert calls[4:] == [order[1], order[2], order[0]]
+    assert provider.launches == 6
+    assert provider.pending == []
+    for seen, block_name in zip(rec.seen, order * 2, strict=True):
+        want = source[block_name][f"{block_name}.attn.to_q.weight"]
+        assert seen.dtype == mx.bfloat16
+        assert np.array_equal(np.array(seen.view(mx.uint16)), want)
+    assert all(w.size == 0 for w in _all_block_weights(tf))
+
+
+def test_prefetch_provider_refuses_a_block_out_of_order():
+    # Bug caught: a misordered request silently served by an inline decode (the prefetched group
+    # would leak and the measurement would not be a prefetch).
+    _rec, _tf, shapes, _source, provider = _prefetch_over(2, 0, np.random.default_rng(22))
+    provider.weights_for("transformer_blocks.0", shapes["transformer_blocks.0"])
+    with pytest.raises(RigError, match=r"transformer_blocks\.0 .* expected transformer_blocks\.1"):
+        provider.weights_for("transformer_blocks.0", shapes["transformer_blocks.0"])
+
+
+def test_prefetch_provider_defers_the_status_words_to_verify():
+    # Bug caught: the prefetch reading a status word (a host sync inside the step).
+    class Unread:
+        def __array__(self, *args, **kwargs):
+            raise AssertionError("status was read")
+
+    _rec, tf, _shapes, _source, provider = _prefetch_over(
+        1,
+        1,
+        np.random.default_rng(23),
+        decode=lambda g: dataclasses.replace(decode_group(g, backend="reference"), status=Unread()),
+    )
+    mx.eval(tf(*_inputs()))
+    assert [name for name, _s in provider.pending] == [
+        "transformer_blocks.0",
+        "single_transformer_blocks.0",
+        "transformer_blocks.0",
+    ]
+    with pytest.raises(AssertionError, match="status was read"):
+        tf.verify_step()
+
+
+@pytest.mark.metal
+def test_prefetch_provider_on_a_second_stream_feeds_the_seam_bit_exact_weights():
+    # Bug caught: a decode launched on another GPU stream whose result the block consumes before
+    # it is complete (MLX must order the two streams), or views cut on the wrong stream.
+    from functools import partial
+
+    rec, tf, shapes, source, provider = _prefetch_over(
+        2,
+        1,
+        np.random.default_rng(24),
+        decode=partial(decode_group, backend="metal"),
+        stream=mx.new_stream(mx.gpu),
+    )
+    mx.eval(tf(*_inputs()))
+    tf.verify_step()
+    mx.eval(tf(*_inputs()))
+    tf.verify_step()
+    assert provider.launches == 6
+    for seen, block_name in zip(rec.seen, list(shapes) * 2, strict=True):
+        want = source[block_name][f"{block_name}.attn.to_q.weight"]
+        assert np.array_equal(np.array(seen.view(mx.uint16)), want)

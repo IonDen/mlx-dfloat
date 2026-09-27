@@ -353,7 +353,13 @@ def test_report_pools_only_rounds_where_both_modes_of_the_pair_completed():
     assert out["pooled"]["df11"]["median"] == pytest.approx(1.35)
     assert out["pooled"]["df11"]["verify_median_s"] == pytest.approx(0.025)
     assert out["overhead"]["per-block"] == pytest.approx(0.35)
-    assert out["paired_rounds"] == {"per-block": [1, 2], "depth2": [1], "eval-policy": [1]}
+    assert out["paired_rounds"] == {
+        "per-block": [1, 2],
+        "depth2": [1],
+        "prefetch": [],
+        "prefetch-inline": [],
+        "eval-policy": [1],
+    }
 
 
 def test_report_of_a_stopped_orchestration_suppresses_the_pooled_overhead():
@@ -983,3 +989,73 @@ def test_run_one_sets_and_records_the_requested_cache_limit(tmp_path, restore_ca
     assert seen["limit"] == 2_000_000_000
     assert written["cache_limit_bytes"] == 2_000_000_000
     assert written["limits"] is True
+
+
+# --- prefetch modes -------------------------------------------------------------------------------
+
+
+def test_prefetch_modes_are_df11_modes_under_the_per_block_policy():
+    from scripts.bench_flux_step import EXTRA_MODES, PAIRS
+
+    assert EXTRA_MODES == ("df11-prefetch", "df11-prefetch-inline")
+    for mode in EXTRA_MODES:
+        assert mode_policy(mode) == "per-block"
+        assert expected_launches(mode, n_double=19, n_single=38, steps=2) == 114
+    assert ("prefetch", "df11-prefetch", "control") in PAIRS
+    assert ("prefetch-inline", "df11-prefetch-inline", "control") in PAIRS
+    assert not set(EXTRA_MODES) & set(MODES)  # the verdict recipe stays the five modes
+
+
+def test_make_provider_for_prefetch_modes_wraps_the_decoder_with_the_right_stream():
+    # Bug caught: the second-stream mode decoding on the default stream (the A/B would compare two
+    # identical runs), or the inline mode given a new stream.
+    import mlx.core as mx
+    import numpy as np
+    from scripts._flux_rig import PrefetchProvider
+
+    ckpt, groups, shapes, _source = _fake_rig(np.random.default_rng(5), n_double=1, n_single=1)
+    calls = []
+    two = make_provider(
+        "df11-prefetch", ckpt, groups, shapes, decode=_counting_reference_decode(calls)
+    )
+    one = make_provider(
+        "df11-prefetch-inline", ckpt, groups, shapes, decode=_counting_reference_decode(calls)
+    )
+    assert isinstance(two, PrefetchProvider)
+    assert isinstance(one, PrefetchProvider)
+    assert two.stream is not None
+    assert two.stream != mx.default_stream(mx.gpu)
+    assert one.stream is None
+    assert calls == []  # nothing decoded before the first step
+
+
+def test_orchestrate_runs_only_the_requested_modes(tmp_path, monkeypatch):
+    # Bug caught: --modes ignored (the prefetch experiment would run the five-mode recipe).
+    from types import SimpleNamespace
+
+    import scripts.bench_flux_step as bfs
+
+    launched = []
+
+    def run(cmd, **kwargs):
+        if "scripts.bench_flux_step" in cmd:
+            launched.append(cmd[cmd.index("--mode") + 1])
+            out = Path(cmd[cmd.index("--out") + 1])
+            write_json_atomic(
+                out, {"exit_code": 0, "step_s": [1.0], "mode": launched[-1], "round": 1}
+            )
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(bfs, "current_key", lambda args: {"model": "schnell"})
+    monkeypatch.setattr(bfs.subprocess, "run", run)
+    code = bfs.main(
+        [
+            *("--orchestrate", "--rounds", "1", "--out-dir", str(tmp_path / "out")),
+            *("--df11", "c", "--embeds", "e.safetensors"),
+            *("--modes", "df11-prefetch", "control"),
+        ]
+    )
+    assert code == 0
+    assert launched == ["df11-prefetch", "control"]
+    rep = json.loads((tmp_path / "out" / "report.json").read_text())
+    assert rep["overhead"] == {"prefetch": pytest.approx(0.0)}

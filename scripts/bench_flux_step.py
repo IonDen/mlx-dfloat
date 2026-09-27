@@ -81,6 +81,7 @@ try:
         FLUX_CACHE_LIMIT,
         SINGLE_PREFIX,
         DF11Provider,
+        PrefetchProvider,
         ReuseProvider,
         Tracer,
         WeightProvider,
@@ -105,17 +106,24 @@ EXIT_OK, EXIT_ERROR = 0, 2
 # One round runs the modes in this order: each df11 mode right before its control, so a drift in
 # machine state lands on both sides of a pair.
 MODES: tuple[str, ...] = ("df11", "control", "df11-depth2", "control-depth2", "control-noeval")
+# Experiment modes, run only when ``--modes`` names them: the look-ahead decode of the next block,
+# on a second GPU stream (``df11-prefetch``) or on the default one (``df11-prefetch-inline``).
+EXTRA_MODES: tuple[str, ...] = ("df11-prefetch", "df11-prefetch-inline")
 _POLICIES = {
     "df11": "per-block",
     "control": "per-block",
     "df11-depth2": "depth2",
     "control-depth2": "depth2",
     "control-noeval": "none",
+    "df11-prefetch": "per-block",
+    "df11-prefetch-inline": "per-block",
 }
 # (label, df11 mode, control mode): the paired overheads the report computes.
 PAIRS: tuple[tuple[str, str, str], ...] = (
     ("per-block", "df11", "control"),
     ("depth2", "df11-depth2", "control-depth2"),
+    ("prefetch", "df11-prefetch", "control"),
+    ("prefetch-inline", "df11-prefetch-inline", "control"),
 )
 N_DOUBLE, N_SINGLE = 19, 38  # FLUX.1 at full depth
 T5_DIM, POOLED_DIM = 4096, 768
@@ -150,7 +158,7 @@ def mode_policy(mode: str) -> str:
     try:
         return _POLICIES[mode]
     except KeyError:
-        raise BenchError(f"unknown mode {mode!r}; choose from {MODES}") from None
+        raise BenchError(f"unknown mode {mode!r}; choose from {MODES + EXTRA_MODES}") from None
 
 
 def is_df11(mode: str) -> bool:
@@ -465,7 +473,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--mode", choices=MODES, help="the one mode this process runs")
+    p.add_argument("--mode", choices=MODES + EXTRA_MODES, help="the one mode this process runs")
+    p.add_argument(
+        "--modes",
+        nargs="+",
+        choices=MODES + EXTRA_MODES,
+        default=list(MODES),
+        help="the modes an orchestration runs each round, in this order (default: the five)",
+    )
     p.add_argument("--round", type=int, default=None, help="round number (set by --orchestrate)")
     p.add_argument("--out", type=Path, help="JSON file of this mode's result")
     p.add_argument("--orchestrate", action="store_true", help="run every mode as subprocesses")
@@ -575,6 +590,9 @@ def make_provider(
     decoder = DF11Provider(
         resident, {n: ckpt.groups[n].matrix_names for n in shapes}, decode=decode
     )
+    if mode.startswith("df11-prefetch"):
+        stream = mx.new_stream(mx.gpu) if mode == "df11-prefetch" else None
+        return PrefetchProvider(decoder, shapes, stream=stream)
     if is_df11(mode):
         return decoder
     double_name, single_name = f"{DOUBLE_PREFIX}.0", f"{SINGLE_PREFIX}.0"
@@ -927,7 +945,8 @@ def orchestrate(args: argparse.Namespace) -> int:
     out_dir: Path = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     key = current_key(args)
-    conflicts = resume_conflicts(out_dir, args.rounds, key)
+    modes: list[str] = list(args.modes)
+    conflicts = resume_conflicts(out_dir, args.rounds, key, modes=modes)
     if conflicts:
         for r, m, fields in conflicts:
             print(
@@ -936,9 +955,10 @@ def orchestrate(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
         return EXIT_ERROR
-    todo = pending_runs(out_dir, args.rounds)
+    todo = pending_runs(out_dir, args.rounds, modes=modes)
     print(
-        f"{len(interleaved(args.rounds)) - len(todo)} run(s) already complete, {len(todo)} to run"
+        f"{len(interleaved(args.rounds, modes=modes)) - len(todo)} run(s) already complete, "
+        f"{len(todo)} to run"
     )
     stopped: dict[str, Any] | None = None
     for round_no, mode in todo:
@@ -963,11 +983,12 @@ def orchestrate(args: argparse.Namespace) -> int:
             stopped = {"round": round_no, "mode": mode, "exit_code": code}
             print(f"error: round {round_no} {mode} exited {code}; stopping", file=sys.stderr)
             break
-    results = read_results(out_dir, args.rounds)
+    results = read_results(out_dir, args.rounds, modes=modes)
     rep = report(results, stopped=stopped)
     rep.update(
         {
             "key": key,
+            "modes": modes,
             "rounds_requested": args.rounds,
             "runs_complete": [(r["round"], r["mode"]) for r in results],
             "steps": args.steps,
