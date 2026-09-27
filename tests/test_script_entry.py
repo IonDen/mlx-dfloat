@@ -10,6 +10,8 @@ SCRIPTS = [
     "scripts/verify_checkpoint.py",
     "scripts/verify_remote_group.py",
     "scripts/flux_rig_smoke.py",  # its --help must work without mflux (mflux loads inside smoke())
+    "scripts/bench_flux_step.py",
+    "scripts/encode_prompt.py",
 ]
 
 
