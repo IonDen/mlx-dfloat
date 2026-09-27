@@ -50,6 +50,7 @@ try:
 
     from mlx_dfloat._memory_caps import install_memory_caps
     from mlx_dfloat.format import open_checkpoint
+    from mlx_dfloat.mflux.flux1.names import flux_name_map
 except Exception as exc:  # a broken environment is a tool error (2)
     print(
         f"error: cannot import the project modules ({exc}); run from a synced checkout",
@@ -191,7 +192,7 @@ def smoke(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, object]:
     config = Config(model_config, **config_kwargs(args))
     inputs = make_inputs(args)
 
-    df11 = DF11Provider(resident, {n: ckpt.groups[n].matrix_names for n in names})
+    df11 = DF11Provider(resident, {n: ckpt.groups[n].matrix_names for n in names}, flux_name_map())
     transformer.attach(df11, shapes, eval_policy=args.policy)
     out_df11, df11_times = run_steps(transformer, config, inputs, args.steps)
     launches_df11 = df11.launches

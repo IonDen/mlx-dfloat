@@ -80,6 +80,8 @@ try:
     from scripts.verify_checkpoint import source_hash
 
     from mlx_dfloat.format import DF11Checkpoint, open_checkpoint
+    from mlx_dfloat.integrate.names import NameMap
+    from mlx_dfloat.mflux.flux1.names import flux_name_map
 except Exception as exc:  # a broken environment is a tool error (2)
     print(
         f"error: cannot import the project modules ({exc}); run from a synced checkout",
@@ -326,17 +328,22 @@ def make_provider(
     shapes: Mapping[str, Any],
     *,
     decode: step_bench.Decode | None = None,
+    name_map: NameMap | None = None,
 ) -> WeightProvider:
     """The mode's provider.
 
     ``bf16`` decodes every group once, evaluating block by block (``decode_resident``), and keeps
     the dicts resident; ``control`` and ``df11`` are the step bench's providers. ``decode`` is the
-    Metal backend by default; tests inject a counting reference decode.
+    Metal backend by default; tests inject a counting reference decode. ``name_map`` defaults to
+    the real FLUX.1 map (``flux_name_map()``, which imports mflux); tests inject the fakes' table.
     """
     if mode != "bf16":
-        return step_bench.make_provider(mode, ckpt, resident, shapes, decode=decode)
+        return step_bench.make_provider(
+            mode, ckpt, resident, shapes, decode=decode, name_map=name_map
+        )
+    names = flux_name_map() if name_map is None else name_map
     decoder = DF11Provider(
-        resident, {n: ckpt.groups[n].matrix_names for n in shapes}, decode=decode
+        resident, {n: ckpt.groups[n].matrix_names for n in shapes}, names, decode=decode
     )
     return ResidentProvider(decode_resident(decoder, dict(shapes)))
 
