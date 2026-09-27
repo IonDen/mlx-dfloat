@@ -6,6 +6,7 @@ No test here imports mflux or touches the GPU.
 
 import json
 import sys
+from pathlib import Path
 
 import pytest
 from scripts._bench_common import write_json_atomic
@@ -17,17 +18,22 @@ from scripts.bench_flux_step import (
     expected_launches,
     interleaved,
     mode_policy,
+    parse_args,
     pending_runs,
     read_results,
     report,
     result_is_complete,
+    resume_conflicts,
+    run_key,
     run_path,
 )
 
 # Two rounds of fixture step times (seconds). Medians: r1 df11 1.2, control 1.0, df11-depth2 1.1,
 # control-depth2 1.0, control-noeval 0.9; r2 df11 1.5, control 1.1. Pooled df11 (6 reps) 1.35,
 # pooled control 1.0. `verify_s` is the status validation timed outside the step window: pooled
-# df11 (0.01, 0.02, 0.03, 0.02, 0.04, 0.03) has median 0.025; control-noeval carries none.
+# df11 (0.01, 0.02, 0.03, 0.02, 0.04, 0.03) has median 0.025; control-noeval carries none. Round 3
+# has df11 only (the orchestration stopped before its control): an unpaired round that must stay
+# out of every pooled number.
 FIXTURES = [
     {"round": 1, "mode": "df11", "step_s": [1.2, 1.3, 1.1], "verify_s": [0.01, 0.02, 0.03]},
     {"round": 1, "mode": "control", "step_s": [1.0, 1.0, 1.0], "verify_s": [0.0, 0.0, 0.0]},
@@ -41,7 +47,20 @@ FIXTURES = [
     {"round": 1, "mode": "control-noeval", "step_s": [0.9, 0.9, 0.9]},
     {"round": 2, "mode": "df11", "step_s": [1.5, 1.4, 1.6], "verify_s": [0.02, 0.04, 0.03]},
     {"round": 2, "mode": "control", "step_s": [1.0, 1.2, 1.1], "verify_s": [0.0, 0.0, 0.0]},
+    {"round": 3, "mode": "df11", "step_s": [9.0, 9.0, 9.0], "verify_s": [0.5, 0.5, 0.5]},
 ]
+KEY = run_key(
+    model="schnell",
+    size=1024,
+    steps=5,
+    warmup=2,
+    seed=42,
+    df11=Path("/ckpt"),
+    embeds=Path("/e.safetensors"),
+    embeds_meta={"synthetic": "true", "seed": "42"},
+    source="abc",
+    mlx="0.32.2",
+)
 
 
 # --- modes and policies --------------------------------------------------------------------------
@@ -220,6 +239,7 @@ def test_report_pairs_df11_with_control_per_round():
     assert rounds[1]["depth2"] == pytest.approx(0.1)
     assert rounds[2]["per-block"] == pytest.approx(1.5 / 1.1 - 1)
     assert "depth2" not in rounds[2]  # round 2 has no depth2 pair
+    assert rounds[3] == {}  # round 3 has no pair at all
 
 
 def test_report_pools_every_timed_step_of_a_mode_across_rounds():
@@ -273,10 +293,120 @@ def test_report_without_a_noeval_run_has_no_eval_policy_cost():
     assert out["eval_policy_cost_s"] is None
 
 
-def test_report_from_a_single_mode_has_no_overheads():
+def test_report_from_a_single_mode_has_no_overheads_and_nothing_pooled():
+    # Bug caught: pooling an unpaired mode (its median would stand alone, as if measured).
     out = report([FIXTURES[0]])
     assert out["overhead"] == {}
     assert out["rounds"] == {1: {}}
+    assert out["pooled"] == {}
+
+
+def test_report_pools_only_rounds_where_both_modes_of_the_pair_completed():
+    # Bug caught: round 3's unpaired df11 (9.0 s) pulled into the pool: the df11 median would jump
+    # from 1.35 to 1.45 and the overhead from 0.35 to 0.45.
+    out = report(FIXTURES)
+    assert out["pooled"]["df11"]["n"] == 6
+    assert out["pooled"]["df11"]["median"] == pytest.approx(1.35)
+    assert out["pooled"]["df11"]["verify_median_s"] == pytest.approx(0.025)
+    assert out["overhead"]["per-block"] == pytest.approx(0.35)
+    assert out["paired_rounds"] == {"per-block": [1, 2], "depth2": [1], "eval-policy": [1]}
+
+
+def test_report_of_a_stopped_orchestration_suppresses_the_pooled_overhead():
+    # Bug caught: a stopped run printing a pooled overhead as if the orchestration had finished.
+    stopped = {"round": 3, "mode": "control", "exit_code": 2}
+    out = report(FIXTURES, stopped=stopped)
+    assert out["stopped"] == stopped
+    assert out["overhead"] == {}
+    assert out["eval_policy_cost_s"] is None
+    assert out["rounds"][1]["per-block"] == pytest.approx(0.2)  # the per-round pairs stay
+
+
+def test_report_of_a_finished_orchestration_records_no_stop():
+    assert report(FIXTURES)["stopped"] is None
+
+
+# --- the resume key -----------------------------------------------------------------------------
+
+
+def test_run_key_resolves_the_checkpoint_path_and_carries_every_setting(tmp_path):
+    # Bug caught: a relative --df11 in the key (the same checkpoint reached from another cwd would
+    # read as a mismatch), or a setting left out (a 768 px rerun resuming into 1024 px files).
+    key = run_key(
+        model="dev",
+        size=768,
+        steps=3,
+        warmup=1,
+        seed=7,
+        df11=tmp_path / "ckpt",
+        embeds=tmp_path / "e.safetensors",
+        embeds_meta={"synthetic": "false", "prompt": "a lighthouse"},
+        source="deadbeef",
+        mlx="0.32.2",
+    )
+    assert key == {
+        "model": "dev",
+        "size": 768,
+        "steps": 3,
+        "warmup": 1,
+        "seed": 7,
+        "df11": str((tmp_path / "ckpt").resolve()),
+        "embeds": str(tmp_path / "e.safetensors"),
+        "embeds_meta": {"synthetic": "false", "prompt": "a lighthouse"},
+        "source": "deadbeef",
+        "mlx": "0.32.2",
+    }
+
+
+@pytest.mark.parametrize("field", sorted(KEY))
+def test_a_stored_key_differing_in_one_field_is_a_conflict_naming_that_field(tmp_path, field):
+    # Bug caught: a field missing from the comparison, so a run with other settings (or another
+    # checkpoint, embeddings file, source or mlx) resumes into these files.
+    changed = {**KEY, field: "other" if field != "embeds_meta" else {"synthetic": "false"}}
+    write_json_atomic(
+        run_path(tmp_path, 1, "df11"), {"exit_code": 0, "step_s": [1.0], "key": changed}
+    )
+    assert resume_conflicts(tmp_path, 1, KEY) == [(1, "df11", [field])]
+
+
+def test_a_stored_result_without_a_key_is_a_conflict(tmp_path):
+    # Bug caught: treating a keyless (older) file as matching.
+    write_json_atomic(run_path(tmp_path, 1, "control"), {"exit_code": 0, "step_s": [1.0]})
+    assert resume_conflicts(tmp_path, 1, KEY) == [(1, "control", ["key"])]
+
+
+def test_a_failed_result_with_the_same_key_is_no_conflict_and_is_rerun(tmp_path):
+    # Bug caught: a key check that skips incomplete files (they would be overwritten unchecked), or
+    # a resume that skips a failed run because its key matches.
+    write_json_atomic(run_path(tmp_path, 1, "df11"), {"exit_code": 2, "error": "boom", "key": KEY})
+    write_json_atomic(
+        run_path(tmp_path, 1, "control"), {"exit_code": 0, "step_s": [1.0], "key": KEY}
+    )
+    assert resume_conflicts(tmp_path, 1, KEY) == []
+    assert pending_runs(tmp_path, 1)[:2] == [(1, "df11"), (1, "df11-depth2")]
+
+
+def test_missing_files_are_no_conflict(tmp_path):
+    assert resume_conflicts(tmp_path, 2, KEY) == []
+
+
+# --- argument validation ------------------------------------------------------------------------
+
+
+def _single_run_args(*extra):
+    return ["--mode", "df11", "--out", "o.json", "--df11", "d", "--embeds", "e", *extra]
+
+
+def test_a_warmup_below_one_is_a_usage_error():
+    # Bug caught: allowing --warmup 0, so the first timed step carries the real-group pipeline
+    # compile and the lazy scheduler construction.
+    with pytest.raises(SystemExit) as exc:
+        parse_args(_single_run_args("--warmup", "0"))
+    assert exc.value.code == 2
+
+
+def test_a_warmup_of_one_is_accepted():
+    assert parse_args(_single_run_args("--warmup", "1")).warmup == 1
 
 
 def test_read_results_loads_the_completed_files_of_every_round(tmp_path):
@@ -284,6 +414,6 @@ def test_read_results_loads_the_completed_files_of_every_round(tmp_path):
     for r in FIXTURES:
         write_json_atomic(run_path(tmp_path, r["round"], r["mode"]), {"exit_code": 0, **r})
     write_json_atomic(run_path(tmp_path, 2, "df11-depth2"), {"exit_code": 2, "error": "boom"})
-    loaded = read_results(tmp_path, 2)
+    loaded = read_results(tmp_path, 3)
     assert [(r["round"], r["mode"]) for r in loaded] == [(r["round"], r["mode"]) for r in FIXTURES]
     assert json.loads(run_path(tmp_path, 2, "df11").read_text())["step_s"] == [1.5, 1.4, 1.6]

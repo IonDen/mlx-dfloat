@@ -8,7 +8,11 @@ pre-decoded weight dicts, one double and one single block, decoded once by that 
 footprint baseline is the same; the control's two decoded blocks are its only extra. ``-depth2``
 variants run the depth-2 eval policy and ``control-noeval`` runs the control with no eval inside
 the step, so ``control - control-noeval`` is the eval policy's own cost. No text encoder or VAE is
-loaded: the prompt embeddings come from ``--embeds`` (``scripts/encode_prompt.py``).
+loaded: the prompt embeddings come from ``--embeds`` (``scripts/encode_prompt.py``). Activation
+dtypes follow mflux exactly: the latents stay the float32 ``create_noise`` returns and the
+embeddings keep the dtype the encoder produced (T5 float32, CLIP bfloat16; a synthetic file is
+float32), so every Linear promotes its bf16 weights to float32 as upstream does. Both dtypes are
+recorded in the JSON.
 
 A step is exactly mflux's loop body: ``scale_model_input``, the transformer, ``scheduler.step``,
 ``mx.eval(latents)``, timed as a whole with ``time.perf_counter``; ``verify_step()`` (the deferred
@@ -22,10 +26,14 @@ the mode's expectation (0 or 57), and the final latents must be finite.
 ``--orchestrate`` runs the five modes as subprocesses, interleaved per round in the order
 ``df11, control, df11-depth2, control-depth2, control-noeval``, one at a time, each writing
 ``DIR/round{r}-{mode}.json``; a run whose complete JSON exists is skipped, so an interrupted
-orchestration resumes. It then prints per-round paired overheads (``overhead(t_df11, t_control)``
-for per-block and depth2), the pooled medians with spreads over every timed step of a mode across
-rounds, and the eval-policy cost, and writes ``DIR/report.json``. A child's non-zero exit stops the
-orchestration with exit 2 (the report records which).
+orchestration resumes. Every JSON carries a ``key`` (model, size, steps, warmup, seed, the
+resolved checkpoint path, the embeddings path and metadata, the source hash, the mlx version); an
+existing JSON whose key differs from this run's, or has none, stops the orchestration with exit 2
+naming the fields, before anything runs, so different runs never mix or overwrite. It then prints
+per-round paired overheads (``overhead(t_df11, t_control)`` for per-block and depth2), the pooled
+medians with spreads over the timed steps of the rounds in which both modes of a pair completed,
+and the eval-policy cost, and writes ``DIR/report.json``. A child's non-zero exit stops the
+orchestration with exit 2; the report records which run and suppresses the pooled overheads.
 
 Usage (from the repository root of a synced checkout, ``--group bench``):
     uv run python -m scripts.bench_flux_step --mode MODE --df11 DIR --embeds FILE --out FILE \
@@ -56,6 +64,7 @@ try:
         overhead,
         parity_conditions,
         provenance,
+        resume_key_diff,
         write_json_atomic,
     )
     from scripts._flux_rig import (
@@ -69,6 +78,7 @@ try:
         load_resident_set,
     )
     from scripts._watchdog import Watchdog, default_ceiling, phys_footprint
+    from scripts.verify_checkpoint import source_hash
 
     from mlx_dfloat._memory_caps import install_memory_caps
     from mlx_dfloat.format import DF11Checkpoint, open_checkpoint
@@ -168,6 +178,63 @@ def pending_runs(out_dir: Path, rounds: int) -> list[tuple[int, str]]:
     ]
 
 
+def run_key(
+    *,
+    model: str,
+    size: int,
+    steps: int,
+    warmup: int,
+    seed: int,
+    df11: Path,
+    embeds: Path,
+    embeds_meta: Mapping[str, str],
+    source: str,
+    mlx: str,
+) -> dict[str, Any]:
+    """The settings a run's JSON is keyed on; two runs may share an out dir only when they agree.
+
+    The checkpoint path is resolved so the same checkpoint reached from another cwd matches; the
+    embeddings metadata (prompt, seed, model, synthetic, versions) identifies the file's content.
+    """
+    return {
+        "model": model,
+        "size": size,
+        "steps": steps,
+        "warmup": warmup,
+        "seed": seed,
+        "df11": str(Path(df11).resolve()),
+        "embeds": str(embeds),
+        "embeds_meta": dict(embeds_meta),
+        "source": source,
+        "mlx": mlx,
+    }
+
+
+def resume_conflicts(
+    out_dir: Path, rounds: int, key: Mapping[str, Any]
+) -> list[tuple[int, str, list[str]]]:
+    """Existing run files whose key differs from ``key``: (round, mode, differing fields).
+
+    A file that cannot be parsed or has no key differs in ``["key"]``. A matching file, complete
+    or not, is no conflict (``pending_runs`` decides whether it is re-run). Missing files are
+    no conflict.
+    """
+    conflicts: list[tuple[int, str, list[str]]] = []
+    for r, m in interleaved(rounds):
+        path = run_path(out_dir, r, m)
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            data = None
+        stored = data.get("key") if isinstance(data, dict) else None
+        diff = resume_key_diff(stored, key)
+        if diff:
+            conflicts.append((r, m, diff))
+    return conflicts
+
+
 def child_command(
     *,
     mode: str,
@@ -230,63 +297,87 @@ def check_embeds_shapes(
         )
 
 
-def report(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def report(
+    results: Sequence[Mapping[str, Any]], *, stopped: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     """Paired overheads per round, pooled medians with spreads, and the eval-policy cost.
 
     ``results`` are run JSONs with ``round``, ``mode`` and ``step_s`` (the timed steps), and
     optionally ``verify_s`` (the status validation timed outside the step window, pooled to
-    ``verify_median_s``, None when no result of the mode recorded it). A round's
-    pair is reported only when both of its modes are present; a mode is pooled over every timed
-    step of every round it ran in; the overheads come from the pooled medians;
-    ``eval_policy_cost_s`` is the pooled control median minus the pooled control-noeval median,
-    None when either is absent.
+    ``verify_median_s``, None when no result of the mode recorded it). A round's pair is reported
+    only when both of its modes are present. Pooling uses only the rounds in which both modes of a
+    pair completed (``paired_rounds`` lists them per pair, and ``"eval-policy"`` for control with
+    control-noeval); a mode with no such round is not pooled. The overheads come from the pooled
+    medians; ``eval_policy_cost_s`` is the control median minus the control-noeval median over
+    their shared rounds, None when there is none. When the orchestration ``stopped`` early the
+    pooled overheads and the eval-policy cost are suppressed (the per-round pairs stay).
 
     Raises:
         BenchError: A result has no timed steps.
     """
-    by_round: dict[int, dict[str, list[float]]] = {}
-    reps: dict[str, list[float]] = {}
-    verify_reps: dict[str, list[float]] = {}
+    by_round: dict[int, dict[str, Mapping[str, Any]]] = {}
     for r in results:
-        steps = [float(s) for s in r["step_s"]]
-        if not steps:
+        if not r["step_s"]:
             raise BenchError(f"round {r['round']} {r['mode']}: no timed steps")
-        mode = str(r["mode"])
-        by_round.setdefault(int(r["round"]), {})[mode] = steps
-        reps.setdefault(mode, []).extend(steps)
-        verify_reps.setdefault(mode, []).extend(float(s) for s in r.get("verify_s", ()))
+        by_round.setdefault(int(r["round"]), {})[str(r["mode"])] = r
+
+    def median_of(mode: str, rnd: int) -> float:
+        return Timing(reps=tuple(float(s) for s in by_round[rnd][mode]["step_s"])).median
+
+    def pool(mode: str, over: Sequence[int]) -> dict[str, Any] | None:
+        if not over:
+            return None
+        steps = [float(s) for rnd in over for s in by_round[rnd][mode]["step_s"]]
+        verify = [float(s) for rnd in over for s in by_round[rnd][mode].get("verify_s", ())]
+        t = Timing(reps=tuple(steps))
+        return {
+            "median": t.median,
+            "spread": t.spread,
+            "n": len(steps),
+            "verify_median_s": Timing(reps=tuple(verify)).median if verify else None,
+        }
+
     rounds = {
         rnd: {
-            label: overhead(
-                Timing(reps=tuple(modes[d])).median, Timing(reps=tuple(modes[c])).median
-            )
+            label: overhead(median_of(d, rnd), median_of(c, rnd))
             for label, d, c in PAIRS
             if d in modes and c in modes
         }
         for rnd, modes in sorted(by_round.items())
     }
-    pooled = {
-        mode: {
-            "median": t.median,
-            "spread": t.spread,
-            "n": len(t.reps),
-            "verify_median_s": (
-                Timing(reps=tuple(verify_reps[mode])).median if verify_reps[mode] else None
-            ),
-        }
-        for mode, t in ((m, Timing(reps=tuple(v))) for m, v in reps.items())
+    paired = {
+        label: sorted(rnd for rnd, modes in by_round.items() if d in modes and c in modes)
+        for label, d, c in (*PAIRS, ("eval-policy", "control", "control-noeval"))
     }
+    pooled: dict[str, dict[str, Any]] = {}
+    for label, d, c in PAIRS:
+        for mode in (d, c):
+            stats = pool(mode, paired[label])
+            if stats is not None:
+                pooled[mode] = stats
+    noeval = pool("control-noeval", paired["eval-policy"])
+    if noeval is not None:
+        pooled["control-noeval"] = noeval
     overheads = {
         label: overhead(pooled[d]["median"], pooled[c]["median"])
         for label, d, c in PAIRS
-        if d in pooled and c in pooled
+        if paired[label]
     }
-    cost = (
-        pooled["control"]["median"] - pooled["control-noeval"]["median"]
-        if "control" in pooled and "control-noeval" in pooled
-        else None
-    )
-    return {"rounds": rounds, "pooled": pooled, "overhead": overheads, "eval_policy_cost_s": cost}
+    cost = None
+    if noeval is not None:
+        control = pool("control", paired["eval-policy"])
+        assert control is not None  # the same rounds as noeval, by construction
+        cost = control["median"] - noeval["median"]
+    if stopped is not None:
+        overheads, cost = {}, None
+    return {
+        "rounds": rounds,
+        "pooled": pooled,
+        "overhead": overheads,
+        "paired_rounds": paired,
+        "eval_policy_cost_s": cost,
+        "stopped": dict(stopped) if stopped is not None else None,
+    }
 
 
 def read_results(out_dir: Path, rounds: int) -> list[dict[str, Any]]:
@@ -333,15 +424,40 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             p.error("--orchestrate takes no --mode or --out")
     elif args.mode is None or args.out is None:
         p.error("a single run needs --mode and --out (or use --orchestrate)")
-    if args.steps < 1 or args.warmup < 0 or args.rounds < 0:
-        p.error("--steps must be >= 1, --warmup and --rounds >= 0")
+    if args.steps < 1 or args.warmup < 1 or args.rounds < 0:
+        # The first step carries the real-group pipeline compile and the lazy scheduler
+        # construction, so at least one warm-up step is required.
+        p.error("--steps and --warmup must be >= 1, --rounds >= 0")
     return args
 
 
-def load_embeds(
-    path: Path, model: str, precision: Any
-) -> tuple[mx.array, mx.array, dict[str, str]]:
-    """Read and shape-check the prompt embeddings, cast to mflux's precision; returns their metadata.
+def embeds_metadata(path: Path) -> dict[str, str]:
+    """The string metadata of an embeddings file (part of the resume key)."""
+    _data, meta = mx.load(str(path), return_metadata=True)
+    return dict(meta)
+
+
+def current_key(args: argparse.Namespace) -> dict[str, Any]:
+    """This run's resume key (reads the embeddings metadata, the source hash and the mlx version)."""
+    return run_key(
+        model=args.model,
+        size=args.size,
+        steps=args.steps,
+        warmup=args.warmup,
+        seed=args.seed,
+        df11=args.df11,
+        embeds=args.embeds,
+        embeds_meta=embeds_metadata(args.embeds),
+        source=source_hash(),
+        mlx=mx.__version__,
+    )
+
+
+def load_embeds(path: Path, model: str) -> tuple[mx.array, mx.array, dict[str, str]]:
+    """Read and shape-check the prompt embeddings in the dtype the encoder produced; returns their metadata.
+
+    No cast: mflux passes the T5 output (float32) and the CLIP output as they are, and the
+    transformer's Linears promote their bf16 weights to the activation dtype.
 
     Raises:
         BenchError: A tensor is missing or has the wrong shape.
@@ -352,7 +468,6 @@ def load_embeds(
     except KeyError as exc:
         raise BenchError(f"{path}: no {exc} tensor") from exc
     check_embeds_shapes(prompt.shape, pooled.shape, model)
-    prompt, pooled = prompt.astype(precision), pooled.astype(precision)
     mx.eval(prompt, pooled)
     return prompt, pooled, dict(meta)
 
@@ -437,11 +552,13 @@ def run_mode(
         guidance=GUIDANCE,
         scheduler="linear",
     )
-    prompt, pooled, embeds_meta = load_embeds(args.embeds, args.model, model_config.precision)
-    latents = FluxLatentCreator.create_noise(args.seed, args.size, args.size).astype(
-        model_config.precision
-    )
+    prompt, pooled, embeds_meta = load_embeds(args.embeds, args.model)
+    latents = FluxLatentCreator.create_noise(
+        args.seed, args.size, args.size
+    )  # float32, as upstream
     mx.eval(latents)
+    latent_dtype = str(latents.dtype)
+    embeds_dtype = {"prompt_embeds": str(prompt.dtype), "pooled_prompt_embeds": str(pooled.dtype)}
 
     per_step = expected_launches(mode, n_double=N_DOUBLE, n_single=N_SINGLE, steps=1)
     launches_per_step: list[int] = []
@@ -508,7 +625,10 @@ def run_mode(
         "mlx_peak_memory_bytes": int(mx.get_peak_memory()),
         "cache_memory_bytes": int(mx.get_cache_memory()),
         "embeds": {"path": str(args.embeds), "metadata": embeds_meta},
+        "latent_dtype": latent_dtype,
+        "embeds_dtype": embeds_dtype,
         "output_shape": list(latents.shape),
+        "output_dtype": str(latents.dtype),
         "timings_s": timings,
         "provenance": provenance(),
     }
@@ -523,7 +643,9 @@ def run_one(args: argparse.Namespace) -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     watchdog = Watchdog(args.out.parent, ceiling=default_ceiling(), budget=args.wall_budget).start()
     summary: dict[str, Any]
+    key: dict[str, Any] | None = None
     try:
+        key = current_key(args)
         summary = run_mode(args, watchdog, limits_recorded=limits_recorded)
     except ParityError as exc:
         summary = {
@@ -542,6 +664,7 @@ def run_one(args: argparse.Namespace) -> int:
             "round": args.round,
             "memory_caps_gb": caps,
             "cache_limit_bytes": cache_limit,
+            "key": key,
         }
     )
     try:
@@ -567,6 +690,12 @@ def run_one(args: argparse.Namespace) -> int:
 
 
 def _print_report(rep: Mapping[str, Any]) -> None:
+    if rep["stopped"] is not None:
+        st = rep["stopped"]
+        print(
+            f"stopped at round {st['round']} {st['mode']} (exit {st['exit_code']}): "
+            "pooled overheads suppressed"
+        )
     for rnd, pairs in rep["rounds"].items():
         pairs_text = ", ".join(f"{label} {value:+.1%}" for label, value in pairs.items())
         print(f"round {rnd}: {pairs_text or 'no complete pair'}")
@@ -588,6 +717,16 @@ def orchestrate(args: argparse.Namespace) -> int:
     """Run the pending (round, mode) subprocesses in order, then report; exit 2 on a child's failure."""
     out_dir: Path = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
+    key = current_key(args)
+    conflicts = resume_conflicts(out_dir, args.rounds, key)
+    if conflicts:
+        for r, m, fields in conflicts:
+            print(
+                f"error: {run_path(out_dir, r, m)} was written by a run with other {fields}; "
+                "use a fresh --out-dir",
+                file=sys.stderr,
+            )
+        return EXIT_ERROR
     todo = pending_runs(out_dir, args.rounds)
     print(
         f"{len(interleaved(args.rounds)) - len(todo)} run(s) already complete, {len(todo)} to run"
@@ -614,16 +753,12 @@ def orchestrate(args: argparse.Namespace) -> int:
             print(f"error: round {round_no} {mode} exited {code}; stopping", file=sys.stderr)
             break
     results = read_results(out_dir, args.rounds)
-    rep = (
-        report(results)
-        if results
-        else {"rounds": {}, "pooled": {}, "overhead": {}, "eval_policy_cost_s": None}
-    )
+    rep = report(results, stopped=stopped)
     rep.update(
         {
+            "key": key,
             "rounds_requested": args.rounds,
             "runs_complete": [(r["round"], r["mode"]) for r in results],
-            "stopped": stopped,
             "steps": args.steps,
             "warmup": args.warmup,
             "model": args.model,

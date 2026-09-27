@@ -84,8 +84,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def make_inputs(args: argparse.Namespace, precision: Any) -> tuple[mx.array, mx.array, mx.array]:
-    """Packed latents plus prompt embeddings (from ``--embeds`` or seeded noise), in mflux's precision.
+def make_inputs(args: argparse.Namespace) -> tuple[mx.array, mx.array, mx.array]:
+    """Packed latents plus prompt embeddings (from ``--embeds`` or seeded noise), dtypes as mflux passes them.
+
+    No cast: upstream feeds the float32 ``create_noise`` latents and the encoders' outputs as they
+    are (T5 float32, CLIP bfloat16); the transformer's Linears promote their bf16 weights.
 
     Raises:
         RigError: The embeddings file lacks a key or has an unexpected shape.
@@ -111,7 +114,7 @@ def make_inputs(args: argparse.Namespace, precision: Any) -> tuple[mx.array, mx.
             raise RigError(
                 f"{args.embeds}: pooled_prompt_embeds has shape {pooled.shape}, expected (1, {POOLED_DIM})"
             )
-    inputs = (hidden.astype(precision), prompt.astype(precision), pooled.astype(precision))
+    inputs = (hidden, prompt, pooled)
     mx.eval(*inputs)
     return inputs
 
@@ -170,7 +173,7 @@ def smoke(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, object]:
         width=args.size,
         guidance=3.5 if args.model == "dev" else 0.0,
     )
-    inputs = make_inputs(args, model_config.precision)
+    inputs = make_inputs(args)
 
     df11 = DF11Provider(resident, {n: ckpt.groups[n].matrix_names for n in names})
     transformer.attach(df11, shapes, eval_policy=args.policy)
@@ -202,6 +205,11 @@ def smoke(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, object]:
         "embeds": "synthetic" if args.synthetic else str(args.embeds),
         "seed": args.seed,
         "output_shape": list(out_df11.shape),
+        "latent_dtype": str(inputs[0].dtype),
+        "embeds_dtype": {
+            "prompt_embeds": str(inputs[1].dtype),
+            "pooled_prompt_embeds": str(inputs[2].dtype),
+        },
         "step_s_note": STEP_S_NOTE,
         "df11": {
             "launches": launches_df11,
