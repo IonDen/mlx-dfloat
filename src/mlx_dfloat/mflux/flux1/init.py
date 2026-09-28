@@ -188,6 +188,7 @@ def _load_into(root: Path, definition: Any, models: dict[str, Any]) -> None:
 
 def load_encoders(root: Path) -> tuple[Any, Any]:
     """Fresh ``T5Encoder`` and ``CLIPEncoder`` modules with the base's weights (lazy)."""
+    require_mflux()
     from mflux.models.flux.model.flux_text_encoder.clip_encoder.clip_encoder import CLIPEncoder
     from mflux.models.flux.model.flux_text_encoder.t5_encoder.t5_encoder import T5Encoder
 
@@ -198,6 +199,7 @@ def load_encoders(root: Path) -> tuple[Any, Any]:
 
 def load_vae(root: Path) -> Any:
     """A fresh ``VAE`` module with the base's weights (lazy)."""
+    require_mflux()
     from mflux.models.flux.model.flux_vae.vae import VAE
 
     vae = VAE()

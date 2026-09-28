@@ -1,8 +1,11 @@
+import builtins
+import importlib.util
+
 import httpx
 import pytest
 from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
 
-from mlx_dfloat.errors import DFloatAccessError, DFloatFormatError
+from mlx_dfloat.errors import DFloatAccessError, DFloatDependencyError, DFloatFormatError
 from mlx_dfloat.mflux.flux1 import init
 
 
@@ -15,6 +18,31 @@ def _hub_http_error(cls: type[Exception], message: str, status: int) -> Exceptio
     """
     request = httpx.Request("GET", "https://huggingface.co/api/models/x/y")
     return cls(message, response=httpx.Response(status, request=request))
+
+
+def _is_mflux(name: str) -> bool:
+    return name == "mflux" or name.startswith("mflux.")
+
+
+def _hide_mflux(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No mflux, whatever this venv holds: both the import and the ``find_spec`` probe miss it.
+
+    Same pattern as ``tests/test_mflux_guard.py``'s ``_hide_mflux``, duplicated here so this
+    module's dependency-guard test does not depend on import order across test modules.
+    """
+    real_import = builtins.__import__
+    real_find_spec = importlib.util.find_spec
+
+    def no_mflux(name: str, *args: object, **kwargs: object) -> object:
+        if _is_mflux(name):
+            raise ImportError("no mflux here")
+        return real_import(name, *args, **kwargs)
+
+    def find_spec(name: str, *args: object, **kwargs: object) -> object:
+        return None if _is_mflux(name) else real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_mflux)
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
 
 
 def test_base_patterns_fetch_encoders_vae_and_tokenizers_but_never_the_transformer():
@@ -74,6 +102,18 @@ def test_hub_errors_map_to_access_or_format_and_leave_the_rest_alone():
     assert init.hub_error(plain_http, "x/y") is plain_http
 
 
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_bare_unauthorised_http_error_maps_to_access_not_format(status):
+    # Bug caught: a plain HfHubHTTPError (no GatedRepoError/RepositoryNotFoundError subclass) with
+    # a 401 or 403 response falling through to `return exc` unmapped, so a private-without-token
+    # or an otherwise-unauthorised repo read surfaces as a bare HTTP error instead of the
+    # DFloatAccessError with the login hint the CLI maps to its access exit code.
+    unauthorised = init.hub_error(_hub_http_error(HfHubHTTPError, "no", status), "x/y")
+    assert isinstance(unauthorised, DFloatAccessError)
+    assert "hf auth login" in str(unauthorised)
+    assert str(status) in str(unauthorised)
+
+
 def test_resolve_takes_a_local_directory_as_is_and_refuses_a_missing_one(tmp_path):
     # Bug caught: a local path going through snapshot_download (a network call for a directory
     # on disk), or a typo'd path being mistaken for a Hub id.
@@ -125,6 +165,21 @@ def test_a_quantized_base_is_refused_and_a_bf16_one_passes(tmp_path):
     with pytest.raises(DFloatFormatError, match=r"8-bit"):
         init.refuse_quantized(_Weights(8), tmp_path)
     init.refuse_quantized(_Weights(None), tmp_path)
+
+
+def test_load_encoders_and_load_vae_need_mflux_before_their_mflux_imports_run(
+    monkeypatch, tmp_path
+):
+    # Bug caught: `from mflux....` module-level imports at the top of load_encoders/load_vae ran
+    # before any require_mflux() guard, so a caller without the mflux extra (e.g. load_base) got a
+    # bare ModuleNotFoundError instead of the package-rooted DFloatDependencyError the changelog
+    # promises. Runs in every venv (with or without mflux installed): _hide_mflux forces the
+    # "missing" condition regardless of what this venv actually holds.
+    _hide_mflux(monkeypatch)
+    with pytest.raises(DFloatDependencyError, match=r"install mlx-dfloat\[mflux\]"):
+        init.load_encoders(tmp_path)
+    with pytest.raises(DFloatDependencyError, match=r"install mlx-dfloat\[mflux\]"):
+        init.load_vae(tmp_path)
 
 
 @pytest.mark.mflux
