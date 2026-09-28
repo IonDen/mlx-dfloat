@@ -34,6 +34,9 @@ dependencies = [
   "huggingface-hub>=0.24",
 ]
 
+[project.scripts]
+mlx-dfloat = "mlx_dfloat.cli:main"
+
 [project.optional-dependencies]
 mflux = [
   "mflux>=0.20,<0.21; sys_platform == 'darwin'",
