@@ -67,7 +67,8 @@ class Lifecycle:
         """Encode the prompts not yet cached: the set is dropped first, the encoders after.
 
         Each pair is evaluated before it is cached: a lazy pair would keep every encoder weight
-        alive past the drop.
+        alive past the drop. The encode loop runs under a ``finally`` so a mid-loop failure still
+        drops the encoders instead of leaving them resident next to a set loaded later.
         """
         missing = [p for p in prompts if p not in self._cache]
         if not missing:
@@ -84,11 +85,13 @@ class Lifecycle:
             self.encoders_loaded = True
             self.counters.encoder_loads += 1
             self.counters.encoder_seconds += time.perf_counter() - start
-        for prompt in missing:
-            pair = self._encode(prompt)
-            _eval(*pair)
-            self._cache[prompt] = pair
-        self.drop_encoders()
+        try:
+            for prompt in missing:
+                pair = self._encode(prompt)
+                _eval(*pair)
+                self._cache[prompt] = pair
+        finally:
+            self.drop_encoders()
 
     def ensure_set(self) -> None:
         """Load and attach the compressed set unless it is resident."""

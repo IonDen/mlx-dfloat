@@ -53,7 +53,7 @@ class _Encoders:
         mx.eval(self.weight)
 
 
-def _lifecycle(holder, cache=None, *, slack=MIB):
+def _lifecycle(holder, cache=None, *, slack=MIB, encoders_loaded=False):
     gc.collect()
     mx.clear_cache()
     return Lifecycle(
@@ -64,6 +64,7 @@ def _lifecycle(holder, cache=None, *, slack=MIB):
         unload_set=holder.unload_set,
         prompt_cache={} if cache is None else cache,
         retained_bound_bytes=int(mx.get_active_memory()) + slack,
+        encoders_loaded=encoders_loaded,
     )
 
 
@@ -169,3 +170,50 @@ def test_counters_serialise_for_the_report():
     }
     assert d["encoder_loads"] == 1
     assert d["encoder_seconds"] >= 0
+
+
+def test_a_failed_encode_still_drops_the_encoders_and_their_memory():
+    # Bug caught: not wrapping the encode loop in try/finally, so a mid-loop exception leaves
+    # `encoders_loaded` True and the encoder weights resident — a later `ensure_set()` would then
+    # load the compressed set right next to them, the exact case this module exists to prevent.
+    events = []
+    holder = _Holder(events)
+
+    def _failing_encode(prompt):
+        events.append(("encode", prompt))
+        if prompt == "b":
+            # Raise before binding a local to the weight: otherwise the in-flight exception's own
+            # traceback keeps this frame (and the weight it names) alive through the `finally`.
+            raise RuntimeError("encode failed")
+        w = holder.encoders.weight
+        return w[:1, :4] * 2, w[:1, :2] + 1
+
+    holder.encode = _failing_encode
+    cache = {}
+    life = _lifecycle(holder, cache)
+    with pytest.raises(RuntimeError, match="encode failed"):
+        life.ensure_embeddings("a", "b")
+    assert events[-1] == "unload_encoders"
+    assert not life.encoders_loaded
+    # "a" was encoded and evaluated before "b" raised, so it is fully cached (never half-cached:
+    # the implementation evaluates a pair before caching it); "b" raised before returning a pair,
+    # so it was never cached at all.
+    assert set(cache) == {"a"}
+    assert int(mx.get_active_memory()) <= life.retained_bound_bytes
+
+
+def test_pre_loaded_encoders_are_not_reloaded_but_are_still_dropped_at_the_end():
+    # Bug caught: `ensure_embeddings` calling `load_encoders` again when `encoders_loaded` was
+    # already True at construction (the model warmed the encoders itself before handing the
+    # lifecycle its state), double-loading and double-counting; or the opposite bug of never
+    # dropping them because "this call didn't load them".
+    events = []
+    holder = _Holder(events)
+    holder.load_encoders()
+    events.clear()
+    life = _lifecycle(holder, encoders_loaded=True)
+    life.ensure_embeddings("p")
+    assert "load_encoders" not in events
+    assert events[0] == ("encode", "p")
+    assert events[-1] == "unload_encoders"
+    assert life.counters.encoder_loads == 0
