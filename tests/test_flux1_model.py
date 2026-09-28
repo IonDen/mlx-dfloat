@@ -40,6 +40,7 @@ pytestmark = pytest.mark.mflux
 def _fake_model(tmp_path, monkeypatch, **overrides):
     """A DFloatFlux1 over the fake-width transformer and stub base parts; no weights, no network."""
     from mflux.models.common.config.model_config import ModelConfig
+
     from mlx_dfloat.mflux.flux1.model import DFloatFlux1
 
     tf = FakeSeamTransformer(Recorder(), n_double=2, n_single=2)
@@ -61,6 +62,7 @@ def _fake_model(tmp_path, monkeypatch, **overrides):
 
     monkeypatch.setattr(model_module, "budget_bytes", lambda: 23 * GIB)
     parts = {
+        "model": "schnell",
         "model_config": ModelConfig.schnell(),
         "ckpt": ckpt,
         "df11": ResolvedRepo(
@@ -135,12 +137,16 @@ def test_constructor_refusals_come_before_any_resolution(monkeypatch, kwargs):
 
 def test_an_unknown_model_and_the_none_policy_are_refused(monkeypatch, tmp_path):
     # Bug caught: mflux's from_name accepting "dev-fill" (another class upstream) and this path
-    # building a FLUX.1 model for it; or policy "none" (every decode resident) accepted.
+    # building a FLUX.1 model for it; or policy "none" (every decode resident) accepted, whether
+    # the check runs early (__init__, before any resolution) or only late (_assemble, for a
+    # _from_parts build).
     from mlx_dfloat.mflux.flux1.model import DFloatFlux1
 
     monkeypatch.setattr(base_init, "resolve", lambda *a, **k: pytest.fail("resolved"))
     with pytest.raises(DFloatUnsupportedError, match="dev-fill"):
         DFloatFlux1("dev-fill")
+    with pytest.raises(DFloatUnsupportedError, match="none"):
+        DFloatFlux1("schnell", eval_policy="none")
     with pytest.raises(DFloatUnsupportedError, match="none"):
         _fake_model(tmp_path, monkeypatch, eval_policy="none")
 
@@ -282,6 +288,30 @@ def test_generate_encodes_then_loads_the_set_then_runs_upstream_under_the_derive
     assert report["model"] == "schnell"
 
 
+def test_a_new_prompt_with_the_set_resident_drops_it_reloads_the_encoders_and_reloads_the_set(
+    tmp_path, monkeypatch
+):
+    # Bug caught: a new prompt encoded next to the resident compressed set (the encoders and the
+    # set sharing memory that the lifecycle exists to keep apart), or the set not reloaded before
+    # the second call's denoise step.
+    model = _fake_model(tmp_path, monkeypatch)
+    calls = []
+
+    def recording_load_encoders(root):
+        calls.append(root)
+        return StubEncoder(), StubEncoder()
+
+    monkeypatch.setattr(base_init, "load_encoders", recording_load_encoders)
+    _patch_upstream_generate(monkeypatch, model)
+    model.generate_image(seed=1, prompt="p1", height=256, width=256)
+    model.generate_image(seed=2, prompt="p2", height=256, width=256)
+    lifecycle = model.report()["lifecycle"]
+    assert lifecycle["forced_set_drops"] == 1
+    assert lifecycle["encoder_loads"] == 1
+    assert lifecycle["set_loads"] == 2
+    assert calls == [model._base.root]
+
+
 def test_a_format_error_mid_step_drops_the_set_and_restores_the_limit(tmp_path, monkeypatch):
     # Bug caught (Review Focus 2): a corrupt block leaving the set attached with stale status words,
     # so the retry is refused by begin_step, or the cache limit left at the call's value.
@@ -296,6 +326,37 @@ def test_a_format_error_mid_step_drops_the_set_and_restores_the_limit(tmp_path, 
     assert _cache_limit_in_force() == before
     with pytest.raises(DFloatIntegrationError, match="attach"):
         model.transformer._state()
+
+
+def test_a_format_errors_traceback_does_not_pin_the_set_past_the_drop(tmp_path, monkeypatch):
+    # Bug caught: `except DFloatFormatError: self._lifecycle.drop_set(); raise` used to run while
+    # the exception's own traceback still held its raising frame's locals alive — in production
+    # that frame is inside SeamMixin.__call__ / DF11Provider.verify() and references the whole
+    # resident set, so drop_set's own gc.collect() could not free it and _reclaim's active-memory
+    # check turned a clean DFloatFormatError into a DFloatResourceError (the real error demoted to
+    # __context__).
+    import dataclasses
+
+    from mflux.models.flux.variants.txt2img.flux import Flux1
+
+    model = _fake_model(tmp_path, monkeypatch)
+
+    def fake(self, **kwargs):
+        # A frame that still references the resident set (an 8 MiB stand-in for a real block's
+        # decoded weights) at the moment the format error is raised, like a real seam frame would.
+        name, group = next(iter(self._provider._resident.items()))
+        big = mx.zeros(2 * 1024 * 1024, dtype=mx.float32)  # 8 MiB
+        mx.eval(big)
+        self._provider._resident[name] = dataclasses.replace(group, sign_mantissa=big)
+        held = next(iter(self._provider._resident.values())).sign_mantissa
+        mx.eval(held)
+        raise DFloatFormatError("block 3: invalid code")
+
+    monkeypatch.setattr(Flux1, "generate_image", fake)
+    model._lifecycle.retained_bound_bytes = int(mx.get_active_memory()) + 1 * 1024**2
+    with pytest.raises(DFloatFormatError):
+        model.generate_image(seed=1, prompt="p", height=256, width=256)
+    assert not model._lifecycle.set_resident
 
 
 def test_an_interrupt_keeps_the_set_resident_and_restores_the_limit(tmp_path, monkeypatch):

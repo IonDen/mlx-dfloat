@@ -70,10 +70,13 @@ def test_the_mflux_lane_installs_the_locked_extra_and_proves_it_ran_tests():
     tests = [args for args in pytest_runs if "--co" not in args]
     assert len(tests) == 1
     assert {"-m", "mflux", "--run-network", "-rs"} <= set(tests[0])
-    # model.py and init.py are exercised only by this lane, so its own coverage gate measures
-    # them (the required job's gate omits both; see pyproject.toml).
+    # model.py has no offline test at all (every test is @pytest.mark.mflux), so only this lane's
+    # gate measures it (the required job's gate omits it; see pyproject.toml). init.py keeps
+    # gating the required job too (it has real offline tests), and this lane's own gate on it is
+    # on top of that, not instead of it.
     assert "--cov=mlx_dfloat.mflux.flux1.model" in tests[0]
     assert "--cov=mlx_dfloat.mflux.flux1.init" in tests[0]
+    assert "--cov-config=.coveragerc-integration" in tests[0]
     assert "--cov-fail-under=80" in tests[0]
     guard = [run for run in runs if "--co" in run and "grep -c" in run]
     assert len(guard) == 1

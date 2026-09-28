@@ -7,6 +7,7 @@ Python API installs no memory caps and no watchdog; the ``mlx-dfloat`` command d
 """
 
 import logging
+import traceback
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
@@ -70,6 +71,16 @@ def _refuse(name: str, reason: str) -> None:
     raise DFloatUnsupportedError(f"{name}: {reason}; not on the DFloat11 path in this version")
 
 
+def _check_eval_policy(eval_policy: str) -> None:
+    """Refuse an eval policy outside ``POLICIES``.
+
+    Checked both in ``__init__`` and in ``_assemble``, so a ``_from_parts`` build gets the same
+    guard as the public constructor.
+    """
+    if eval_policy not in POLICIES:
+        raise DFloatUnsupportedError(f"eval_policy {eval_policy!r}: choose from {POLICIES}")
+
+
 class _VaePoolGuard:
     """mflux after-loop subscriber: close the denoise phase, clear and cap the buffer pool before the VAE decode."""
 
@@ -114,16 +125,21 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
         lora_scales: list[float] | None = None,
         bake_lora: bool = True,
     ) -> None:
-        """Resolve the checkpoint and the base repository and build the model (nothing is read from disk yet).
+        """Resolve the checkpoint and the base repository and build the model.
+
+        The checkpoint headers, the base's tokenizers and the transformer's extras are read; the
+        encoder, VAE and compressed weights stay lazy until used.
 
         Raises:
             DFloatUnsupportedError: ``quantize``, ``lora_paths``, ``lora_scales`` or ``bake_lora=False``
-                (accepted only to refuse), an unknown ``model``, or an eval policy other than
-                ``"per-block"`` / ``"depth2"``.
+                (accepted only to refuse), an eval policy other than ``"per-block"`` / ``"depth2"``,
+                or an unknown ``model``.
             DFloatFormatError: The checkpoint is not a FLUX.1 DF11 checkpoint, or the base lacks the
                 encoders or is a quantized save.
             DFloatAccessError: A gated repository this account may not read.
             DFloatDependencyError: The ``mlx-dfloat[mflux]`` extra is not installed.
+            DFloatIntegrationError: mflux's own weight definition or mapping does not shape the
+                way this adapter expects (a name map ambiguity, an uncovered extra).
         """
         if quantize is not None:
             _refuse(
@@ -136,6 +152,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
             _refuse("lora_scales", "LoRA of any kind")
         if not bake_lora:
             _refuse("bake_lora", "LoRA of any kind")
+        _check_eval_policy(eval_policy)
         if model not in MODELS:
             raise DFloatUnsupportedError(f"model {model!r}: this path runs {sorted(MODELS)}")
         from mflux.models.common.config.model_config import ModelConfig
@@ -149,6 +166,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
         components = base_init.load_base(base.root, model_config)
         transformer, shapes = build_transformer(model_config, ckpt)
         self._assemble(
+            model=model,
             model_config=model_config,
             ckpt=ckpt,
             df11=df11,
@@ -173,6 +191,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
     def _assemble(
         self,
         *,
+        model: str = "custom",
         model_config: Any,
         ckpt: DF11Checkpoint,
         df11: ResolvedRepo,
@@ -188,8 +207,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
     ) -> None:
         from mflux.models.flux.flux_initializer import FluxInitializer
 
-        if eval_policy not in POLICIES:
-            raise DFloatUnsupportedError(f"eval_policy {eval_policy!r}: choose from {POLICIES}")
+        _check_eval_policy(eval_policy)
         nn.Module.__init__(self)  # type: ignore[attr-defined]  # not Flux1.__init__: mflux's own initializer runs over the whole base
         FluxInitializer._init_config(
             self, model_config
@@ -202,6 +220,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
         self.bits = None
         self.lora_paths: list[str] = []
         self.lora_scales: list[float] = []
+        self._model = model
         self._ckpt, self._df11, self._base, self._shapes, self._sizes = (
             ckpt,
             df11,
@@ -391,8 +410,8 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
         self._phase_begin("set_load")
         self._lifecycle.ensure_set()
         self._phase_end("set_load")
+        self._phase_begin("denoise")  # before set_cache_limit: a raise here must change nothing
         previous = mx.set_cache_limit(plan.cache_limit)
-        self._phase_begin("denoise")
         try:
             return super().generate_image(
                 seed=seed,
@@ -408,7 +427,13 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
                 pid_decode=False,
                 pid_degrade_sigma=pid_degrade_sigma,
             )
-        except DFloatFormatError:
+        except DFloatFormatError as exc:
+            # The exception's own traceback keeps every frame between the raise site (in
+            # production, inside SeamMixin.__call__ / DF11Provider.verify()) and here alive, and
+            # those frames can reference the whole resident set. Clear them before drop_set's own
+            # gc.collect() runs, or _reclaim's active-memory check turns this clean format error
+            # into a DFloatResourceError with the real error demoted to __context__.
+            traceback.clear_frames(exc.__traceback__)
             self._lifecycle.drop_set()  # a corrupt block: the retry starts from a clean load
             raise
         finally:
@@ -428,7 +453,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
         except metadata.PackageNotFoundError:
             mflux_version = None
         return {
-            "model": self._model_name(),
+            "model": self._model,
             "df11": {
                 "root": str(self._df11.root),
                 "repo_id": self._df11.repo_id,
@@ -457,13 +482,6 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
             "lifecycle": self._lifecycle.counters.as_dict(),
             "versions": {"mlx": mx.__version__, "mflux": mflux_version},  # type: ignore[attr-defined]
         }
-
-    def _model_name(self) -> str:
-        """The short model name whose default DF11 repository this model came from, or ``"custom"``."""
-        for name, (df11_repo, _base_repo) in MODELS.items():
-            if df11_repo == self._df11.repo_id:
-                return name
-        return "custom"
 
     @staticmethod
     def from_name(model_name: str, quantize: int | None = None) -> "DFloatFlux1":
