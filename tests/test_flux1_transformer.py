@@ -167,6 +167,19 @@ def test_base_transformer_index_maps_every_tensor_to_its_shard_and_refuses_an_es
         base_transformer_index(root, index_file="model.safetensors.index.json")
 
 
+def test_base_transformer_index_refuses_a_weight_map_that_is_not_a_string_keyed_object(tmp_path):
+    # Bug caught: a weight_map that parses as JSON but is not a {name: shard} object (a list, here)
+    # reaching `.values()` and raising a bare AttributeError outside the package's error taxonomy,
+    # instead of a clear DFloatFormatError naming the index file.
+    from mlx_dfloat.mflux.flux1.transformer import base_transformer_index
+
+    root = tmp_path / "t"
+    root.mkdir()
+    (root / "model.safetensors.index.json").write_text('{"weight_map": ["a.safetensors"]}')
+    with pytest.raises(DFloatFormatError, match="weight_map must be a non-empty object"):
+        base_transformer_index(root, index_file="model.safetensors.index.json")
+
+
 def test_build_transformer_loads_extras_from_an_alternative_source_and_base_extras_drops_the_matrices(
     tmp_path, monkeypatch
 ):

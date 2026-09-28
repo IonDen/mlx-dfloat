@@ -117,12 +117,22 @@ def base_transformer_index(
     """Every tensor of a sharded BF16 transformer directory: name -> (shard path, tensor info), from the index.
 
     Raises:
-        DFloatFormatError: No usable index, or a shard name that is not a plain file name in ``root``.
+        DFloatFormatError: No usable index (missing, malformed JSON, or a ``weight_map`` that is not
+            a non-empty object of shard-name strings), or a shard name that is not a plain file name
+            in ``root``.
     """
     try:
         weight_map = json.loads((root / index_file).read_text(encoding="utf-8"))["weight_map"]
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise DFloatFormatError(f"{root / index_file}: no usable weight index: {exc}") from exc
+    if (
+        not isinstance(weight_map, dict)
+        or not weight_map
+        or not all(isinstance(v, str) for v in weight_map.values())
+    ):
+        raise DFloatFormatError(
+            f"{root / index_file}: weight_map must be a non-empty object of shard-name strings"
+        )
     index: dict[str, tuple[Path, TensorInfo]] = {}
     for shard_name in sorted(set(weight_map.values())):
         if not isinstance(shard_name, str) or Path(shard_name).name != shard_name:
