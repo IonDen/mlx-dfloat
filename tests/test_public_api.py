@@ -38,3 +38,13 @@ def test_backend_error_is_caught_by_package_root():
     # caller's `except DFloatError`.
     with pytest.raises(DFloatError):
         raise DFloatBackendError("no Metal device")
+
+
+def test_access_error_is_package_rooted_and_a_permission_error():
+    # Bug caught: a gated-repo failure escaping `except DFloatError`, or not reading as a
+    # PermissionError to a caller that only knows the builtin taxonomy.
+    from mlx_dfloat import DFloatAccessError
+
+    assert issubclass(DFloatAccessError, DFloatError)
+    assert issubclass(DFloatAccessError, PermissionError)
+    assert "DFloatAccessError" in mlx_dfloat.__all__
