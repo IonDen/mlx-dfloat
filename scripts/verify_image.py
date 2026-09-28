@@ -184,13 +184,42 @@ def child_command(args: argparse.Namespace, side: str) -> list[str]:
     ]
 
 
+def _read_json(path: Path) -> Any | None:
+    """The parsed JSON at ``path``, or ``None`` when it's missing or not valid JSON."""
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
 def side_complete(path: Path, key: Mapping[str, Any]) -> bool:
     """Whether ``path / "result.json"`` holds a successful run keyed exactly like ``key`` (the resume check)."""
-    try:
-        data = json.loads((path / "result.json").read_text())
-    except (OSError, ValueError):
+    data = _read_json(path / "result.json")
+    if not isinstance(data, dict):
         return False
     return data.get("exit_code") == EXIT_OK and not resume_key_diff(data.get("key"), key)
+
+
+def sides_ready(out_dir: Path, key: Mapping[str, Any]) -> list[str]:
+    """The problems blocking a compare: a side missing its result, not exit 0, or keyed differently than ``key``.
+
+    Empty exactly when both ``df11`` and ``bf16`` are complete and keyed exactly like ``key`` — the
+    gate ``run_compare`` checks before it will issue the 0/1 verdict, so a stale, failed or
+    different-run side is never silently compared.
+    """
+    problems: list[str] = []
+    for side in SIDES:
+        data = _read_json(out_dir / side / "result.json")
+        if not isinstance(data, dict):
+            problems.append(f"{side}: no result.json")
+            continue
+        if data.get("exit_code") != EXIT_OK:
+            problems.append(f"{side}: exit_code {data.get('exit_code')!r}, not 0")
+            continue
+        diff = resume_key_diff(data.get("key"), key)
+        if diff:
+            problems.append(f"{side}: key differs in {diff}")
+    return problems
 
 
 def _sha256_file(path: Path) -> str:
@@ -243,7 +272,10 @@ def run_df11(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, Any]:
     if captured is None:
         raise VerifyImageError("the after-loop callback never ran; no latents were captured")
     mx.eval(captured)
-    image.save(str(out_dir / "image.png"), export_json_metadata=False)
+    # overwrite=True: without it, GeneratedImage.save renames around an existing image.png
+    # (image-1.png, ...) instead of replacing it, so a rerun after a failed attempt would leave a
+    # stale image.png behind while latents.safetensors/embeds.safetensors/result.json move on.
+    image.save(str(out_dir / "image.png"), export_json_metadata=False, overwrite=True)
     mx.save_safetensors(str(out_dir / "latents.safetensors"), {"latents": captured})
     prompt_embeds, pooled_prompt_embeds = model.prompt_cache[args.prompt]
     mx.save_safetensors(
@@ -330,6 +362,8 @@ def run_bf16(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, Any]:
     mx.set_cache_limit(0)  # the transformer-shaped buffers cannot serve the decoder
     unpacked = FluxLatentCreator.unpack_latents(latents, args.size, args.size)
     decoded = vae.decode(unpacked)  # (B, C, 1, H, W): VAE.decode's raw output, not VAEUtil's
+    # PIL.Image.save always overwrites an existing file at this path; no equivalent to
+    # GeneratedImage.save's rename-around-a-stale-file behaviour to guard against here.
     ImageUtil.to_pil(decoded[:, :, 0, :, :]).save(str(out_dir / "image.png"))
 
     return {
@@ -348,23 +382,37 @@ def run_bf16(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, Any]:
 def run_compare(args: argparse.Namespace) -> dict[str, Any]:
     """Compare both sides' saved latents bit for bit, and report the df11 side's own degeneracy.
 
+    Refuses (``exit_code`` 2, never 0 or 1) unless ``sides_ready`` finds both sides complete and
+    keyed exactly like this run — a missing, failed or different-run side is never compared.
+
     Raises:
-        OSError: A side's ``result.json`` or a saved file is missing.
-        ValueError: A side's ``result.json`` is not valid JSON.
+        OSError: A ready side's saved latents or image file is missing.
+        ValueError: A ready side's result.json turned invalid between ``sides_ready`` and here.
     """
+    key = run_key(args)
     df11_dir, bf16_dir = args.out / "df11", args.out / "bf16"
-    df11_result = json.loads((df11_dir / "result.json").read_text())
-    bf16_result = json.loads((bf16_dir / "result.json").read_text())
+    problems = sides_ready(args.out, key)
+    df11_result = _read_json(df11_dir / "result.json")
+    bf16_result = _read_json(bf16_dir / "result.json")
+    df11_key = df11_result.get("key") if isinstance(df11_result, dict) else None
+    bf16_key = bf16_result.get("key") if isinstance(bf16_result, dict) else None
+    if problems:
+        return {
+            "exit_code": EXIT_ERROR,
+            "error": "cannot compare: " + "; ".join(problems),
+            "df11_key": df11_key,
+            "bf16_key": bf16_key,
+        }
     a = mx.load(str(df11_dir / "latents.safetensors"))["latents"]
     b = mx.load(str(bf16_dir / "latents.safetensors"))["latents"]
     equal = compare_latents(a, b)
-    degenerate = list(df11_result.get("degenerate", []))
+    degenerate = list(df11_result.get("degenerate", [])) if isinstance(df11_result, dict) else []
     return {
         "exit_code": verdict(equal=equal, degenerate=degenerate),
         "equal": equal,
         "degenerate": degenerate,
-        "df11_key": df11_result.get("key"),
-        "bf16_key": bf16_result.get("key"),
+        "df11_key": df11_key,
+        "bf16_key": bf16_key,
         "df11_png_sha256": _sha256_file(df11_dir / "image.png"),
         "bf16_png_sha256": _sha256_file(bf16_dir / "image.png"),
     }
@@ -392,15 +440,33 @@ def _write_compare(args: argparse.Namespace) -> int:
     return code
 
 
+def _move_stale_result_aside(side_dir: Path, key: Mapping[str, Any]) -> None:
+    """Move a previous ``result.json`` in ``side_dir`` to ``result.previous.json`` if its key differs from ``key``.
+
+    Mirrors ``move_stale_abort_aside``: a side directory left over from a run with different
+    settings must never be mistaken for this run's outputs (its stale image/latents/embeddings
+    would otherwise sit next to a fresh ``result.json`` until this run overwrites them), and the
+    old record is kept, never deleted.
+    """
+    result_path = side_dir / "result.json"
+    if not result_path.exists():
+        return
+    data = _read_json(result_path)
+    stored_key = data.get("key") if isinstance(data, dict) else None
+    if resume_key_diff(stored_key, key):
+        result_path.replace(side_dir / "result.previous.json")
+
+
 def run_side(args: argparse.Namespace) -> int:
     """Run one heavy side (``df11`` or ``bf16``) under the memory caps and the footprint watchdog; write ``result.json``."""
     side = args.side
     side_dir = args.out / side
     caps = list(install_memory_caps())
     side_dir.mkdir(parents=True, exist_ok=True)
+    key = run_key(args)
+    _move_stale_result_aside(side_dir, key)
     move_stale_abort_aside(side_dir)
     watchdog = Watchdog(side_dir, ceiling=default_ceiling(), budget=args.wall_budget).start()
-    key = run_key(args)
     run = run_df11 if side == "df11" else run_bf16
     try:
         summary = run(args, watchdog)
