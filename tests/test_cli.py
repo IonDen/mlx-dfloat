@@ -216,6 +216,31 @@ def test_missing_mflux_is_a_dependency_error_with_the_install_hint(tmp_path, cap
     assert "install mlx-dfloat[mflux]" in capsys.readouterr().err
 
 
+def test_a_watchdog_construction_failure_still_writes_the_report(tmp_path, capsys):
+    # Bug caught: the report skipped on the watchdog-failure path (an early return before the
+    # write), and a non-DFloatError from watchdog construction escaping uncaught (exit 1 instead
+    # of the tool-error exit 2).
+    def failing_watchdog_factory(out_dir, **kw):
+        raise DFloatDependencyError("psutil missing")
+
+    args = gen.build_parser().parse_args(
+        ["--prompt", "p", "--output", str(tmp_path / "o.png"), "--report", str(tmp_path / "r.json")]
+    )
+    code = gen.run(
+        args,
+        model_factory=lambda **kw: pytest.fail("built"),
+        install_caps=lambda: (20, 22),
+        watchdog_factory=failing_watchdog_factory,
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "DFloatDependencyError" in err
+    assert "psutil missing" in err
+    report = json.loads((tmp_path / "r.json").read_text())
+    assert report["exit_code"] == 2
+    assert "DFloatDependencyError" in report["error"]
+
+
 @pytest.mark.parametrize("text", ["0", "-5", "abc"])
 def test_cache_limit_must_be_a_positive_byte_count(text):
     # Bug caught (Review Focus 4): a zero or negative cache limit reaching mx.set_cache_limit.
@@ -240,8 +265,9 @@ def test_negative_prompt_is_accepted_with_a_warning(tmp_path, capsys):
     assert "ignored" in capsys.readouterr().err
 
 
-def test_top_level_parser_routes_generate_and_reports_the_version(capsys):
-    # Bug caught: the subcommand not wired to run(), or --version missing.
+def test_top_level_parser_routes_generate_and_reports_the_version(capsys, monkeypatch, tmp_path):
+    # Bug caught: the subcommand not wired to run() (main() never actually reaching args.run),
+    # or --version missing.
     with pytest.raises(SystemExit) as exc:
         main(["--version"])
     assert exc.value.code == 0
@@ -249,6 +275,19 @@ def test_top_level_parser_routes_generate_and_reports_the_version(capsys):
     with pytest.raises(SystemExit) as exc:
         main([])  # no subcommand
     assert exc.value.code == 2
+
+    seen = {}
+
+    def recorder(args):
+        seen["prompt"] = args.prompt
+        return 7
+
+    # Patched before main() runs: build_parser() (called inside main()) binds `run` from this
+    # module's globals at that later call time, so the subparser picks up the recorder.
+    monkeypatch.setattr(gen, "run", recorder)
+    code = main(["generate", "--prompt", "p", "--output", str(tmp_path / "o.png")])
+    assert code == 7
+    assert seen["prompt"] == "p"
 
 
 @pytest.mark.parametrize("argv", [["--help"], ["generate", "--help"]])

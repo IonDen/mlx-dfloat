@@ -148,6 +148,16 @@ def _model_class() -> Callable[..., Any]:
     return DFloatFlux1
 
 
+def _finish(args: argparse.Namespace, report: dict[str, Any]) -> int:
+    """Write the report (when ``--report`` was given) and announce success. The one path every exit uses."""
+    if args.report is not None:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(json.dumps(report, indent=1, default=str))
+    if report["exit_code"] == EXIT_OK:
+        print(f"ok: {report['output']}")
+    return int(report["exit_code"])
+
+
 def run(
     args: argparse.Namespace,
     *,
@@ -187,7 +197,12 @@ def run(
         ).start()
     except DFloatError as exc:
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return EXIT_ERROR
+        report["error"] = f"{type(exc).__name__}: {exc}"
+        return _finish(args, report)
+    except Exception as exc:  # symmetric with the block below: never a silent exit 1
+        traceback.print_exc()
+        report["error"] = f"{type(exc).__name__}: {exc}"
+        return _finish(args, report)
     try:
         factory = model_factory if model_factory is not None else _model_class()
         model = factory(**model_kwargs)
@@ -210,9 +225,4 @@ def run(
         report["error"] = f"{type(exc).__name__}: {exc}"
     finally:
         watchdog.stop()
-    if args.report is not None:
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(json.dumps(report, indent=1, default=str))
-    if report["exit_code"] == EXIT_OK:
-        print(f"ok: {output}")
-    return int(report["exit_code"])
+    return _finish(args, report)
