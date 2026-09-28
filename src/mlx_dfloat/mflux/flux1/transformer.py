@@ -62,6 +62,12 @@ class SeamMixin:
                 "call attach(provider, shapes) before running a step"
             ) from exc
 
+    def detach(self) -> None:
+        """Forget the provider and the shapes; the next step needs a new ``attach``."""
+        if hasattr(self, "_seam"):
+            self._seam.provider.reset()
+            del self._seam
+
     def verify_step(self) -> None:
         """Run the provider's deferred checks; call it after the step's final ``mx.eval``."""
         seam.verify_step(self._state())

@@ -158,6 +158,9 @@ omit = [
   "scripts/regpressure.py",
   "scripts/ci_metal_probe.py",
   "scripts/flux_rig_smoke.py",
+  # measured by the integration lane (mflux), see ci.yml
+  "src/mlx_dfloat/mflux/flux1/model.py",
+  "src/mlx_dfloat/mflux/flux1/init.py",
 ]
 
 [tool.coverage.report]

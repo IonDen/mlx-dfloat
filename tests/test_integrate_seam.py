@@ -427,3 +427,29 @@ def test_a_step_that_raises_midway_clears_the_df11_providers_status_words():
     assert provider.pending == []
     mx.eval(tf(*inputs()))
     tf.verify_step()
+
+
+def test_detach_forgets_the_provider_and_a_step_is_refused_until_the_next_attach():
+    # Bug caught: a detached transformer still running on the old provider (the dropped set's
+    # groups kept alive through the seam state), or detach leaving pending status words.
+    from tests._flux_fakes import (
+        FLUX_TABLE,
+        FakeSeamTransformer,
+        Recorder,
+        block_lists,
+        inputs,
+        resident_dicts,
+    )
+
+    from mlx_dfloat.integrate.placeholders import install_placeholders
+    from mlx_dfloat.integrate.providers import ResidentProvider
+
+    tf = FakeSeamTransformer(Recorder(), n_double=1, n_single=1)
+    shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
+    tf.attach(ResidentProvider(resident_dicts(shapes)), shapes)
+    tf(*inputs())
+    tf.detach()
+    with pytest.raises(DFloatIntegrationError, match="attach"):
+        tf(*inputs())
+    tf.attach(ResidentProvider(resident_dicts(shapes)), shapes)
+    mx.eval(tf(*inputs()))

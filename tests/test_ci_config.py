@@ -67,9 +67,14 @@ def test_the_mflux_lane_installs_the_locked_extra_and_proves_it_ran_tests():
         for run in runs
         if run.startswith("uv run --extra mflux --group dev pytest")
     ]
-    tests = [args for args in pytest_runs if "--co" not in " ".join(args)]
+    tests = [args for args in pytest_runs if "--co" not in args]
     assert len(tests) == 1
     assert {"-m", "mflux", "--run-network", "-rs"} <= set(tests[0])
+    # model.py and init.py are exercised only by this lane, so its own coverage gate measures
+    # them (the required job's gate omits both; see pyproject.toml).
+    assert "--cov=mlx_dfloat.mflux.flux1.model" in tests[0]
+    assert "--cov=mlx_dfloat.mflux.flux1.init" in tests[0]
+    assert "--cov-fail-under=80" in tests[0]
     guard = [run for run in runs if "--co" in run and "grep -c" in run]
     assert len(guard) == 1
     assert "-m mflux" in guard[0]
