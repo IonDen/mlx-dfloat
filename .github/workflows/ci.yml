@@ -23,6 +23,27 @@ jobs:
         run: uv run python scripts/ci_metal_probe.py
       - name: Test (required)
         run: uv run pytest --cov=mlx_dfloat --cov=scripts --cov-report=term-missing --cov-fail-under=85
+  integration:
+    # The mflux lane: installs the optional extra from the lock (torch and transformers come with
+    # mflux, pinned there too) and runs only the tests that need it.
+    runs-on: macos-15
+    strategy:
+      matrix:
+        # The lock pins mflux 0.20.0. A second row (another mflux release) would need the unlocked
+        # form instead of `uv sync --extra mflux`: `uv pip install "mflux==<version>"` after the
+        # sync, then `uv run --no-sync` for the steps below.
+        mflux: ["0.20.0"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --locked --group dev --extra mflux
+      - run: uv run --extra mflux --group dev python -c "import mflux, mlx.core, importlib.metadata as m; print('mflux', m.version('mflux'))"
+      - name: Integration tests (mflux lane)
+        run: uv run --extra mflux --group dev pytest -m mflux --run-network -q -p no:cacheprovider -rs
+      - name: The lane collected mflux tests
+        run: test "$(uv run --extra mflux --group dev pytest -m mflux --co -q -p no:cacheprovider | grep -c '::')" -ge 2
   build:
     # Same action the release workflow uses, so a distribution that would fail at tag time
     # (e.g. a build-backend metadata version newer than the bundled twine) fails on the PR.

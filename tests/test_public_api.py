@@ -15,6 +15,9 @@ def test_errors_are_exported():
     assert "DFloatFormatError" in mlx_dfloat.__all__
     assert "DFloatResourceError" in mlx_dfloat.__all__
     assert "DFloatBackendError" in mlx_dfloat.__all__
+    assert "DFloatUnsupportedError" in mlx_dfloat.__all__
+    assert "DFloatDependencyError" in mlx_dfloat.__all__
+    assert "DFloatIntegrationError" in mlx_dfloat.__all__
 
 
 def test_format_error_is_caught_by_package_root():

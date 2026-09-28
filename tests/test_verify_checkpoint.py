@@ -329,7 +329,7 @@ def test_success_summary_records_partial_and_selected_groups(tmp_path, pair):
     "edited",
     [
         "src/mlx_dfloat/sub/deep.py",
-        "scripts/_watchdog.py",
+        "src/mlx_dfloat/_watchdog.py",
         "scripts/verify_checkpoint.py",
         "scripts/_bench_common.py",
         "scripts/_flux_rig.py",
@@ -344,7 +344,6 @@ def test_source_hash_covers_package_watchdog_and_script(tmp_path, monkeypatch, e
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / rel).write_text(f"# {rel}\n")
     for rel in [
-        "scripts/_watchdog.py",
         "scripts/verify_checkpoint.py",
         "scripts/_bench_common.py",
         "scripts/_flux_rig.py",

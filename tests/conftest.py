@@ -1,6 +1,7 @@
 """Pytest gates and MLX memory-safety guard."""
 
 import atexit
+import importlib.util
 import os
 import platform
 import sys
@@ -36,6 +37,11 @@ def _metal_marker_action(system: str, machine: str) -> Literal["run", "skip"]:
     return "run" if (system == "Darwin" and machine == "arm64") else "skip"
 
 
+def _mflux_marker_action(available: bool) -> Literal["run", "skip"]:
+    """`mflux` tests run where mflux is importable and skip elsewhere (the extra is optional)."""
+    return "run" if available else "skip"
+
+
 def _hard_exit_code(recorded: int | None) -> int | None:
     """Code for the atexit hard exit, or None to let the interpreter exit normally.
 
@@ -67,6 +73,13 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         for item in items:
             if "metal" in item.keywords:
                 item.add_marker(metal_skip)
+
+    mflux_available = importlib.util.find_spec("mflux") is not None
+    if _mflux_marker_action(available=mflux_available) == "skip":
+        mflux_skip = pytest.mark.skip(reason="mflux: install the mlx-dfloat[mflux] extra")
+        for item in items:
+            if "mflux" in item.keywords:
+                item.add_marker(mflux_skip)
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:

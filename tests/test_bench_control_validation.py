@@ -376,11 +376,14 @@ def test_make_provider_for_bf16_decodes_every_block_once_into_its_own_resident_d
     import numpy as np
     from scripts._flux_rig import ResidentProvider
     from scripts.bench_control_validation import make_provider
+    from tests._flux_fakes import FLUX_TABLE
     from tests.test_bench_flux_step import _fake_rig
 
     ckpt, groups, shapes, source = _fake_rig(np.random.default_rng(6))
     calls = []
-    provider = make_provider("bf16", ckpt, groups, shapes, decode=_counting_reference_decode(calls))
+    provider = make_provider(
+        "bf16", ckpt, groups, shapes, decode=_counting_reference_decode(calls), name_map=FLUX_TABLE
+    )
     assert calls == list(shapes)
     assert isinstance(provider, ResidentProvider)
     assert provider.launches == 0
@@ -396,11 +399,14 @@ def test_make_provider_hands_control_and_df11_to_the_step_bench(mode, want):
     # bench's, so the verdict would say nothing about the bench it validates.
     import numpy as np
     from scripts.bench_control_validation import make_provider
+    from tests._flux_fakes import FLUX_TABLE
     from tests.test_bench_flux_step import _fake_rig
 
     ckpt, groups, shapes, _source = _fake_rig(np.random.default_rng(7))
     calls = []
-    make_provider(mode, ckpt, groups, shapes, decode=_counting_reference_decode(calls))
+    make_provider(
+        mode, ckpt, groups, shapes, decode=_counting_reference_decode(calls), name_map=FLUX_TABLE
+    )
     assert len(calls) == want
 
 

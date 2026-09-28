@@ -1,10 +1,14 @@
+import builtins
 import json
 import sys
 import threading
 
+import psutil
 import pytest
-import scripts._watchdog as wd
-from scripts._watchdog import Watchdog, verdict
+
+import mlx_dfloat._watchdog as wd
+from mlx_dfloat._watchdog import Watchdog, verdict
+from mlx_dfloat.errors import DFloatDependencyError
 
 
 def test_memory_verdict_uses_process_rss():
@@ -34,7 +38,10 @@ class _FixedRssProcess:
 
 
 def _stub_memory(monkeypatch, *, rss, mlx_active, mlx_cache):
-    monkeypatch.setattr(wd.psutil, "Process", _FixedRssProcess(rss))
+    # `psutil` is imported inside the functions that need it (never at module top level), so
+    # there is no `wd.psutil` attribute to patch; patching the real, shared `psutil` module here
+    # still reaches the watchdog's own `import psutil`, since Python caches modules by name.
+    monkeypatch.setattr(psutil, "Process", _FixedRssProcess(rss))
     monkeypatch.setattr(wd.mx, "get_active_memory", lambda: mlx_active)
     monkeypatch.setattr(wd.mx, "get_cache_memory", lambda: mlx_cache)
 
@@ -120,7 +127,7 @@ def test_watchdog_sample_error_still_aborts(tmp_path, monkeypatch):
     def boom():
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(wd.psutil, "Process", boom)
+    monkeypatch.setattr(psutil, "Process", boom)
     exit_codes = _run_watchdog_to_abort(tmp_path, monkeypatch, ceiling=10**15, budget=1e9)
     assert exit_codes
     assert exit_codes[0] == 70
@@ -149,7 +156,7 @@ def test_verdict_uses_the_os_footprint_not_rss_plus_mlx(monkeypatch, tmp_path):
     # Bug caught: counting mx.load'ed arrays twice (RSS and MLX active) and false-aborting at half
     # the real ceiling.
     monkeypatch.setattr(wd, "phys_footprint", lambda: 10**9)
-    monkeypatch.setattr(wd.psutil, "Process", _FixedRssProcess(rss=10**12))
+    monkeypatch.setattr(psutil, "Process", _FixedRssProcess(rss=10**12))
     monkeypatch.setattr(wd.mx, "get_active_memory", lambda: 10**12)
     monkeypatch.setattr(wd.mx, "get_cache_memory", lambda: 0)
     reason, sample = wd.Watchdog(tmp_path, ceiling=5 * 10**9, budget=60)._sample()
@@ -192,6 +199,16 @@ def test_a_failing_footprint_read_aborts_as_a_sample_error(monkeypatch, tmp_path
     assert reason == "sample_error"
 
 
+def test_the_scripts_watchdog_module_is_the_package_one():
+    # Bug caught: the compatibility shim re-implementing or re-defining Watchdog instead of
+    # re-exporting the package's own class, which would let the two drift apart silently.
+    import scripts._watchdog as script_side
+
+    from mlx_dfloat import _watchdog as package_side
+
+    assert script_side.Watchdog is package_side.Watchdog
+
+
 _FOOTPRINT_RUNNER = """
 import json, sys
 import mlx.core as mx, psutil
@@ -228,3 +245,27 @@ def test_phys_footprint_sees_a_gpu_allocation_that_rss_misses():
     # RSS may pick up a little of a Metal allocation; the point is that it does not grow by the
     # allocation while the footprint does.
     assert deltas["rss"] < 200 * 1024**2
+
+
+def _without_psutil(monkeypatch):
+    real_import = builtins.__import__
+
+    def no_psutil(name, *args, **kwargs):
+        if name == "psutil":
+            raise ImportError("No module named 'psutil'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_psutil)
+
+
+def test_a_missing_psutil_refuses_the_watchdog_up_front(tmp_path, monkeypatch):
+    # Bug caught: psutil imported only inside the sampling try, so a venv without it starts the
+    # watchdog, turns the ImportError into `sample_error`, and exits 70 fifty milliseconds later
+    # with an abort artifact that never names psutil; or default_ceiling() leaking a bare
+    # ImportError instead of the package's dependency error.
+    _without_psutil(monkeypatch)
+    with pytest.raises(DFloatDependencyError, match="psutil"):
+        Watchdog(tmp_path, ceiling=10**15, budget=60)
+    with pytest.raises(DFloatDependencyError, match="psutil"):
+        wd.default_ceiling()
+    assert not (tmp_path / "abort.json").exists()

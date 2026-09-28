@@ -103,6 +103,8 @@ try:
     from mlx_dfloat._memory_caps import install_memory_caps
     from mlx_dfloat.decode import DecodeResult
     from mlx_dfloat.format import DF11Checkpoint, MxGroup, open_checkpoint
+    from mlx_dfloat.integrate.names import NameMap
+    from mlx_dfloat.mflux.flux1.names import flux_name_map
 except Exception as exc:  # a broken environment is a tool error (2)
     print(
         f"error: cannot import the project modules ({exc}); run from a synced checkout",
@@ -610,15 +612,18 @@ def make_provider(
     shapes: Mapping[str, Any],
     *,
     decode: Decode | None = None,
+    name_map: NameMap | None = None,
 ) -> WeightProvider:
     """The mode's provider.
 
     ``DF11Provider`` for df11 modes; otherwise a ``ReuseProvider`` over one double and one single
     block decoded once by that same backend (the control's only extra memory). ``decode`` is the
-    Metal backend by default; tests inject a counting reference decode.
+    Metal backend by default; tests inject a counting reference decode. ``name_map`` defaults to
+    the real FLUX.1 map (``flux_name_map()``, which imports mflux); tests inject the fakes' table.
     """
+    names = flux_name_map() if name_map is None else name_map
     decoder = DF11Provider(
-        resident, {n: ckpt.groups[n].matrix_names for n in shapes}, decode=decode
+        resident, {n: ckpt.groups[n].matrix_names for n in shapes}, names, decode=decode
     )
     if mode.startswith("df11-prefetch"):
         stream = mx.new_stream(mx.gpu) if mode == "df11-prefetch" else None
@@ -630,7 +635,7 @@ def make_provider(
     single = decoder.weights_for(single_name, shapes[single_name])
     mx.eval(double, single)
     decoder.verify()
-    return ReuseProvider(double, single)
+    return ReuseProvider({DOUBLE_PREFIX: double, SINGLE_PREFIX: single}, names)
 
 
 def denoise_step(

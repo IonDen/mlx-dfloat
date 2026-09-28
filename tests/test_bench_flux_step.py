@@ -642,10 +642,11 @@ def _fake_rig(rng, *, n_double=2, n_single=2):
     """A fake transformer's shapes, one real DF11 group per block, a ckpt-shaped view of their names."""
     from types import SimpleNamespace
 
-    from tests.test_flux_rig import FakeTransformer, Recorder, _df11_groups
+    from tests._flux_fakes import FLUX_TABLE, FakeTransformer, Recorder, block_lists, df11_groups
 
-    shapes = install_placeholders(FakeTransformer(Recorder(), n_double=n_double, n_single=n_single))
-    groups, names, source = _df11_groups(shapes, rng)
+    tf = FakeTransformer(Recorder(), n_double=n_double, n_single=n_single)
+    shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
+    groups, names, source = df11_groups(shapes, rng)
     ckpt = SimpleNamespace(groups={n: SimpleNamespace(matrix_names=names[n]) for n in names})
     return ckpt, groups, shapes, source
 
@@ -683,11 +684,17 @@ def test_make_provider_for_a_control_decodes_block_0_of_each_kind_once():
     # two-block control), decoding other blocks than the first of each kind, or launching in the step.
     import mlx.core as mx
     import numpy as np
+    from tests._flux_fakes import FLUX_TABLE
 
     ckpt, groups, shapes, source = _fake_rig(np.random.default_rng(4))
     calls = []
     provider = make_provider(
-        "control", ckpt, groups, shapes, decode=_counting_reference_decode(calls)
+        "control",
+        ckpt,
+        groups,
+        shapes,
+        decode=_counting_reference_decode(calls),
+        name_map=FLUX_TABLE,
     )
     assert calls == ["transformer_blocks.0", "single_transformer_blocks.0"]
     assert isinstance(provider, ReuseProvider)
@@ -703,10 +710,13 @@ def test_make_provider_for_df11_decodes_nothing_before_the_first_step(mode):
     # Bug caught: a df11 provider that decodes at construction (launches before the first step, which
     # the warm-up's launch count would then miss).
     import numpy as np
+    from tests._flux_fakes import FLUX_TABLE
 
     ckpt, groups, shapes, _source = _fake_rig(np.random.default_rng(5))
     calls = []
-    provider = make_provider(mode, ckpt, groups, shapes, decode=_counting_reference_decode(calls))
+    provider = make_provider(
+        mode, ckpt, groups, shapes, decode=_counting_reference_decode(calls), name_map=FLUX_TABLE
+    )
     assert calls == []
     assert isinstance(provider, DF11Provider)
     provider.weights_for("transformer_blocks.1", shapes["transformer_blocks.1"])
@@ -1026,6 +1036,7 @@ def test_make_provider_for_prefetch_modes_wraps_the_decoder_with_the_right_strea
     import mlx.core as mx
     import numpy as np
     from scripts._flux_rig import PrefetchProvider
+    from tests._flux_fakes import FLUX_TABLE
 
     from mlx_dfloat.decode import decode_group
 
@@ -1036,8 +1047,12 @@ def test_make_provider_for_prefetch_modes_wraps_the_decoder_with_the_right_strea
         streams.append(mx.default_stream(mx.gpu))  # the stream a kernel launched here would use
         return decode_group(group, backend="reference")
 
-    two = make_provider("df11-prefetch", ckpt, groups, shapes, decode=recording_decode)
-    one = make_provider("df11-prefetch-inline", ckpt, groups, shapes, decode=recording_decode)
+    two = make_provider(
+        "df11-prefetch", ckpt, groups, shapes, decode=recording_decode, name_map=FLUX_TABLE
+    )
+    one = make_provider(
+        "df11-prefetch-inline", ckpt, groups, shapes, decode=recording_decode, name_map=FLUX_TABLE
+    )
     assert isinstance(two, PrefetchProvider)
     assert isinstance(one, PrefetchProvider)
     assert two.stream is not None
