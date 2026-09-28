@@ -20,7 +20,7 @@ from tests._flux_fakes import (
     write_flux_checkpoint,
 )
 
-from mlx_dfloat.errors import DFloatIntegrationError
+from mlx_dfloat.errors import DFloatFormatError, DFloatIntegrationError
 from mlx_dfloat.format import open_checkpoint
 from mlx_dfloat.integrate.placeholders import install_placeholders
 from mlx_dfloat.mflux.flux1 import transformer
@@ -143,6 +143,68 @@ def test_build_transformer_names_the_active_memory_the_extras_added(tmp_path, mo
         match=r"extras added 3\.00 GiB of active memory \(limit 2 GiB\)",
     ):
         build_transformer(None, ckpt, name_map=FLUX_TABLE)
+
+
+def test_base_transformer_index_maps_every_tensor_to_its_shard_and_refuses_an_escaping_name(
+    tmp_path,
+):
+    # Bug caught: a weight_map entry like "../x.safetensors" followed out of the directory, or the
+    # second shard's tensors missing from the index.
+    from tests._df11_fixtures import write_bf16_original
+
+    from mlx_dfloat.mflux.flux1.transformer import base_transformer_index
+
+    root = write_bf16_original(
+        tmp_path / "t", {"a.weight": np.ones(4, np.uint16), "b.bias": np.ones(2, np.uint16)}
+    )
+    index = base_transformer_index(root, index_file="model.safetensors.index.json")
+    assert set(index) == {"a.weight", "b.bias"}
+    assert all(p.parent == root for p, _i in index.values())
+    (root / "model.safetensors.index.json").write_text(
+        '{"weight_map": {"x": "../evil.safetensors"}}'
+    )
+    with pytest.raises(DFloatFormatError, match="escapes"):
+        base_transformer_index(root, index_file="model.safetensors.index.json")
+
+
+def test_build_transformer_loads_extras_from_an_alternative_source_and_base_extras_drops_the_matrices(
+    tmp_path, monkeypatch
+):
+    # Bug caught: the BF16 side reading the DF11 repo's extras (a different file, in principle a
+    # different value), or base_extras leaving a matrix in (extras_plan then maps it to a parameter
+    # twice).
+    from tests._df11_fixtures import write_bf16_original
+
+    from mlx_dfloat.mflux.flux1.transformer import base_extras, base_transformer_index
+
+    monkeypatch.setattr(transformer, "seam_transformer_class", _fake_seam_class)
+    tf = FakeSeamTransformer(Recorder(), n_double=1, n_single=1)
+    shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
+    extras_shapes = {n: tuple(a.shape) for n, a in tree_flatten(tf.parameters()) if a.size}
+    df11_extras = {
+        _checkpoint_name(n): np.full(s, 0x3F80, np.uint16) for n, s in extras_shapes.items()
+    }
+    write_flux_checkpoint(tmp_path / "df11", shapes, np.random.default_rng(2), extras=df11_extras)
+    ckpt = open_checkpoint(tmp_path / "df11")
+    base_tensors = {
+        _checkpoint_name(n): np.full(s, 0x4000, np.uint16)  # 2.0 instead of 1.0
+        for n, s in extras_shapes.items()
+    }
+    base_tensors.update(
+        {
+            m: np.zeros(shapes[b][FLUX_TABLE.place(m).attr], np.uint16)
+            for b in shapes
+            for m in ckpt.groups[b].matrix_names
+        }
+    )
+    root = write_bf16_original(tmp_path / "base", base_tensors)
+    index = base_transformer_index(root, index_file="model.safetensors.index.json")
+    extras = base_extras(index, ckpt)
+    assert set(extras) == set(df11_extras)
+    built, _shapes = build_transformer(None, ckpt, name_map=FLUX_TABLE, extras=extras)
+    for name, array in tree_flatten(built.parameters()):
+        if array.size:
+            assert float(array.reshape(-1)[0]) == 2.0, name
 
 
 # --- the mflux lane --------------------------------------------------------------------------------

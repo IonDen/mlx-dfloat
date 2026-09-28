@@ -6,7 +6,17 @@ import mlx.core as mx
 import numpy as np
 import pytest
 from tests._df11_fixtures import random_bf16, write_checkpoint
-from tests._flux_fakes import FF, FLUX_TABLE, D, FakeTransformer, Recorder, block_lists, df11_groups
+from tests._flux_fakes import (
+    FF,
+    FLUX_TABLE,
+    D,
+    FakeSeamTransformer,
+    FakeTransformer,
+    Recorder,
+    block_lists,
+    df11_groups,
+    write_flux_checkpoint,
+)
 
 from mlx_dfloat.decode import STATUS_INVALID_CODE, decode_group
 from mlx_dfloat.errors import DFloatFormatError, DFloatIntegrationError
@@ -172,6 +182,32 @@ def test_extras_plan_refuses_two_checkpoint_names_for_one_parameter(tmp_path):
     ckpt, _ = _ckpt(tmp_path, extras=extras)
     with pytest.raises(DFloatFormatError, match=r"transformer_blocks\.0\.ff\.linear1\.bias"):
         extras_plan(ckpt, FLUX_TABLE, counts={"transformer_blocks": 2})
+
+
+def test_extras_plan_takes_an_alternative_extras_source(tmp_path):
+    # Bug caught: `extras=` ignored (the plan still reads the checkpoint's own extras), so the BF16
+    # side of the image check would load the DF11 repo's extras instead of the base's.
+    from mlx_dfloat._safetensors import read_header
+
+    tf = FakeSeamTransformer(Recorder(), n_double=1, n_single=0)
+    shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
+    write_flux_checkpoint(
+        tmp_path / "df11",
+        shapes,
+        np.random.default_rng(1),
+        extras={"x_embedder.bias": np.zeros(3, np.uint16)},
+    )
+    ckpt = open_checkpoint(tmp_path / "df11")
+    alt = tmp_path / "alt.safetensors"
+    mx.save_safetensors(str(alt), {"proj_out.bias": mx.zeros((2,), dtype=mx.bfloat16)})
+    alt_extras = {n: (alt, info) for n, info in read_header(alt).items()}
+    plan = extras_plan(
+        ckpt,
+        FLUX_TABLE,
+        counts={"transformer_blocks": 1, "single_transformer_blocks": 0},
+        extras=alt_extras,
+    )
+    assert [name for name, _p, _i in plan] == ["proj_out.bias"]
 
 
 def test_check_extras_cover_passes_only_when_every_non_matrix_parameter_has_an_extra():
