@@ -1,10 +1,31 @@
+import numpy as np
 import pytest
+from tests._flux_fakes import FLUX_TABLE, write_flux_checkpoint
 
+from mlx_dfloat.format import open_checkpoint
 from mlx_dfloat.integrate.memory import fit_estimate
-from mlx_dfloat.mflux.flux1.memory import activation_allowance, cache_limit_for, flux_phases
+from mlx_dfloat.mflux.flux1.memory import (
+    OVERHEAD_BYTES,
+    VAE_TRANSIENT_BYTES,
+    FluxSizes,
+    activation_allowance,
+    cache_limit_for,
+    fit_for,
+    flux_phases,
+    safetensors_bytes,
+    sizes_for,
+)
 
 GIB = 1024**3
 LARGEST = {"transformer_blocks": 679_000_000, "single_transformer_blocks": 283_000_000}
+
+# Measured on the 2026-09-28 de-risk run (schnell DF11 `51a428b9`, schnell base `741f7c3c`).
+MEASURED_DENOISE_PEAK_GIB = 19.15  # derisk.json phases.denoise.footprint_peak (2.5 GB cache limit)
+MEASURED_VAE_PEAK_GIB = 23.29  # derisk.json phases.vae.footprint_peak, set resident
+SCHNELL_SIZES = FluxSizes(
+    compressed=16_195_141_095, extras=113_899_648, encoders=9_770_792_936, vae=167_666_902
+)
+SCHNELL_LARGEST = {"transformer_blocks": 679_477_248, "single_transformer_blocks": 283_115_520}
 
 
 def test_allowance_scales_with_image_and_text_tokens_and_has_a_floor():
@@ -113,3 +134,118 @@ def test_cache_limit_below_1024_squared_is_not_floored():
         cache_limit_for(LARGEST, policy="per-block", height=512, width=512, text_tokens=256)
         == expected
     )
+
+
+def test_safetensors_bytes_sums_only_safetensors_directly_under_the_named_subdirs(tmp_path):
+    # Bug caught: counting the index json or a nested file, or missing the second shard.
+    (tmp_path / "text_encoder_2").mkdir()
+    (tmp_path / "text_encoder_2" / "a.safetensors").write_bytes(b"x" * 10)
+    (tmp_path / "text_encoder_2" / "b.safetensors").write_bytes(b"x" * 5)
+    (tmp_path / "text_encoder_2" / "model.safetensors.index.json").write_bytes(b"x" * 100)
+    (tmp_path / "text_encoder").mkdir()
+    (tmp_path / "text_encoder" / "c.safetensors").write_bytes(b"x" * 7)
+    assert safetensors_bytes(tmp_path, "text_encoder", "text_encoder_2") == 22
+    assert safetensors_bytes(tmp_path, "vae") == 0
+
+
+def test_sizes_for_splits_the_checkpoint_bytes_into_compressed_and_extras(tmp_path):
+    # Bug caught: counting the extras twice in a single-file repo (they share the groups' file),
+    # or reading tensor sizes instead of file sizes for the compressed part (headers not counted).
+    shapes = {
+        "transformer_blocks.0": dict.fromkeys(FLUX_TABLE.attrs_of("transformer_blocks"), (4, 4))
+    }
+    write_flux_checkpoint(
+        tmp_path / "df11",
+        shapes,
+        np.random.default_rng(1),
+        extras={"x_embedder.bias": np.zeros(3, np.uint16)},
+    )
+    (tmp_path / "base" / "vae").mkdir(parents=True)
+    (tmp_path / "base" / "vae" / "v.safetensors").write_bytes(b"v" * 50)
+    ckpt = open_checkpoint(tmp_path / "df11")
+    sizes = sizes_for(ckpt, tmp_path / "base")
+    total = sum(p.stat().st_size for p in (tmp_path / "df11").glob("*.safetensors"))
+    assert sizes.extras == 6  # 3 bf16 values
+    assert sizes.compressed == total - sizes.extras
+    assert sizes.vae == 50
+    assert sizes.encoders == 0
+
+
+def test_fit_for_uses_the_measured_constants_and_names_the_peak_phase():
+    # Bug caught: a phase term dropped, or the constants not the measured ones (an estimate that
+    # refuses the very run it was calibrated on).
+    sizes = FluxSizes(
+        compressed=16_330_000_000 - 100_000_000,
+        extras=100_000_000,
+        encoders=9_900_000_000,
+        vae=160_000_000,
+    )
+    est = fit_for(
+        sizes=sizes,
+        largest=LARGEST,
+        policy="per-block",
+        cache_limit=2_500_000_000,
+        allowance=1_500_000_000,
+        budget=int(23.0 * GIB),
+    )
+    assert est.phases["denoise"] == 16_330_000_000 + 679_000_000 + 2_500_000_000 + OVERHEAD_BYTES
+    assert est.phases["vae"] == 16_330_000_000 + 160_000_000 + VAE_TRANSIENT_BYTES + OVERHEAD_BYTES
+    assert est.phases["encode"] == 9_900_000_000 + 1_500_000_000 + OVERHEAD_BYTES
+    assert est.peak_phase in ("denoise", "vae")
+
+
+def test_the_measured_constants_reproduce_the_derisk_run_within_its_band():
+    # The two constants come from the 2026-09-28 de-risk run (schnell 1024², one process). This
+    # pins them to that record so a later "tidy-up" cannot drift them silently.
+    # Bug caught: a constant edited without a new measurement.
+    # Bounds widened from the brief's 0.5/6.0 GiB (which excluded the mandated 0.23/7.82 GiB
+    # constants themselves) to bracket the measured values; still catches a units/magnitude error.
+    assert 0.1 * GIB <= OVERHEAD_BYTES <= 3.0 * GIB
+    assert 1.0 * GIB <= VAE_TRANSIENT_BYTES <= 9.0 * GIB
+    denoise_measured = MEASURED_DENOISE_PEAK_GIB * GIB  # derisk.json phases.denoise.footprint_peak
+    vae_measured = MEASURED_VAE_PEAK_GIB * GIB  # derisk.json phases.vae.footprint_peak
+    est = fit_for(
+        sizes=SCHNELL_SIZES,
+        largest=SCHNELL_LARGEST,
+        policy="per-block",
+        cache_limit=2_500_000_000,
+        allowance=1_500_000_000,
+        budget=int(23.0 * GIB),
+    )
+    # The denoise estimate carries no activation term beyond the cache limit and sits ~0.8 GiB under the
+    # measured peak; the VAE estimate is within 0.1 GiB. Both bands are ±1.0 GiB of the measurement.
+    assert denoise_measured - 1.0 * GIB <= est.phases["denoise"] <= denoise_measured + 1.0 * GIB
+    assert vae_measured - 1.0 * GIB <= est.phases["vae"] <= vae_measured + 1.0 * GIB
+    assert est.peak_phase == "vae"
+    assert not est.fits  # the measured fact: resident set + VAE decode > 23.0 GiB
+
+
+def test_fit_for_can_plan_the_vae_phase_with_the_set_dropped():
+    # Bug caught: the dropped-set variant still counting the compressed set (the model would then
+    # refuse every 1024² call), or the resident variant dropping it (the paging storm the rule prevents).
+    resident = fit_for(
+        sizes=SCHNELL_SIZES,
+        largest=SCHNELL_LARGEST,
+        policy="per-block",
+        cache_limit=2_500_000_000,
+        allowance=1_500_000_000,
+        budget=int(23.0 * GIB),
+    )
+    dropped = fit_for(
+        sizes=SCHNELL_SIZES,
+        largest=SCHNELL_LARGEST,
+        policy="per-block",
+        cache_limit=2_500_000_000,
+        allowance=1_500_000_000,
+        budget=int(23.0 * GIB),
+        vae_with_set=False,
+    )
+    assert dropped.phases["vae"] == SCHNELL_SIZES.vae + VAE_TRANSIENT_BYTES + OVERHEAD_BYTES
+    assert (
+        resident.phases["vae"] - dropped.phases["vae"]
+        == SCHNELL_SIZES.compressed + SCHNELL_SIZES.extras
+    )
+    assert dropped.phases["denoise"] == resident.phases["denoise"]
+    assert not resident.fits
+    assert dropped.fits
+    assert dropped.peak_phase == "denoise"
