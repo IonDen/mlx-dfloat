@@ -1,3 +1,5 @@
+import builtins
+import importlib.util
 import json
 import os
 import subprocess
@@ -14,21 +16,22 @@ REPO = Path(__file__).resolve().parents[1]
 
 
 class _Image:
-    def __init__(self, log):
-        self.log = log
+    def __init__(self, log, *, writes=True):
+        self.log, self.writes = log, writes
 
-    def save(self, path, export_json_metadata=False):
-        self.log.append(("save", str(path), export_json_metadata))
-        Path(path).write_bytes(b"png")
+    def save(self, path, export_json_metadata=False, overwrite=False):
+        self.log.append(("save", str(path), export_json_metadata, overwrite))
+        if self.writes:
+            Path(path).write_bytes(b"png")
 
 
 class _Model:
-    def __init__(self, log, **kwargs):
-        self.log, self.kwargs = log, kwargs
+    def __init__(self, log, *, image_writes=True, **kwargs):
+        self.log, self.kwargs, self.image_writes = log, kwargs, image_writes
 
     def generate_image(self, **kwargs):
         self.log.append(("generate", kwargs))
-        return _Image(self.log)
+        return _Image(self.log, writes=self.image_writes)
 
     def report(self):
         return {"model": self.kwargs["model"], "decode_launches": 57}
@@ -37,7 +40,7 @@ class _Model:
 class _Watchdog:
     def __init__(self, out_dir, *, ceiling, budget):
         self.out_dir, self.ceiling, self.budget, self.stopped = out_dir, ceiling, budget, False
-        self.peak_footprint = 12345
+        self.peak_footprint = 10**15  # far above any real footprint: the report must carry it
 
     def start(self):
         return self
@@ -46,7 +49,13 @@ class _Watchdog:
         self.stopped = True
 
 
-def _run(argv, log, tmp_path, factory=None):
+def _resolve(path):
+    """Like mflux's ImageUtil.resolve_output_path: an existing name gets a suffix."""
+    path = Path(path)
+    return path.with_name(f"{path.stem}-1{path.suffix}") if path.exists() else path
+
+
+def _run(argv, log, tmp_path, factory=None, install_caps=lambda: (20, 22)):
     watchdogs = []
 
     def watchdog_factory(out_dir, **kw):
@@ -57,25 +66,14 @@ def _run(argv, log, tmp_path, factory=None):
     code = gen.run(
         args,
         model_factory=factory or (lambda **kw: _Model(log, **kw)),
-        install_caps=lambda: (20, 22),
+        install_caps=install_caps,
         watchdog_factory=watchdog_factory,
+        resolve_output=_resolve,
     )
     return code, watchdogs
 
 
-@pytest.mark.parametrize(
-    "flag",
-    [
-        ["--quantize", "8"],
-        ["-q", "4"],
-        ["--lora-paths", "a.safetensors"],
-        ["--lora-scales", "1.0"],
-        ["--image-path", "in.png"],
-        ["--image-strength", "0.5"],
-        ["--pid-decode"],
-        ["--controlnet-image-path", "c.png"],
-    ],
-)
+@pytest.mark.parametrize("flag", [[f, "x"] for f in gen.REFUSED] + [["-q", "4"]])
 def test_refused_mflux_flags_exit_2_naming_the_flag_before_anything_loads(flag, capsys, tmp_path):
     # Bug caught: an unsupported flag silently ignored (the user thinks the LoRA applied), or
     # argparse rejecting it as unknown (no reason given), or the model built before the refusal.
@@ -146,7 +144,7 @@ def test_generate_builds_the_model_from_the_flags_writes_the_image_and_the_repor
             "scheduler": "linear",
         },
     )
-    assert log[1] == ("save", str(out), False)
+    assert log[1] == ("save", str(out), False, True)
     report = json.loads((tmp_path / "r.json").read_text())
     assert report["exit_code"] == 0
     assert report["output"] == str(out)
@@ -164,7 +162,7 @@ def test_generate_builds_the_model_from_the_flags_writes_the_image_and_the_repor
     assert watchdogs[0].out_dir == out.parent
     assert watchdogs[0].budget == 60
     assert watchdogs[0].stopped
-    assert report["footprint_peak_bytes"] >= 12345
+    assert report["footprint_peak_bytes"] == 10**15
     assert (
         report["footprint_peak_label"] == "OS phys_footprint, sampled every 0.05 s by the watchdog"
     )
@@ -206,19 +204,146 @@ def test_a_package_error_exits_2_with_its_name_and_the_report_records_it(tmp_pat
     assert watchdogs[0].stopped
 
 
+def _hide_mflux(monkeypatch):
+    """No mflux, whatever this venv holds: both the import and the ``find_spec`` probe miss it."""
+    real_import = builtins.__import__
+    real_find_spec = importlib.util.find_spec
+
+    def is_mflux(name):
+        return name == "mflux" or name.startswith("mflux.")
+
+    def no_mflux(name, *args, **kwargs):
+        if is_mflux(name):
+            raise ImportError("no mflux here")
+        return real_import(name, *args, **kwargs)
+
+    def find_spec(name, *args, **kwargs):
+        return None if is_mflux(name) else real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_mflux)
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+
+
 def test_missing_mflux_is_a_dependency_error_with_the_install_hint(tmp_path, capsys, monkeypatch):
-    # Bug caught: a bare ModuleNotFoundError for mflux from the default factory.
-    monkeypatch.setattr(
-        gen,
-        "_model_class",
-        lambda: (_ for _ in ()).throw(DFloatDependencyError("install mlx-dfloat[mflux]")),
-    )
+    # Bug caught: the default model lookup (or the output-name lookup) importing mflux in a way
+    # that surfaces a bare ModuleNotFoundError instead of the install hint, and exit 1.
+    _hide_mflux(monkeypatch)
+    monkeypatch.delitem(sys.modules, "mlx_dfloat.mflux.flux1.model", raising=False)
     args = gen.build_parser().parse_args(["--prompt", "p", "--output", str(tmp_path / "o.png")])
     code = gen.run(
         args, install_caps=lambda: (0, 0), watchdog_factory=lambda d, **k: _Watchdog(d, **k)
     )
     assert code == 2
     assert "install mlx-dfloat[mflux]" in capsys.readouterr().err
+
+
+def test_an_existing_output_is_kept_and_the_report_names_the_file_actually_written(tmp_path):
+    # Bug caught: the report (and the `ok:` line) naming the requested file while mflux wrote a
+    # suffixed one next to it, so a script reads the old image as the new one.
+    log = []
+    out = tmp_path / "o.png"
+    out.write_bytes(b"old")
+    code, _ = _run(
+        ["--prompt", "p", "--output", str(out), "--report", str(tmp_path / "r.json")],
+        log,
+        tmp_path,
+    )
+    assert code == 0
+    assert out.read_bytes() == b"old"
+    written = tmp_path / "o-1.png"
+    assert written.read_bytes() == b"png"
+    assert log[1] == ("save", str(written), False, True)
+    assert json.loads((tmp_path / "r.json").read_text())["output"] == str(written)
+
+
+def test_an_image_that_was_not_written_is_an_error_not_a_success(tmp_path, capsys):
+    # Bug caught: trusting mflux's save (it logs and swallows a write failure), so the command
+    # prints `ok:` and exits 0 with no image on disk.
+    log = []
+    code, _ = _run(
+        [
+            "--prompt",
+            "p",
+            "--output",
+            str(tmp_path / "o.png"),
+            "--report",
+            str(tmp_path / "r.json"),
+        ],
+        log,
+        tmp_path,
+        factory=lambda **kw: _Model(log, image_writes=False, **kw),
+    )
+    assert code == 2
+    assert "not written" in capsys.readouterr().err
+    assert json.loads((tmp_path / "r.json").read_text())["exit_code"] == 2
+
+
+def test_an_output_directory_that_cannot_be_created_exits_2_with_a_report(tmp_path, capsys):
+    # Bug caught: `mkdir` for the output's directory running outside the guarded block, so an
+    # OSError escapes as a traceback (exit 1) and no report is written.
+    (tmp_path / "file").write_bytes(b"")
+    code, watchdogs = _run(
+        [
+            "--prompt",
+            "p",
+            "--output",
+            str(tmp_path / "file" / "o.png"),
+            "--report",
+            str(tmp_path / "r.json"),
+        ],
+        [],
+        tmp_path,
+        factory=lambda **kw: pytest.fail("built"),
+    )
+    assert code == 2
+    assert watchdogs == []
+    report = json.loads((tmp_path / "r.json").read_text())
+    assert report["exit_code"] == 2
+    assert "Error" in report["error"]
+
+
+def test_a_cap_install_failure_exits_2_with_a_report(tmp_path):
+    # Bug caught: `install_caps()` running outside the guarded block (an OSError from the device
+    # query escaping as exit 1 with no report).
+    def failing_caps():
+        raise OSError("no device")
+
+    code, _ = _run(
+        [
+            "--prompt",
+            "p",
+            "--output",
+            str(tmp_path / "o.png"),
+            "--report",
+            str(tmp_path / "r.json"),
+        ],
+        [],
+        tmp_path,
+        factory=lambda **kw: pytest.fail("built"),
+        install_caps=failing_caps,
+    )
+    assert code == 2
+    assert "no device" in json.loads((tmp_path / "r.json").read_text())["error"]
+
+
+def test_a_report_that_cannot_be_written_exits_2_on_stderr(tmp_path, capsys):
+    # Bug caught: an OSError from the report write escaping `_finish` as a traceback (exit 1), or
+    # a run whose report was lost still exiting 0.
+    (tmp_path / "file").write_bytes(b"")
+    code, _ = _run(
+        [
+            "--prompt",
+            "p",
+            "--output",
+            str(tmp_path / "o.png"),
+            "--report",
+            str(tmp_path / "file" / "r.json"),
+        ],
+        [],
+        tmp_path,
+    )
+    assert code == 2
+    assert "report" in capsys.readouterr().err
 
 
 def test_a_watchdog_construction_failure_still_writes_the_report(tmp_path, capsys):
@@ -246,7 +371,7 @@ def test_a_watchdog_construction_failure_still_writes_the_report(tmp_path, capsy
     assert "DFloatDependencyError" in report["error"]
 
 
-@pytest.mark.parametrize("text", ["0", "-5", "abc"])
+@pytest.mark.parametrize("text", ["0", "-5", "abc", "inf", "-inf", "nan"])
 def test_cache_limit_must_be_a_positive_byte_count(text):
     # Bug caught (Review Focus 4): a zero or negative cache limit reaching mx.set_cache_limit.
     # A non-positive value and a non-numeric string raise ValueError with different messages

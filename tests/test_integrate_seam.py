@@ -453,3 +453,34 @@ def test_detach_forgets_the_provider_and_a_step_is_refused_until_the_next_attach
         tf(*inputs())
     tf.attach(ResidentProvider(resident_dicts(shapes)), shapes)
     mx.eval(tf(*inputs()))
+
+
+def test_detach_clears_a_df11_providers_pending_status_words():
+    # Bug caught: `detach` forgetting the provider without `reset()`, so a DF11 provider re-attached
+    # later still holds the dropped step's status words (and the decoded groups they reference)
+    # and the next step is refused as "unchecked".
+    import numpy as np
+    from tests._flux_fakes import (
+        FLUX_TABLE,
+        FakeSeamTransformer,
+        Recorder,
+        block_lists,
+        df11_groups,
+        inputs,
+    )
+
+    from mlx_dfloat.decode import decode_group
+    from mlx_dfloat.integrate.placeholders import install_placeholders
+    from mlx_dfloat.integrate.providers import DF11Provider
+
+    tf = FakeSeamTransformer(Recorder(), n_double=1, n_single=1)
+    shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
+    groups, names, _source = df11_groups(shapes, np.random.default_rng(11))
+    provider = DF11Provider(
+        groups, names, FLUX_TABLE, decode=lambda g: decode_group(g, backend="reference")
+    )
+    tf.attach(provider, shapes)
+    mx.eval(tf(*inputs()))
+    assert provider.pending != []  # verify_step was never called
+    tf.detach()
+    assert provider.pending == []

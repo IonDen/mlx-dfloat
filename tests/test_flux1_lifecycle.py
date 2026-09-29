@@ -53,6 +53,10 @@ class _Encoders:
         mx.eval(self.weight)
 
 
+def _fixed(bound):
+    return lambda: bound
+
+
 def _lifecycle(holder, cache=None, *, slack=MIB, encoders_loaded=False):
     gc.collect()
     mx.clear_cache()
@@ -63,7 +67,7 @@ def _lifecycle(holder, cache=None, *, slack=MIB, encoders_loaded=False):
         load_set=holder.load_set,
         unload_set=holder.unload_set,
         prompt_cache={} if cache is None else cache,
-        retained_bound_bytes=int(mx.get_active_memory()) + slack,
+        retained_bound=_fixed(int(mx.get_active_memory()) + slack),
         encoders_loaded=encoders_loaded,
     )
 
@@ -83,11 +87,13 @@ def test_a_new_prompt_evaluates_the_pair_and_drops_the_encoders_and_their_memory
     assert holder.encoders is None
     assert not life.encoders_loaded
     assert set(cache) == {"a lighthouse"}
-    assert int(mx.get_active_memory()) <= life.retained_bound_bytes  # the 8 MiB weight is gone
+    assert int(mx.get_active_memory()) <= life.retained_bound()  # the 8 MiB weight is gone
 
 
 def test_an_encoder_object_is_unreachable_after_the_drop():
-    # Bug caught: the lifecycle keeping its own reference to the encoders (the weakref stays alive).
+    # Bug caught: `drop_encoders` keeping its own reference to the encoder object (e.g. storing
+    # what `load_encoders` built on the lifecycle), so the T5 module outlives the drop and the
+    # weakref stays alive.
     holder = _Holder([])
     life = _lifecycle(holder)
     life.ensure_embeddings("p")
@@ -199,7 +205,7 @@ def test_a_failed_encode_still_drops_the_encoders_and_their_memory():
     # the implementation evaluates a pair before caching it); "b" raised before returning a pair,
     # so it was never cached at all.
     assert set(cache) == {"a"}
-    assert int(mx.get_active_memory()) <= life.retained_bound_bytes
+    assert int(mx.get_active_memory()) <= life.retained_bound()
 
 
 def test_pre_loaded_encoders_are_not_reloaded_but_are_still_dropped_at_the_end():
@@ -217,3 +223,89 @@ def test_pre_loaded_encoders_are_not_reloaded_but_are_still_dropped_at_the_end()
     assert events[0] == ("encode", "p")
     assert events[-1] == "unload_encoders"
     assert life.counters.encoder_loads == 0
+
+
+def test_an_eval_failure_drops_the_encoders_and_the_original_error_escapes(monkeypatch):
+    # Bug caught: a `try/finally` whose `drop_encoders()` runs while the failing eval's traceback
+    # still holds the lazy pair (and through it the 8 MiB encoder weight): `_reclaim` then raises
+    # DFloatResourceError and the real RuntimeError is demoted to `__context__`.
+    events = []
+    holder = _Holder(events)
+
+    def failing_eval(*arrays):
+        raise RuntimeError("simulated eval failure")
+
+    monkeypatch.setattr(lc, "_eval", failing_eval)
+    life = _lifecycle(holder)
+    with pytest.raises(RuntimeError, match="simulated eval failure") as info:
+        life.ensure_embeddings("p")
+    assert not isinstance(info.value, DFloatResourceError)
+    assert not life.encoders_loaded
+    assert "unload_encoders" in events
+    assert int(mx.get_active_memory()) <= life.retained_bound()
+
+
+def test_a_failure_path_reclaim_error_is_logged_not_raised_over_the_original(monkeypatch, caplog):
+    # Bug caught: the failure path's `_reclaim` raising DFloatResourceError over the encode error,
+    # so the caller sees a memory complaint instead of what actually broke.
+    events = []
+    holder = _Holder(events, leak_set=False)
+    leaked = []
+
+    def encode_and_leak(prompt):
+        leaked.append(holder.encoders.weight)  # something else keeps the encoder weight alive
+        raise ValueError("encode broke")
+
+    holder.encode = encode_and_leak
+    life = _lifecycle(holder)
+    with (
+        caplog.at_level("WARNING", logger="mlx_dfloat.mflux.flux1"),
+        pytest.raises(ValueError, match="encode broke"),
+    ):
+        life.ensure_embeddings("p")
+    assert "still active" in caplog.text
+    assert not life.encoders_loaded
+
+
+def test_the_retained_bound_is_read_at_each_drop_so_cached_embeddings_count():
+    # Bug caught: the bound frozen at construction, so embeddings cached after it (or a VAE that
+    # was evaluated later) read as a leak and a clean drop raises DFloatResourceError.
+    holder = _Holder([])
+    gc.collect()
+    mx.clear_cache()
+    extra = [0]
+    base = int(mx.get_active_memory()) + MIB
+    life = Lifecycle(
+        load_encoders=holder.load_encoders,
+        unload_encoders=holder.unload_encoders,
+        encode=holder.encode,
+        load_set=holder.load_set,
+        unload_set=holder.unload_set,
+        prompt_cache={},
+        retained_bound=lambda: base + extra[0],
+    )
+    kept = mx.ones((2048, 2048), dtype=mx.bfloat16)  # 8 MiB that legitimately stays (embeddings)
+    mx.eval(kept)
+    extra[0] = 16 * MIB  # the caller's bound grew after construction
+    life.ensure_set()
+    life.drop_set()
+    extra[0] = 0
+    with pytest.raises(DFloatResourceError, match="still resident"):
+        life.ensure_set()
+    del kept
+
+
+def test_ensure_set_refuses_to_load_a_second_copy_while_memory_is_still_active():
+    # Bug caught: ensure_set loading the compressed set while a previous copy is still held
+    # (a leaked provider, a failed drop), so two 15 GiB sets sit side by side.
+    events = []
+    holder = _Holder(events, leak_set=True)
+    life = _lifecycle(holder)
+    life.ensure_set()
+    with pytest.raises(DFloatResourceError):
+        life.drop_set()  # the leak: the previous set is still held
+    events.clear()
+    with pytest.raises(DFloatResourceError, match="a previous set is still resident"):
+        life.ensure_set()
+    assert events == []
+    assert not life.set_resident

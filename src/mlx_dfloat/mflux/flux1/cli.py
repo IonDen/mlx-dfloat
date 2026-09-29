@@ -40,9 +40,12 @@ def cache_limit_bytes(text: str) -> int:
     """A positive byte count, ``2.5e9`` accepted.
 
     Raises:
-        ValueError: Not a number, or not positive.
+        ValueError: Not a finite number, or not positive.
     """
-    value = int(float(text))
+    try:
+        value = int(float(text))
+    except OverflowError as exc:  # "inf"
+        raise ValueError(f"cache limit must be a finite byte count, got {text!r}") from exc
     if value <= 0:
         raise ValueError(f"cache limit must be positive, got {text!r}")
     return value
@@ -90,7 +93,9 @@ def _add_arguments(p: argparse.ArgumentParser) -> None:
         "--negative-prompt", default=None, help="accepted and ignored, as mflux does for FLUX.1"
     )
     p.add_argument(
-        "--output", default="image.png", help="the image file; an existing file is not overwritten"
+        "--output",
+        default="image.png",
+        help="the image file; an existing file is kept and the new one gets a numbered name",
     )
     p.add_argument(
         "--metadata", action="store_true", help="also write mflux's JSON metadata sidecar"
@@ -115,7 +120,12 @@ def _add_arguments(p: argparse.ArgumentParser) -> None:
         action="store_true",
         help="skip the memory fit estimate (a warning instead of a refusal)",
     )
-    p.add_argument("--report", type=Path, default=None, help="write the run report as JSON")
+    p.add_argument(
+        "--report",
+        type=Path,
+        default=None,
+        help="write the run report as JSON (an existing file is replaced)",
+    )
     p.add_argument(
         "--wall-budget",
         type=float,
@@ -149,11 +159,23 @@ def _model_class() -> Callable[..., Any]:
     return DFloatFlux1
 
 
+def _output_resolver() -> Callable[[Path], Path]:
+    """The saved name by mflux's own rule (an existing file gets a numbered name next to it)."""
+    from mflux.utils.image_util import ImageUtil
+
+    resolve: Callable[[Path], Path] = ImageUtil.resolve_output_path
+    return resolve
+
+
 def _finish(args: argparse.Namespace, report: dict[str, Any]) -> int:
     """Write the report (when ``--report`` was given) and announce success. The one path every exit uses."""
     if args.report is not None:
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(json.dumps(report, indent=1, default=str))
+        try:
+            args.report.parent.mkdir(parents=True, exist_ok=True)
+            args.report.write_text(json.dumps(report, indent=1, default=str))
+        except OSError as exc:
+            print(f"error: the report was not written: {exc}", file=sys.stderr)
+            return EXIT_ERROR
     if report["exit_code"] == EXIT_OK:
         peak = report.get("footprint_peak_bytes")
         suffix = f" (footprint peak {peak / 1024**3:.2f} GiB)" if peak is not None else ""
@@ -167,8 +189,13 @@ def run(
     model_factory: Callable[..., Any] | None = None,
     install_caps: Callable[[], tuple[int, int]] = install_memory_caps,
     watchdog_factory: Callable[..., Any] = Watchdog,
+    resolve_output: Callable[[Path], Path] | None = None,
 ) -> int:
-    """Refuse, cap, watch, build, generate, save, report. Returns the exit code."""
+    """Refuse, cap, watch, build, generate, save, report. Returns the exit code.
+
+    ``resolve_output`` maps the requested file to the one written (default: mflux's rule, looked
+    up lazily next to the model class).
+    """
     refused = refused_option(args)
     if refused is not None:
         print(f"error: {refused}", file=sys.stderr)
@@ -178,8 +205,6 @@ def run(
             "warning: --negative-prompt is ignored: FLUX.1 has no negative branch", file=sys.stderr
         )
     output = Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    caps = list(install_caps())
     model_kwargs = {
         "model": args.model,
         "df11_path": args.df11,
@@ -191,14 +216,16 @@ def run(
     report: dict[str, Any] = {
         "exit_code": EXIT_ERROR,
         "output": str(output),
-        "memory_caps_gb": caps,
+        "memory_caps_gb": None,
         "model_kwargs": model_kwargs,
     }
     try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        report["memory_caps_gb"] = list(install_caps())
         watchdog = watchdog_factory(
             output.parent, ceiling=default_ceiling(), budget=args.wall_budget
         ).start()
-    except DFloatError as exc:
+    except (DFloatError, OSError) as exc:
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
         report["error"] = f"{type(exc).__name__}: {exc}"
         return _finish(args, report)
@@ -208,6 +235,7 @@ def run(
         return _finish(args, report)
     try:
         factory = model_factory if model_factory is not None else _model_class()
+        resolve = resolve_output if resolve_output is not None else _output_resolver()
         model = factory(**model_kwargs)
         image = model.generate_image(
             seed=args.seed,
@@ -218,7 +246,12 @@ def run(
             guidance=args.guidance if args.guidance is not None else DEFAULT_GUIDANCE,
             scheduler=args.scheduler,
         )
-        image.save(str(output), export_json_metadata=args.metadata)
+        final = Path(resolve(output))
+        image.save(str(final), export_json_metadata=args.metadata, overwrite=True)
+        if not final.is_file() or final.stat().st_size == 0:
+            # mflux's save logs a write failure and returns normally
+            raise DFloatError(f"{final}: the image was not written")
+        report["output"] = str(final)
         report.update(exit_code=EXIT_OK, **model.report())
     except DFloatError as exc:
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)

@@ -15,6 +15,7 @@ from typing import Any
 
 import mlx.core as mx
 import mlx.nn as nn
+from mlx.utils import tree_flatten
 
 from mlx_dfloat._watchdog import phys_footprint
 from mlx_dfloat.errors import DFloatFormatError, DFloatResourceError, DFloatUnsupportedError
@@ -28,6 +29,7 @@ from mlx_dfloat.mflux.flux1 import init as base_init
 from mlx_dfloat.mflux.flux1.init import BaseComponents, ResolvedRepo
 from mlx_dfloat.mflux.flux1.lifecycle import Lifecycle
 from mlx_dfloat.mflux.flux1.memory import (
+    MAX_MEASURED_PIXELS,
     FluxSizes,
     activation_allowance,
     cache_limit_for,
@@ -55,7 +57,6 @@ MODELS: dict[str, tuple[str, str]] = {
 }
 POLICIES: tuple[str, ...] = ("per-block", "depth2")
 RETAINED_SLACK_BYTES = 2 * 1024**3
-_PHASES = ("encode", "set_load", "denoise", "vae")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -105,10 +106,13 @@ class _VaePoolGuard:
 class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type information
     """FLUX.1 (schnell, dev, Krea-dev) generation from a DFloat11 transformer through mflux.
 
-    Bit-identical to mflux's own BF16 pipeline; the transformer stays compressed and each block is
-    decoded on the GPU as it runs. Text encoders and the compressed set are never resident
-    together: a new prompt after a generation drops the set, reloads the encoders, encodes and
-    reloads the set; ``encode(*prompts)`` pays that once for several prompts.
+    Bit-identical to the same transformer run from the BF16 shards, block by block; the
+    transformer stays compressed and each block is decoded on the GPU as it runs. Text encoders
+    and the compressed set are never resident together: a new prompt after a generation drops the
+    set, reloads the encoders, encodes and reloads the set; ``encode(*prompts)`` pays that once for
+    several prompts. In-loop callbacks that decode through the VAE run with the set resident and
+    under the call's cache limit, and are not supported on this path. Each call resets MLX's
+    process-wide peak-memory counter at every phase boundary.
     """
 
     def __init__(
@@ -240,6 +244,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
         self._peaks: dict[str, dict[str, int]] = {}
         self._open_phase: str | None = None
         self._launches = 0
+        self._baseline_active = int(mx.get_active_memory())
         self._lifecycle = Lifecycle(
             load_encoders=self._load_encoders,
             unload_encoders=self._unload_encoders,
@@ -247,12 +252,19 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
             load_set=self._load_set,
             unload_set=self._unload_set,
             prompt_cache=self.prompt_cache,
-            retained_bound_bytes=int(mx.get_active_memory()) + RETAINED_SLACK_BYTES,
+            retained_bound=self._retained_bound,
             encoders_loaded=True,
         )
         self.callbacks.register(_VaePoolGuard(self))
 
     # --- lifecycle callbacks ------------------------------------------------------------------------
+
+    def _retained_bound(self) -> int:
+        """What may stay active after a drop: the assembly baseline, the cached embeddings, the VAE, slack."""
+        embeddings = sum(int(a.nbytes) for pair in self.prompt_cache.values() for a in pair)
+        flat: list[tuple[str, mx.array]] = list(tree_flatten(self.vae.parameters()))  # type: ignore[arg-type]
+        vae = sum(int(v.nbytes) for _name, v in flat)
+        return self._baseline_active + embeddings + vae + RETAINED_SLACK_BYTES
 
     def _load_encoders(self) -> None:
         self.t5_text_encoder, self.clip_text_encoder = base_init.load_encoders(self._base.root)
@@ -292,14 +304,21 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
     # --- phases -----------------------------------------------------------------------------------
 
     def _phase_begin(self, name: str) -> None:
-        mx.reset_peak_memory()
+        mx.reset_peak_memory()  # resets to zero, not to what is active
         self._open_phase = name
-        self._peaks[name] = {"footprint_start": phys_footprint(), "mlx_peak": 0, "footprint_end": 0}
+        self._peaks[name] = {
+            "footprint_start": phys_footprint(),
+            "mlx_peak": 0,
+            "footprint_end": 0,
+            "active_at_start": int(mx.get_active_memory()),
+        }
 
     def _phase_end(self, name: str) -> None:
         if self._open_phase != name:
             return
-        self._peaks[name]["mlx_peak"] = int(mx.get_peak_memory())
+        self._peaks[name]["mlx_peak"] = max(
+            int(mx.get_peak_memory()), self._peaks[name]["active_at_start"]
+        )
         self._peaks[name]["footprint_end"] = phys_footprint()
         self._open_phase = None
 
@@ -309,12 +328,27 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
         """The cache limit, the fit estimate and the VAE strategy of a call at this size (rounded down to multiples of 16, as mflux does).
 
         The set stays resident through the VAE decode when the estimate allows it; otherwise the call drops it
-        before decoding and the next call reloads it.
+        before decoding and the next call reloads it. On a 32 GB Mac (a 22.96 GiB budget) every FLUX.1 call
+        drops the set before the decode, whatever the size: the measured decode transient is a floor, not
+        smaller for smaller images. A larger budget keeps the set. Sizes above 1024² were not measured on
+        this path; the estimate there is an extrapolation.
 
         Raises:
-            DFloatResourceError: The predicted peak exceeds the budget even with the set dropped, and ``fit_check`` is on.
+            DFloatResourceError: The size is above 1024² or the predicted peak exceeds the budget even with
+                the set dropped, and ``fit_check`` is on.
         """
         height, width = 16 * (height // 16), 16 * (width // 16)
+        if height * width > MAX_MEASURED_PIXELS:
+            if self._fit_check:
+                raise DFloatResourceError(
+                    f"{height}x{width}: above the measured ceiling of 1024x1024 ({MAX_MEASURED_PIXELS} "
+                    "pixels) on this path; pass fit_check=False to run on an extrapolated estimate"
+                )
+            log.warning(
+                "%dx%d: no measurement above 1024² on this path; the estimate is an extrapolation",
+                height,
+                width,
+            )
         tokens = text_tokens(self.model_config)
         derived_minimum = self._largest[DOUBLE_PREFIX] + self._largest[SINGLE_PREFIX]
         limit = cache_limit_for(
@@ -341,6 +375,9 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
             cache_limit=limit,
             allowance=allowance,
             budget=budget,
+            height=height,
+            width=width,
+            text_tokens=tokens,
         )
         drop_set_before_vae = estimate.phases["vae"] > budget
         if drop_set_before_vae:
@@ -351,6 +388,9 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
                 cache_limit=limit,
                 allowance=allowance,
                 budget=budget,
+                height=height,
+                width=width,
+                text_tokens=tokens,
                 vae_with_set=False,
             )
         if not estimate.fits:
@@ -393,7 +433,8 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
 
         Raises:
             DFloatUnsupportedError: ``image_path`` / ``image_strength`` (img2img) or ``pid_decode``.
-            DFloatResourceError: The fit estimate refuses the call, or memory stayed active after a drop.
+            DFloatResourceError: The fit check refuses the call (the estimate, or a size above 1024²), or
+                memory stayed active after a drop.
             DFloatFormatError: A block's decode reported an error; the set is dropped for a clean retry.
         """
         if image_path is not None or image_strength is not None:

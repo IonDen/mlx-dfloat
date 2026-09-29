@@ -34,6 +34,13 @@ from mlx_dfloat.mflux.flux1.init import BaseComponents, ResolvedRepo
 from mlx_dfloat.mflux.flux1.memory import FluxSizes
 
 GIB = 1024**3
+BUDGET_32_GB = (
+    24_653_119_488  # 22.96 GiB: budget_bytes() on the 32 GB M1 Max of the 2026-09-28 runs
+)
+# The schnell DF11 checkpoint and base as measured on 2026-09-28 (DF11 `51a428b9`, base `741f7c3c`).
+SCHNELL_SIZES = FluxSizes(
+    compressed=16_195_141_095, extras=113_899_648, encoders=9_770_792_936, vae=167_666_902
+)
 pytestmark = pytest.mark.mflux
 
 
@@ -190,12 +197,39 @@ def test_plan_call_rounds_to_multiples_of_16_and_warns_below_the_derived_minimum
     assert "below the derived minimum" in caplog.text
 
 
-def test_plan_drops_the_set_before_the_vae_only_when_the_resident_decode_would_not_fit(
+def _budget(monkeypatch, value):
+    from mlx_dfloat.mflux.flux1 import model as model_module
+
+    monkeypatch.setattr(model_module, "budget_bytes", lambda: value)
+
+
+@pytest.mark.parametrize("size", [512, 768, 1024])
+def test_on_a_32_gb_budget_every_schnell_call_drops_the_set_before_the_vae(
+    tmp_path, monkeypatch, size
+):
+    # Bug caught (the 2026-09-28 measurement: 23.29 GiB with the set resident at 1024², and the
+    # decode's 7.82 GiB transient is a floor below it): a smaller image planned with the set
+    # resident through the decode, on the claim that a smaller decode would fit next to it.
+    model = _fake_model(tmp_path, monkeypatch, sizes=SCHNELL_SIZES)
+    _budget(monkeypatch, BUDGET_32_GB)
+    plan = model.plan_call(height=size, width=size)
+    assert plan.drop_set_before_vae
+    assert plan.estimate.fits
+
+
+def test_a_64_gb_budget_keeps_the_set_through_the_vae_at_1024(tmp_path, monkeypatch):
+    # Bug caught: the set dropped (a 26 s reload on every call) where the budget holds the
+    # resident set plus the decode, i.e. the drop made unconditional.
+    model = _fake_model(tmp_path, monkeypatch, sizes=SCHNELL_SIZES)
+    _budget(monkeypatch, 40 * GIB)
+    assert not model.plan_call(height=1024, width=1024).drop_set_before_vae
+
+
+def test_a_call_planned_to_drop_the_set_runs_the_loop_with_it_and_the_guard_drops_it(
     tmp_path, monkeypatch
 ):
-    # Bug caught (the 2026-09-28 measurement: 23.29 GiB with the set resident at 1024²): a call planned with the
-    # set resident through the VAE decode when that phase exceeds the budget (a paging storm), or the set dropped
-    # for a small image where it would have fitted (a needless 28 s reload).
+    # Bug caught: the after-loop guard ignoring the plan (the set resident through a decode
+    # measured over the budget), or dropping it before the loop.
     big = _fake_model(
         tmp_path, monkeypatch, sizes=FluxSizes(compressed=15 * GIB, extras=0, encoders=0, vae=0)
     )
@@ -203,15 +237,28 @@ def test_plan_drops_the_set_before_the_vae_only_when_the_resident_decode_would_n
     assert plan.drop_set_before_vae
     assert plan.estimate.fits
     assert plan.estimate.peak_phase == "denoise"
-    small = _fake_model(
-        tmp_path, monkeypatch, sizes=FluxSizes(compressed=1 * GIB, extras=0, encoders=0, vae=0)
-    )
-    assert not small.plan_call(height=1024, width=1024).drop_set_before_vae
     seen = _patch_upstream_generate(monkeypatch, big)
     big.generate_image(seed=1, prompt="p", height=1024, width=1024)
     assert seen["set_resident"]  # resident for the loop
     assert not big._lifecycle.set_resident  # dropped by the guard
     assert big.report()["drop_set_before_vae"] is True
+
+
+def test_plan_call_refuses_sizes_above_the_measured_1024_ceiling_unless_fit_check_is_off(
+    tmp_path, monkeypatch, caplog
+):
+    # Bug caught: a call above 1024² planned on an estimate no run has checked (the VAE transient
+    # and the activation term are extrapolations there), or fit_check=False refusing instead of
+    # warning.
+    model = _fake_model(tmp_path, monkeypatch)
+    model.plan_call(height=1024, width=1024)  # the measured size itself
+    with pytest.raises(DFloatResourceError, match="fit_check=False") as info:
+        model.plan_call(height=1024, width=1040)
+    assert "1024" in str(info.value)
+    lax = _fake_model(tmp_path, monkeypatch, fit_check=False)
+    with caplog.at_level("WARNING", logger="mlx_dfloat.mflux.flux1"):
+        lax.plan_call(height=1024, width=1040)
+    assert "extrapolation" in caplog.text
 
 
 def test_plan_call_refuses_an_over_budget_call_and_fit_check_false_warns_instead(
@@ -275,7 +322,7 @@ def test_generate_encodes_then_loads_the_set_then_runs_upstream_under_the_derive
     assert seen["limit_at_entry"] == plan.cache_limit
     assert seen["limit_after_loop"] == 0
     assert _cache_limit_in_force() == before
-    assert model._lifecycle.set_resident  # small sizes keep the set
+    assert model._lifecycle.set_resident  # the fake's 1 kB set fits next to the decode
     assert model.t5_text_encoder is None
     assert seen["kwargs"]["image_path"] is None
     assert seen["kwargs"]["pid_decode"] is False
@@ -312,13 +359,15 @@ def test_a_new_prompt_with_the_set_resident_drops_it_reloads_the_encoders_and_re
     assert calls == [model._base.root]
 
 
-def test_a_format_error_mid_step_drops_the_set_and_restores_the_limit(tmp_path, monkeypatch):
+@pytest.mark.parametrize("where", ["raise_before_loop", "raise_after_loop"])
+def test_a_format_error_mid_step_drops_the_set_and_restores_the_limit(tmp_path, monkeypatch, where):
     # Bug caught (Review Focus 2): a corrupt block leaving the set attached with stale status words,
-    # so the retry is refused by begin_step, or the cache limit left at the call's value.
+    # so the retry is refused by begin_step, or the cache limit left at the call's value; checked
+    # both before the after-loop guard ran (inside the loop) and after it (during the decode).
     model = _fake_model(tmp_path, monkeypatch)
     before = _cache_limit_in_force()
     _patch_upstream_generate(
-        monkeypatch, model, raise_after_loop=DFloatFormatError("block 3: invalid code")
+        monkeypatch, model, **{where: DFloatFormatError("block 3: invalid code")}
     )
     with pytest.raises(DFloatFormatError):
         model.generate_image(seed=1, prompt="p", height=256, width=256)
@@ -353,7 +402,8 @@ def test_a_format_errors_traceback_does_not_pin_the_set_past_the_drop(tmp_path, 
         raise DFloatFormatError("block 3: invalid code")
 
     monkeypatch.setattr(Flux1, "generate_image", fake)
-    model._lifecycle.retained_bound_bytes = int(mx.get_active_memory()) + 1 * 1024**2
+    bound = int(mx.get_active_memory()) + 1 * 1024**2
+    model._lifecycle.retained_bound = lambda: bound
     with pytest.raises(DFloatFormatError):
         model.generate_image(seed=1, prompt="p", height=256, width=256)
     assert not model._lifecycle.set_resident
@@ -405,3 +455,114 @@ def test_the_default_repositories_per_model_are_the_published_ones():
         "dev": ("DFloat11/FLUX.1-dev-DF11", "black-forest-labs/FLUX.1-dev"),
         "krea-dev": ("DFloat11/FLUX.1-Krea-dev-DF11", "black-forest-labs/FLUX.1-Krea-dev"),
     }
+
+
+def test_a_phase_peak_is_never_below_what_was_active_when_it_began(tmp_path, monkeypatch):
+    # Bug caught: `mx.reset_peak_memory()` resets the counter to zero, not to the active memory,
+    # so a phase that allocates nothing new reports an MLX peak below what it held throughout.
+    model = _fake_model(tmp_path, monkeypatch)
+    held = mx.zeros(4 * 1024 * 1024, dtype=mx.float32)  # 16 MiB alive through the phase
+    mx.eval(held)
+    model._phase_begin("probe")
+    model._phase_end("probe")
+    assert model._peaks["probe"]["mlx_peak"] >= 16 * 1024 * 1024
+    del held
+
+
+def test_the_retained_bound_grows_by_the_cached_embeddings(tmp_path, monkeypatch):
+    # Bug caught: the bound fixed at construction, so every embedding cached afterwards counts as
+    # a leak against the drop check (and enough prompts turn a clean drop into an error).
+    model = _fake_model(tmp_path, monkeypatch)
+    before = model._lifecycle.retained_bound()
+    model.encode("a", "b")
+    grown = sum(int(a.nbytes) for pair in model.prompt_cache.values() for a in pair)
+    assert grown > 0
+    assert model._lifecycle.retained_bound() - before == grown
+
+
+class _ShapedEncoder(nn.Module):
+    """An encoder stub whose output has a real FLUX.1 embedding shape and depends on its weight."""
+
+    def __init__(self, shape):
+        super().__init__()
+        self.shape = shape
+        self.bias = mx.zeros((shape[-1],))
+
+    def __call__(self, ids):
+        return mx.broadcast_to(self.bias, self.shape) + ids.astype(mx.float32).sum() * 0
+
+
+class _StubVAE(nn.Module):
+    """``decode(latents)`` → a 64x64 RGB image in mflux's 5-D decoder layout."""
+
+    def __init__(self):
+        super().__init__()
+        self.scale = mx.zeros((1,))
+
+    def decode(self, latents):
+        return mx.zeros((1, 3, 1, 64, 64)) + self.scale
+
+
+def test_upstream_generate_image_runs_through_the_model_on_the_cached_embeddings(
+    tmp_path, monkeypatch
+):
+    # Bug caught: a lifecycle caching into a copy of `prompt_cache` (upstream would then miss the
+    # prompt and call the dropped encoder, None), or the after-loop guard not registered where
+    # mflux's own loop fires it. Runs mflux 0.20's real `Flux1.generate_image` (latents, scheduler,
+    # the seamed Transformer at 1+1 blocks, callbacks, VAEUtil.decode, ImageUtil.to_image).
+    from mflux.models.common.config.model_config import ModelConfig
+    from mflux.models.flux.model.flux_text_encoder.prompt_encoder import PromptEncoder
+    from mflux.utils.generated_image import GeneratedImage
+
+    from mlx_dfloat.integrate.providers import ResidentProvider
+    from mlx_dfloat.mflux.flux1.names import flux_name_map
+    from mlx_dfloat.mflux.flux1.transformer import seam_transformer_class
+
+    tf = seam_transformer_class()(
+        ModelConfig.schnell(), num_transformer_blocks=1, num_single_transformer_blocks=1
+    )
+    shapes = install_placeholders(
+        [
+            ("transformer_blocks", tf.transformer_blocks),
+            ("single_transformer_blocks", tf.single_transformer_blocks),
+        ],
+        flux_name_map(),
+    )
+    components = BaseComponents(
+        vae=_StubVAE(),
+        t5=_ShapedEncoder((1, 256, 4096)),
+        clip=_ShapedEncoder((1, 768)),
+        tokenizers={"t5": StubTokenizer(256), "clip": StubTokenizer(77)},
+    )
+    model = _fake_model(tmp_path, monkeypatch, transformer=tf, components=components)
+    model._shapes = shapes
+
+    def load_resident_zeros():
+        zeros = {
+            block: {attr: mx.zeros(shape, dtype=mx.bfloat16) for attr, shape in per.items()}
+            for block, per in shapes.items()
+        }
+        model.transformer.attach(
+            ResidentProvider(zeros), shapes, eval_policy=model._policy, verify_in_call=True
+        )
+
+    monkeypatch.setattr(model._lifecycle, "_load_set", load_resident_zeros)
+    upstream_calls = []
+    real_encode = PromptEncoder.encode_prompt
+
+    def recording_encode(prompt, prompt_cache, **kwargs):
+        if prompt_cache is model.prompt_cache:
+            upstream_calls.append((prompt in prompt_cache, kwargs["t5_text_encoder"]))
+        return real_encode(prompt, prompt_cache, **kwargs)
+
+    monkeypatch.setattr(PromptEncoder, "encode_prompt", staticmethod(recording_encode))
+    image = model.generate_image(
+        seed=1, prompt="p", num_inference_steps=2, height=64, width=64, guidance=0.0
+    )
+    assert isinstance(image, GeneratedImage)
+    assert image.image.size == (64, 64)
+    assert upstream_calls == [(True, None)]
+    assert model.t5_text_encoder is None
+    report = model.report()
+    assert "vae" in report["peaks"]
+    assert report["decode_launches"] == 0

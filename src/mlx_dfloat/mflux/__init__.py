@@ -27,4 +27,5 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = ["DFloatFlux1", "require_mflux"]
+# DFloatFlux1 stays out of __all__: a star-import must not need mflux; `mlx_dfloat.mflux.DFloatFlux1` still works.
+__all__ = ["require_mflux"]

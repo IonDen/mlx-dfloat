@@ -60,7 +60,9 @@ class StreamingBF16Provider:
     """
 
     launching = False
-    policies = EVAL_POLICIES
+    # Each block reads fresh arrays from the shards; under "none" the whole BF16 transformer would
+    # stay alive in one step's lazy graph, so only the per-block boundaries are offered.
+    policies: tuple[str, ...] = ("per-block", "depth2")
 
     def __init__(
         self,

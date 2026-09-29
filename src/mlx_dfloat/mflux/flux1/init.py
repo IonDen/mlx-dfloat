@@ -57,14 +57,22 @@ def hub_revision(root: Path) -> str | None:
 
 
 def hub_error(exc: Exception, repo_id: str) -> Exception:
-    """Translate a Hub failure: gated or unauthorised → access error, unknown repo → format error; else ``exc``."""
+    """Translate a Hub failure: gated or unauthorised → access error, unknown repo → format error; else ``exc``.
+
+    A cache miss whose cause is a Hub HTTP error is translated through that cause.
+    """
     from huggingface_hub.errors import (
         GatedRepoError,
         HfHubHTTPError,
+        LocalEntryNotFoundError,
         RepositoryNotFoundError,
         RevisionNotFoundError,
     )
 
+    if isinstance(exc, LocalEntryNotFoundError) and isinstance(exc.__cause__, HfHubHTTPError):
+        # huggingface_hub reports a refused download as a cache miss, the refusal as its cause
+        mapped = hub_error(exc.__cause__, repo_id)
+        return exc if mapped is exc.__cause__ else mapped
     hint = "accept the licence on the Hub and run `hf auth login`"
     if isinstance(exc, GatedRepoError):
         return DFloatAccessError(f"{repo_id}: this repository is gated; {hint}")

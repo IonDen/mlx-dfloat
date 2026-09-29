@@ -2,6 +2,7 @@ import json
 import sys
 
 import mlx.core as mx
+import pytest
 from scripts import verify_image as vi
 
 
@@ -189,3 +190,156 @@ def test_run_key_carries_every_setting_that_changes_the_latents(tmp_path, monkey
     }
     assert key["guidance"] == 2.0
     assert key["source"] == "src"
+
+
+def _args(tmp_path, *extra):
+    return vi.parse_args(
+        [
+            "--side",
+            "compare",
+            "--df11",
+            str(tmp_path / "d"),
+            "--base",
+            str(tmp_path / "b"),
+            "--out",
+            str(tmp_path / "out"),
+            *extra,
+        ]
+    )
+
+
+def _write_side(out, side, key, latents, *, exit_code=0, degenerate=()):
+    side_dir = out / side
+    side_dir.mkdir(parents=True, exist_ok=True)
+    (side_dir / "result.json").write_text(
+        json.dumps({"key": key, "exit_code": exit_code, "degenerate": list(degenerate)})
+    )
+    mx.save_safetensors(str(side_dir / "latents.safetensors"), {"latents": latents})
+    (side_dir / "image.png").write_bytes(side.encode())  # bytes differ; the pixels are faked equal
+
+
+def _compare_setup(tmp_path, monkeypatch, bf16_latents):
+    monkeypatch.setattr(vi, "source_hash", lambda: "src-a")
+    monkeypatch.setattr(vi, "pixels_identical", lambda a, b: True)
+    args = _args(tmp_path)
+    key = vi.run_key(args)
+    latents = mx.array([0.0, 1.5, -2.0], dtype=mx.float32)
+    _write_side(args.out, "df11", key, latents)
+    _write_side(args.out, "bf16", key, bf16_latents)
+    return args
+
+
+def test_run_compare_is_0_for_bit_identical_latents_and_records_the_pixel_verdict(
+    tmp_path, monkeypatch
+):
+    # Bug caught: the compare reading the wrong files (or the keys) and never reaching 0 on a
+    # matching pair, or the pixel verdict missing beside the two informational hashes.
+    args = _compare_setup(tmp_path, monkeypatch, mx.array([0.0, 1.5, -2.0], dtype=mx.float32))
+    summary = vi.run_compare(args)
+    assert summary["exit_code"] == 0
+    assert summary["equal"] is True
+    assert summary["pixels_identical"] is True
+    assert summary["df11_png_sha256"] != summary["bf16_png_sha256"]
+
+
+def test_run_compare_is_1_for_latents_that_differ_in_one_bit(tmp_path, monkeypatch):
+    # Bug caught: a float `==` that equates -0.0 and +0.0, or the verdict ignoring the comparison.
+    args = _compare_setup(tmp_path, monkeypatch, mx.array([-0.0, 1.5, -2.0], dtype=mx.float32))
+    assert vi.run_compare(args)["exit_code"] == 1
+
+
+def test_run_compare_refuses_with_2_when_this_run_has_another_key(tmp_path, monkeypatch):
+    # Bug caught: comparing two sides produced by an older source tree as if they were this run's.
+    args = _compare_setup(tmp_path, monkeypatch, mx.array([0.0, 1.5, -2.0], dtype=mx.float32))
+    monkeypatch.setattr(vi, "source_hash", lambda: "src-b")
+    summary = vi.run_compare(args)
+    assert summary["exit_code"] == 2
+    assert "source" in summary["error"]
+
+
+def test_a_stale_result_is_moved_aside_and_a_matching_one_is_kept(tmp_path):
+    # Bug caught: a result.json from other settings left in place (resumed as this run's), or a
+    # matching one moved away (a finished side rerun for nothing).
+    key = {"model": "schnell", "seed": 42}
+    stale, fresh = tmp_path / "stale", tmp_path / "fresh"
+    _write_result(stale, {**key, "seed": 1}, 0)
+    _write_result(fresh, key, 0)
+    vi._move_stale_result_aside(stale, key)
+    vi._move_stale_result_aside(fresh, key)
+    assert not (stale / "result.json").exists()
+    assert json.loads((stale / "result.previous.json").read_text())["key"]["seed"] == 1
+    assert (fresh / "result.json").exists()
+    assert not (fresh / "result.previous.json").exists()
+
+
+def test_orchestrate_stops_with_2_when_a_side_fails_and_never_compares(tmp_path, monkeypatch):
+    # Bug caught: a failed child ignored, so the compare runs on stale or missing outputs.
+    import subprocess
+
+    monkeypatch.setattr(vi, "source_hash", lambda: "src")
+    commands = []
+
+    def failing_run(cmd, **kwargs):
+        commands.append(cmd)
+        return subprocess.CompletedProcess(cmd, 3)
+
+    monkeypatch.setattr(vi.subprocess, "run", failing_run)
+    monkeypatch.setattr(
+        vi, "_write_compare", lambda args: (_ for _ in ()).throw(AssertionError("compared"))
+    )
+    args = vi.parse_args(
+        [
+            "--orchestrate",
+            "--df11",
+            str(tmp_path / "d"),
+            "--base",
+            str(tmp_path / "b"),
+            "--out",
+            str(tmp_path / "out"),
+        ]
+    )
+    assert vi.orchestrate(args) == 2
+    assert len(commands) == 1
+    assert commands[0][commands[0].index("--side") + 1] == "df11"
+
+
+def test_parse_args_makes_the_paths_absolute_for_the_children(tmp_path, monkeypatch):
+    # Bug caught: a relative --df11/--base/--out handed to a child that runs with the repository
+    # root as its cwd (it then reads another directory, or none).
+    monkeypatch.chdir(tmp_path)
+    args = vi.parse_args(["--orchestrate", "--df11", "d", "--base", "~/b", "--out", "o"])
+    assert args.df11 == str(tmp_path.resolve() / "d")
+    assert args.base == str((vi.Path.home() / "b").resolve())
+    assert args.out == tmp_path.resolve() / "o"
+    cmd = vi.child_command(args, "df11")
+    assert cmd[cmd.index("--df11") + 1] == str(tmp_path.resolve() / "d")
+
+
+def test_the_df11_peak_is_the_largest_per_phase_peak():
+    # Bug caught: reading the process counter at the end (reset at every phase boundary, so it
+    # holds only the VAE phase's peak) instead of the largest phase peak.
+    peaks = {
+        "label": "sampled at phase boundaries",
+        "encode": {"mlx_peak": 10},
+        "denoise": {"mlx_peak": 30},
+        "vae": {"mlx_peak": 20},
+    }
+    assert vi.max_phase_peak(peaks) == 30
+    assert vi.max_phase_peak({"label": "x"}) == 0
+
+
+@pytest.mark.mflux  # Pillow comes with mflux
+def test_pixels_identical_decodes_the_images_and_ignores_embedded_metadata(tmp_path):
+    # Bug caught: comparing file bytes (a PNG with mflux's metadata chunk differs from the same
+    # pixels without it), or declaring different pixels identical.
+    from PIL import Image, PngImagePlugin
+
+    pixels = Image.new("RGB", (4, 4), (10, 20, 30))
+    info = PngImagePlugin.PngInfo()
+    info.add_text("prompt", "a lighthouse")
+    pixels.save(tmp_path / "a.png", pnginfo=info)
+    pixels.save(tmp_path / "b.png")
+    Image.new("RGB", (4, 4), (10, 20, 31)).save(tmp_path / "c.png")
+    assert (tmp_path / "a.png").read_bytes() != (tmp_path / "b.png").read_bytes()
+    assert vi.pixels_identical(tmp_path / "a.png", tmp_path / "b.png")
+    assert not vi.pixels_identical(tmp_path / "a.png", tmp_path / "c.png")

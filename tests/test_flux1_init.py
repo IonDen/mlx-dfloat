@@ -3,7 +3,12 @@ import importlib.util
 
 import httpx
 import pytest
-from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
+from huggingface_hub.errors import (
+    GatedRepoError,
+    HfHubHTTPError,
+    LocalEntryNotFoundError,
+    RepositoryNotFoundError,
+)
 
 from mlx_dfloat.errors import DFloatAccessError, DFloatDependencyError, DFloatFormatError
 from mlx_dfloat.mflux.flux1 import init
@@ -66,13 +71,22 @@ def test_base_patterns_fetch_encoders_vae_and_tokenizers_but_never_the_transform
         ("a/b/c", False),
     ],
 )
-def test_is_hub_id_follows_mflux_rule_and_prefers_an_existing_path(spec, want, tmp_path):
-    # Bug caught: treating `org/name` as a repo id when a directory of that relative name exists
-    # (mflux resolves local first), or accepting `a/b/c` as a repo id.
+def test_is_hub_id_follows_mflux_rule(spec, want, tmp_path, monkeypatch):
+    # Bug caught: accepting `a/b/c`, a path prefix or a bare name as a repo id, or refusing `org/name`.
+    monkeypatch.chdir(tmp_path)  # none of the specs exists relative to here
     assert init.is_hub_id(spec) is want
-    (tmp_path / "org").mkdir()
-    (tmp_path / "org" / "name").mkdir()
-    assert init.is_hub_id(str(tmp_path / "org" / "name")) is False
+
+
+def test_an_existing_relative_directory_wins_over_the_hub_id_of_the_same_name(
+    tmp_path, monkeypatch
+):
+    # Bug caught: treating `org/name` as a repo id when a directory of that relative name exists
+    # (mflux resolves local first), or the existence check stuck on after the directory is gone.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "org" / "name").mkdir(parents=True)
+    assert init.is_hub_id("org/name") is False
+    (tmp_path / "org" / "name").rmdir()
+    assert init.is_hub_id("org/name") is True
 
 
 def test_hub_revision_reads_the_snapshot_sha_and_nothing_else(tmp_path):
@@ -100,6 +114,19 @@ def test_hub_errors_map_to_access_or_format_and_leave_the_rest_alone():
     assert init.hub_error(other, "x/y") is other
     plain_http = _hub_http_error(HfHubHTTPError, "500", 500)
     assert init.hub_error(plain_http, "x/y") is plain_http
+
+
+def test_a_cache_miss_caused_by_a_gated_refusal_maps_through_its_cause():
+    # Bug caught: huggingface_hub reporting "not in the local cache" (LocalEntryNotFoundError)
+    # with the real gated/401 refusal only in `__cause__`, so the user sees a cache message
+    # instead of the licence and login hint.
+    miss = LocalEntryNotFoundError("cannot find the requested files in the local cache")
+    miss.__cause__ = _hub_http_error(GatedRepoError, "gated", 403)
+    mapped = init.hub_error(miss, "black-forest-labs/FLUX.1-schnell")
+    assert isinstance(mapped, DFloatAccessError)
+    assert "hf auth login" in str(mapped)
+    plain_miss = LocalEntryNotFoundError("offline")
+    assert init.hub_error(plain_miss, "x/y") is plain_miss
 
 
 @pytest.mark.parametrize("status", [401, 403])
@@ -253,10 +280,14 @@ def test_a_quantized_base_is_refused_before_the_applier_runs(monkeypatch, tmp_pa
 @pytest.mark.mflux
 @pytest.mark.network
 @pytest.mark.parametrize(("model", "want"), [("schnell", 256), ("dev", 512), ("krea-dev", 512)])
-def test_tokenizers_load_from_the_public_schnell_repo_with_the_models_t5_length(model, want):
+def test_tokenizers_load_from_the_schnell_repo_with_the_models_t5_length(model, want):
     # Bug caught: the T5 max length left at the definition's 256 for dev (the encoder then sees
     # 256 tokens and the embeddings differ from mflux's own), or the tokenizer subdirs misnamed.
+    from huggingface_hub import get_token
     from mflux.models.common.config.model_config import ModelConfig
+
+    if get_token() is None:
+        pytest.skip("needs a Hub token: the base repository is gated")
 
     resolved = init.resolve("black-forest-labs/FLUX.1-schnell", patterns=init.TOKENIZER_PATTERNS)
     tokenizers = init.load_tokenizers(

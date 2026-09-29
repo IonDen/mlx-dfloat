@@ -74,8 +74,14 @@ All notable changes to this project are documented here. The format follows
   in memory together: a prompt is encoded first, then the encoders are dropped and the compressed weights loaded;
   a new prompt after that reloads both (`encode()` pre-encodes several prompts at once). Each call derives an MLX
   buffer-cache limit from the checkpoint and the resolution, estimates the peak memory per phase against the
-  device's budget and refuses a call that would not fit (`fit_check=False` to override), and restores the process's
-  cache limit afterwards. The command installs the memory caps and the footprint watchdog; the Python API does
+  device's budget, and restores the process's cache limit afterwards. A call that would not fit is refused, and so
+  is any size above 1024², the largest measured so far (`fit_check=False` overrides both; above 1024² the estimate
+  is an extrapolation). On a 32 GB Mac every call drops the compressed set before the VAE decode, because at 1024²
+  the decode next to the resident set measured 23.29 GiB, over the budget, and smaller sizes have not been measured;
+  the next call reloads the set in about 26 s. A Mac with a larger budget keeps it. All three base repositories are
+  gated on the Hub and need `hf auth login`: FLUX.1-schnell's with automatic approval once its Apache-2.0 license is
+  accepted, FLUX.1-dev's and FLUX.1-Krea-dev's with manual approval under Black Forest Labs' non-commercial license.
+  Their encoders and VAE are byte-identical, so the schnell base also serves dev and Krea-dev. The command installs the memory caps and the footprint watchdog; the Python API does
   neither. Measured on an M1 Max (32 GB, macOS 27.0, mlx 0.32.2, mflux 0.20.0) at 1024²: FLUX.1-schnell (4 steps)
   peaked at 19.94 GiB (19.95 GiB with depth-2 evaluation) in 1 minute 54 seconds including imports, with per-phase
   MLX peaks of 10.09 GiB encoding the prompt, 15.20 GiB loading the compressed set, 17.44 GiB denoising and 9.55 GiB

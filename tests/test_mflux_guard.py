@@ -92,3 +92,14 @@ def test_the_model_class_is_reached_lazily_and_needs_mflux_only_then(monkeypatch
         _ = adapters.DFloatFlux1
     with pytest.raises(AttributeError):
         _ = adapters.NoSuchName
+
+
+def test_a_star_import_of_the_mflux_package_needs_no_mflux(monkeypatch):
+    # Bug caught: `DFloatFlux1` listed in `mlx_dfloat.mflux.__all__`, so `from mlx_dfloat.mflux
+    # import *` resolves it through `__getattr__` and raises DFloatDependencyError without mflux.
+    monkeypatch.delitem(sys.modules, "mlx_dfloat.mflux.flux1.model", raising=False)
+    _hide_mflux(monkeypatch)
+    namespace: dict[str, object] = {}
+    exec("from mlx_dfloat.mflux import *", namespace)
+    assert callable(namespace["require_mflux"])
+    assert "DFloatFlux1" not in namespace

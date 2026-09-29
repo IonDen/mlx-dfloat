@@ -363,3 +363,17 @@ def test_streaming_bf16_provider_refuses_a_shard_tensor_of_the_wrong_shape(tmp_p
     provider = StreamingBF16Provider(index, names, FLUX_TABLE)
     with pytest.raises(DFloatIntegrationError, match="shard tensor has shape"):
         provider.weights_for("transformer_blocks.0", shapes["transformer_blocks.0"])
+
+
+def test_streaming_bf16_provider_refuses_the_none_policy():
+    # Bug caught: StreamingBF16Provider advertising every policy, so "none" is accepted and the
+    # whole BF16 transformer (fresh arrays per block) is kept alive in one step's lazy graph.
+    from mlx_dfloat.integrate.providers import StreamingBF16Provider
+    from mlx_dfloat.integrate.seam import attach_state
+
+    shapes = _shapes(1, 1)
+    provider = StreamingBF16Provider({}, {}, FLUX_TABLE)
+    with pytest.raises(DFloatIntegrationError, match="'none'"):
+        attach_state(provider, shapes, eval_policy="none")
+    attach_state(provider, shapes, eval_policy="per-block")
+    attach_state(provider, shapes, eval_policy="depth2")

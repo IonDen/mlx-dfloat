@@ -60,7 +60,7 @@ def test_the_mflux_lane_installs_the_locked_extra_and_proves_it_ran_tests():
     # Every `uv run` names the extra and the group, so no step depends on uv's sync mode keeping
     # what `uv sync --extra mflux` installed.
     uv_runs = [run for run in runs if "uv run" in run]
-    assert len(uv_runs) == 3
+    assert len(uv_runs) == 4
     assert all("uv run --extra mflux --group dev " in run for run in uv_runs)
     pytest_runs = [
         shlex.split(run)
@@ -82,3 +82,19 @@ def test_the_mflux_lane_installs_the_locked_extra_and_proves_it_ran_tests():
     assert len(guard) == 1
     assert "-m mflux" in guard[0]
     assert "-ge 2" in guard[0]
+
+
+def test_the_mflux_lane_gates_the_model_module_on_its_own():
+    # Bug caught: model.py's lines diluted by init.py's in the lane's combined 80 % gate, so the
+    # module with no offline test at all could drop far below 80 % while the job stays green; or
+    # the per-file report running before the lane's pytest has written the data.
+    runs = [step.get("run", "") for step in _integration_job()["steps"]]
+    report = "uv run --extra mflux --group dev coverage report --include='*/mflux/flux1/model.py' --fail-under=80"
+    assert report in runs
+    lane = next(
+        i
+        for i, run in enumerate(runs)
+        if run.startswith("uv run --extra mflux --group dev pytest")
+        and "--co" not in shlex.split(run)
+    )
+    assert runs.index(report) == lane + 1

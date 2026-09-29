@@ -64,6 +64,7 @@ def flux_phases(
     vae_bytes: int,
     vae_transient_bytes: int,
     overhead_bytes: int,
+    denoise_activation_bytes: int = 0,
 ) -> dict[str, dict[str, int]]:
     """The three phases of a generation, each term once."""
     in_flight = max(largest.values()) * (2 if policy == "depth2" else 1)
@@ -78,6 +79,7 @@ def flux_phases(
             "extras": extras_bytes,
             "decoded": in_flight,
             "cache": cache_limit,
+            "activations": denoise_activation_bytes,
             "overhead": overhead_bytes,
         },
         "vae": {
@@ -100,6 +102,31 @@ OVERHEAD_BYTES = 247_712_510  # 0.23 GiB: build-phase footprint minus MLX active
 VAE_TRANSIENT_BYTES = (
     8_392_982_528  # 7.82 GiB: VAE-phase footprint peak minus the footprint after the set load
 )
+# Measured on 2026-09-28 (the `mlx-dfloat generate` runs, schnell 1024², 4 steps, per-block, 2.5 GB cache limit;
+# M1 Max 32 GB, mlx 0.32.2, mflux 0.20.0, git 2fe3b2c): the process footprint peaked at 19.94 GiB against a
+# denoise estimate of 18.38 GiB without this term. The 1.56 GiB gap is the activation volume the step holds
+# beyond the cache limit, at 4096 image + 256 text tokens; dev (512 text tokens) measured 20.10 GiB.
+DENOISE_ACTIVATION_AT_REFERENCE = 1_675_000_000
+MAX_MEASURED_PIXELS = 1024 * 1024  # no run above 1024² on this path
+
+
+def vae_transient_bytes(*, height: int, width: int) -> int:
+    """What the float32 VAE decode adds on top of what is resident: the measured 1024² value as a floor.
+
+    At or below 1024² this is the measured value (smaller images were not measured lower, so the
+    floor stays). Above 1024² it grows with the pixel count: a prediction, not a measurement.
+    """
+    return int(VAE_TRANSIENT_BYTES * max(1.0, (height * width) / (1024 * 1024)))
+
+
+def denoise_activation_bytes(*, height: int, width: int, text_tokens: int) -> int:
+    """The activation volume a denoise step holds beyond the cache limit, linear in the token count.
+
+    Calibrated on the measured schnell 1024² peak (4096 image + 256 text tokens); every other size
+    is a prediction.
+    """
+    tokens = height * width // 256 + text_tokens
+    return int(DENOISE_ACTIVATION_AT_REFERENCE * tokens / REFERENCE_TOKENS)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -142,12 +169,16 @@ def fit_for(
     cache_limit: int,
     allowance: int,
     budget: int,
+    height: int,
+    width: int,
+    text_tokens: int,
     vae_with_set: bool = True,
 ) -> FitEstimate:
     """The phase estimate for one generate call against ``budget`` (a prediction, labelled as such by the caller).
 
-    ``vae_with_set=False`` plans the VAE phase after the compressed set has been dropped (what a call does
-    when the resident variant would not fit).
+    ``height`` and ``width`` scale the VAE transient (above 1024²) and, with ``text_tokens``, the
+    denoise activation term. ``vae_with_set=False`` plans the VAE phase after the compressed set has
+    been dropped (what a call does when the resident variant would not fit).
     """
     phases = flux_phases(
         compressed_bytes=sizes.compressed,
@@ -158,8 +189,11 @@ def fit_for(
         allowance=allowance,
         encoders_bytes=sizes.encoders,
         vae_bytes=sizes.vae,
-        vae_transient_bytes=VAE_TRANSIENT_BYTES,
+        vae_transient_bytes=vae_transient_bytes(height=height, width=width),
         overhead_bytes=OVERHEAD_BYTES,
+        denoise_activation_bytes=denoise_activation_bytes(
+            height=height, width=width, text_tokens=text_tokens
+        ),
     )
     if not vae_with_set:
         phases["vae"].pop("compressed")

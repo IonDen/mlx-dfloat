@@ -98,7 +98,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--wall-budget", type=float, default=7200.0, help="seconds before the watchdog aborts"
     )
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    # Absolute paths: the children run with the repository root as their cwd.
+    args.df11 = str(Path(args.df11).expanduser().resolve())
+    args.base = str(Path(args.base).expanduser().resolve())
+    args.out = args.out.expanduser().resolve()
+    return args
 
 
 def run_key(args: argparse.Namespace) -> dict[str, Any]:
@@ -227,6 +232,30 @@ def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def pixels_identical(a: Path, b: Path) -> bool:
+    """Whether two image files decode to the same size, mode and pixels (their metadata ignored)."""
+    from PIL import Image
+
+    with Image.open(a) as image_a, Image.open(b) as image_b:
+        return (
+            image_a.size == image_b.size
+            and image_a.mode == image_b.mode
+            and image_a.tobytes() == image_b.tobytes()
+        )
+
+
+def max_phase_peak(peaks: Mapping[str, Any]) -> int:
+    """The largest per-phase MLX peak in a model report's ``peaks`` (0 when no phase was recorded).
+
+    The model resets MLX's process-wide peak counter at every phase boundary, so the counter read
+    at the end holds only the last phase; the per-phase values are the whole record.
+    """
+    return max(
+        (int(v["mlx_peak"]) for v in peaks.values() if isinstance(v, Mapping)),
+        default=0,
+    )
+
+
 # --- the df11 side (mflux-touching; not unit-tested here) ---------------------------------------
 
 
@@ -284,14 +313,15 @@ def run_df11(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, Any]:
     )
     noise = FluxLatentCreator.create_noise(args.seed, args.size, args.size)
     degenerate = nondegenerate(captured, noise)
+    report = model.report()
     return {
         "exit_code": EXIT_OK if not degenerate else EXIT_ERROR,
         "degenerate": degenerate,
-        "report": model.report(),
+        "report": report,
         "output_shape": list(captured.shape),
         "output_dtype": str(captured.dtype),
         "footprint_peak_bytes": max(watchdog.peak_footprint, phys_footprint()),
-        "mlx_peak_memory_bytes": int(mx.get_peak_memory()),
+        "mlx_peak_bytes_max_over_phases": max_phase_peak(report["peaks"]),
     }
 
 
@@ -372,7 +402,7 @@ def run_bf16(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, Any]:
         "output_shape": list(latents.shape),
         "output_dtype": str(latents.dtype),
         "footprint_peak_bytes": max(watchdog.peak_footprint, phys_footprint()),
-        "mlx_peak_memory_bytes": int(mx.get_peak_memory()),
+        "mlx_peak_bytes_process": int(mx.get_peak_memory()),  # never reset on this side
     }
 
 
@@ -383,7 +413,9 @@ def run_compare(args: argparse.Namespace) -> dict[str, Any]:
     """Compare both sides' saved latents bit for bit, and report the df11 side's own degeneracy.
 
     Refuses (``exit_code`` 2, never 0 or 1) unless ``sides_ready`` finds both sides complete and
-    keyed exactly like this run — a missing, failed or different-run side is never compared.
+    keyed exactly like this run — a missing, failed or different-run side is never compared. The
+    two PNGs are also decoded and compared pixel for pixel (``pixels_identical``); their sha256
+    hashes are informational only, since the df11 PNG carries mflux's embedded metadata.
 
     Raises:
         OSError: A ready side's saved latents or image file is missing.
@@ -413,6 +445,7 @@ def run_compare(args: argparse.Namespace) -> dict[str, Any]:
         "degenerate": degenerate,
         "df11_key": df11_key,
         "bf16_key": bf16_key,
+        "pixels_identical": pixels_identical(df11_dir / "image.png", bf16_dir / "image.png"),
         "df11_png_sha256": _sha256_file(df11_dir / "image.png"),
         "bf16_png_sha256": _sha256_file(bf16_dir / "image.png"),
     }
