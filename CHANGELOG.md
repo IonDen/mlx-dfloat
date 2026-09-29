@@ -68,6 +68,25 @@ All notable changes to this project are documented here. The format follows
   an option this path does not implement, and `DFloatDependencyError` for a missing optional dependency. The step
   bench and the control validation now run through this integration code instead of a separate rig.
 
+- `DFloatFlux1` and the `mlx-dfloat generate` command: FLUX.1 schnell, dev and Krea-dev images from a DFloat11
+  transformer through mflux, decoded one block at a time. The VAE and the text encoders come from the base
+  repository; its BF16 transformer is never downloaded. The text encoders and the compressed transformer are never
+  in memory together: a prompt is encoded first, then the encoders are dropped and the compressed weights loaded;
+  a new prompt after that reloads both (`encode()` pre-encodes several prompts at once). Each call derives an MLX
+  buffer-cache limit from the checkpoint and the resolution, estimates the peak memory per phase against the
+  device's budget and refuses a call that would not fit (`fit_check=False` to override), and restores the process's
+  cache limit afterwards. The command installs the memory caps and the footprint watchdog; the Python API does
+  neither. Measured on an M1 Max (32 GB, macOS 27.0, mlx 0.32.2, mflux 0.20.0) at 1024²: FLUX.1-schnell (4 steps)
+  peaked at 19.94 GiB (19.95 GiB with depth-2 evaluation) in 1 minute 54 seconds including imports, with per-phase
+  MLX peaks of 10.09 GiB encoding the prompt, 15.20 GiB loading the compressed set, 17.44 GiB denoising and 9.55 GiB
+  decoding the VAE; FLUX.1-dev (20 steps, guidance 3.5) peaked at 20.10 GiB in 7 minutes 6 seconds; FLUX.1-Krea-dev
+  (20 steps, guidance 3.5) peaked at 20.09 GiB in 7 minutes 2 seconds. All three stay under the machine's measured
+  22.96 GiB budget. `scripts/verify_image.py` compares the final latents with those of the same transformer
+  streaming the BF16 shards block by block: FLUX.1-schnell's latents match bit for bit and are not degenerate, and
+  the two images match pixel for pixel; FLUX.1-dev and FLUX.1-Krea-dev were not checked this way, because their BF16
+  transformers are gated and were not on disk to compare against. Quantisation, LoRA, img2img, ControlNet and the
+  PiD decoder are refused with a reason; `negative_prompt` is accepted and ignored, as mflux does for FLUX.1.
+
 ### Changed
 
 - CI runs the whole test suite, Metal tests included, on the macOS runner, which reports a Metal device; a probe step
