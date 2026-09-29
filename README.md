@@ -6,8 +6,8 @@ DFloat11 is lossless compression for BF16 model weights. Each weight is 16 bits.
 as a short variable-length code, the same idea a zip file uses, and keeps the other 8 bits (the sign and the
 fraction) exactly as they are. The DFloat11 authors report models at about 70% of their BF16 size with output that is
 bit for bit the same as the original.[^size] Their decoder runs on NVIDIA GPUs only. This project is an independent
-reader and decoder for Apple Silicon. The weights stay compressed in memory and a Metal kernel decodes them on the
-GPU right before they are used; wiring that into mflux is the next step.
+reader and decoder for Apple Silicon. The weights stay compressed in memory, and a Metal kernel decodes each block
+on the GPU as it runs. That is how it generates FLUX.1 images through mflux.
 
 ```
 one BF16 weight, 16 bits:    s   eeeeeeee   mmmmmmm
