@@ -13,12 +13,13 @@ from pathlib import Path
 from typing import Any
 
 from mlx_dfloat._memory_caps import install_memory_caps
-from mlx_dfloat._watchdog import Watchdog, default_ceiling
+from mlx_dfloat._watchdog import Watchdog, default_ceiling, phys_footprint
 from mlx_dfloat.errors import DFloatError
 
 EXIT_OK, EXIT_ERROR = 0, 2
 DEFAULT_STEPS = {"schnell": 4, "dev": 25, "krea-dev": 25}  # mflux 0.20's per-model defaults
 DEFAULT_GUIDANCE = 3.5  # mflux-generate's default; schnell ignores it
+FOOTPRINT_PEAK_LABEL = "OS phys_footprint, sampled every 0.05 s by the watchdog"
 REFUSED: dict[str, str] = {
     "--quantize": "quantisation on top of DFloat11 changes the output the format exists to keep",
     "--lora-paths": "LoRA is not on the DFloat11 path",
@@ -154,7 +155,9 @@ def _finish(args: argparse.Namespace, report: dict[str, Any]) -> int:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(report, indent=1, default=str))
     if report["exit_code"] == EXIT_OK:
-        print(f"ok: {report['output']}")
+        peak = report.get("footprint_peak_bytes")
+        suffix = f" (footprint peak {peak / 1024**3:.2f} GiB)" if peak is not None else ""
+        print(f"ok: {report['output']}{suffix}")
     return int(report["exit_code"])
 
 
@@ -225,4 +228,6 @@ def run(
         report["error"] = f"{type(exc).__name__}: {exc}"
     finally:
         watchdog.stop()
+    report["footprint_peak_bytes"] = max(watchdog.peak_footprint, phys_footprint())
+    report["footprint_peak_label"] = FOOTPRINT_PEAK_LABEL
     return _finish(args, report)

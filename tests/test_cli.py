@@ -37,6 +37,7 @@ class _Model:
 class _Watchdog:
     def __init__(self, out_dir, *, ceiling, budget):
         self.out_dir, self.ceiling, self.budget, self.stopped = out_dir, ceiling, budget, False
+        self.peak_footprint = 12345
 
     def start(self):
         return self
@@ -163,6 +164,10 @@ def test_generate_builds_the_model_from_the_flags_writes_the_image_and_the_repor
     assert watchdogs[0].out_dir == out.parent
     assert watchdogs[0].budget == 60
     assert watchdogs[0].stopped
+    assert report["footprint_peak_bytes"] >= 12345
+    assert (
+        report["footprint_peak_label"] == "OS phys_footprint, sampled every 0.05 s by the watchdog"
+    )
 
 
 def test_defaults_follow_mflux_per_model(tmp_path):
