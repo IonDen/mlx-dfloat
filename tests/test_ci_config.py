@@ -99,3 +99,47 @@ def test_the_mflux_lane_gates_the_model_module_on_its_own():
         and "--co" not in shlex.split(run)
     )
     assert runs.index(report) == lane + 1
+
+
+def _config() -> dict:
+    return yaml.safe_load(CI.read_text())
+
+
+def _live_test_step(job: dict) -> dict:
+    live = [
+        step
+        for step in job["steps"]
+        if str(step.get("run", "")).startswith("uv run --extra mflux --group dev pytest")
+        and "--co" not in shlex.split(step["run"])
+    ]
+    assert len(live) == 1
+    return live[0]
+
+
+def test_only_the_live_test_step_of_the_mflux_lane_gets_the_hub_token():
+    # Bug caught: the HF_TOKEN env dropped from the lane's pytest step, or renamed to something
+    # huggingface_hub does not read, or blanked by an override: the three live tokenizer tests then skip
+    # on every CI run (`get_token() is None` on the runner) and the lane stays green while the gated
+    # base-repo path is never exercised there. Also caught: the network marker gated off again, which
+    # makes the token useless; and the token widened to the job, the workflow, another step or the
+    # default lane, where the checkout and setup-uv actions and the collection and coverage steps
+    # would read it for no reason. Only the value's presence can be checked here: an unset secret
+    # expands to "" and the tests skip, so this test proves the wiring, not that the secret exists.
+    config = _config()
+    job = config["jobs"]["integration"]
+    live = _live_test_step(job)
+    assert live.get("env", {}).get("HF_TOKEN") == "${{ secrets.HF_TOKEN }}"
+    assert "--run-network" in shlex.split(live["run"])
+    others = [step for step in job["steps"] if step is not live]
+    assert not any("HF_TOKEN" in (step.get("env") or {}) for step in others)
+    assert "HF_TOKEN" not in (job.get("env") or {})
+    assert "HF_TOKEN" not in (config.get("env") or {})
+    assert "HF_TOKEN" not in yaml.safe_dump(config["jobs"]["test"])
+    assert "HF_TOKEN" not in yaml.safe_dump(config["jobs"]["build"])
+
+
+def test_the_workflow_token_is_read_only():
+    # Bug caught: the `permissions` block dropped, so the workflow's GITHUB_TOKEN falls back to the
+    # repository default (read/write on older defaults), in a workflow whose mflux lane now carries a
+    # Hub secret; or a write scope added without a step that needs it.
+    assert _config()["permissions"] == {"contents": "read"}

@@ -5,6 +5,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: macos-15
@@ -42,6 +45,12 @@ jobs:
       - run: uv run --extra mflux --group dev python -c "import mflux, mlx.core, importlib.metadata as m; print('mflux', m.version('mflux'))"
       # No combined threshold: init.py's tests run in the default lane (its live ones skip without a token); the next step gates model.py on its own.
       - name: Integration tests (mflux lane)
+        env:
+          # Every FLUX.1 base repository is gated on the Hub (schnell auto-approved), so the three
+          # live tokenizer tests skip without a token; this is the variable huggingface_hub reads first.
+          # Only this step gets it: the actions, the sync and the collection and coverage steps have
+          # no use for it. The secret is a read-only Hub token; the default lane runs without one.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: uv run --extra mflux --group dev pytest -m mflux --run-network --cov=mlx_dfloat.mflux.flux1.model --cov=mlx_dfloat.mflux.flux1.init --cov-config=.coveragerc-integration --cov-report=term-missing -q -p no:cacheprovider -rs
       - name: model.py coverage on its own (mflux lane)
         run: uv run --extra mflux --group dev coverage report --include='*/mflux/flux1/model.py' --fail-under=80
