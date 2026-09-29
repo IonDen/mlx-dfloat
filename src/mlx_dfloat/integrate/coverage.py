@@ -4,14 +4,13 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 import mlx.core as mx
-import numpy as np
 
-from mlx_dfloat._safetensors import TensorInfo, read_array
+from mlx_dfloat._safetensors import TensorInfo
 from mlx_dfloat.errors import DFloatFormatError, DFloatIntegrationError
 from mlx_dfloat.format import DF11Checkpoint, MxGroup, load_group_mx
 from mlx_dfloat.integrate import seam
 from mlx_dfloat.integrate.names import NameMap, Shapes
-from mlx_dfloat.integrate.providers import WeightProvider
+from mlx_dfloat.integrate.providers import WeightProvider, read_bf16
 
 
 def load_resident_set(
@@ -35,17 +34,21 @@ def extras_plan(
     *,
     counts: Mapping[str, int],
     dropped: frozenset[str] = frozenset(),
+    extras: Mapping[str, tuple[Path, TensorInfo]] | None = None,
 ) -> list[tuple[str, Path, TensorInfo]]:
     """The extras to load as (module parameter name, file, tensor info), sorted by checkpoint name.
 
     Block extras at an index at or beyond ``counts[kind]`` and names in ``dropped`` are left out.
+    ``extras`` overrides the checkpoint's own extras (a BF16 base's index, for the reference side of
+    an image identity check) and defaults to ``ckpt.extras``.
 
     Raises:
         DFloatFormatError: Two checkpoint names map to the same module parameter name.
     """
     plan: list[tuple[str, Path, TensorInfo]] = []
     source_of: dict[str, str] = {}
-    for name, (path, info) in sorted(ckpt.extras.items()):
+    source = ckpt.extras if extras is None else extras
+    for name, (path, info) in sorted(source.items()):
         if name in dropped:
             continue
         block = _block_of(name, name_map)
@@ -78,9 +81,7 @@ def read_extra(path: Path, info: TensorInfo) -> mx.array:
     Raises:
         DFloatFormatError: The tensor is not BF16.
     """
-    if info.dtype != "BF16":
-        raise DFloatFormatError(f"{info.name}: extra is {info.dtype}, expected BF16")
-    return mx.array(np.ascontiguousarray(read_array(path, info))).view(mx.bfloat16)
+    return read_bf16(path, info)
 
 
 def check_extras_cover(

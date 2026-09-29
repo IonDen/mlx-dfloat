@@ -29,7 +29,12 @@ class DFloatDependencyError(DFloatError, ImportError):
     """An optional dependency this feature needs is not installed."""
 
 
+class DFloatAccessError(DFloatError, PermissionError):
+    """A model repository on the Hub that this account may not read (a gated licence not accepted, or no token)."""
+
+
 __all__ = [
+    "DFloatAccessError",
     "DFloatBackendError",
     "DFloatDependencyError",
     "DFloatError",

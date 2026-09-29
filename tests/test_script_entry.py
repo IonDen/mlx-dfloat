@@ -13,6 +13,7 @@ SCRIPTS = [
     "scripts/bench_flux_step.py",
     "scripts/bench_control_validation.py",
     "scripts/encode_prompt.py",
+    "scripts/verify_image.py",  # its --help must work without mflux (mflux loads inside the sides)
 ]
 
 

@@ -329,3 +329,32 @@ def block_lists(tf):
         ("transformer_blocks", tf.transformer_blocks),
         ("single_transformer_blocks", tf.single_transformer_blocks),
     ]
+
+
+# --- stubs for the model-level (mflux) tests ------------------------------------------------------
+
+
+class StubTokens:
+    def __init__(self, ids):
+        self.input_ids = ids
+
+
+class StubTokenizer:
+    """`tokenize(prompt)` → an object with `input_ids`, like mflux's LanguageTokenizer."""
+
+    def __init__(self, max_length):
+        self.max_length = max_length
+
+    def tokenize(self, prompt):
+        return StubTokens(mx.array([[len(prompt), 1, 2]]))
+
+
+class StubEncoder(nn.Module):
+    """A one-Linear encoder: `__call__(ids)` → a lazy array that depends on its weight."""
+
+    def __init__(self, width=4):
+        super().__init__()
+        self.proj = nn.Linear(3, width)
+
+    def __call__(self, ids):
+        return self.proj(ids.astype(mx.float32))

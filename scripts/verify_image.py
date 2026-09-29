@@ -1,0 +1,559 @@
+"""Image identity: FLUX.1 latents from a DFloat11 transformer against the same seam streaming the BF16 shards.
+
+The ``df11`` side generates through ``DFloatFlux1`` (the prompt encoded by its own encoders; the
+final latents captured by an after-loop callback and saved with the embeddings and the image).
+The ``bf16`` side builds the same seamed transformer with its extras read from the base's BF16
+transformer shards, drives it with a ``StreamingBF16Provider`` (each block's matrices read from
+the shards as the block runs, never all resident) through exactly mflux's loop body on the saved
+embeddings and the same seed, then decodes with the base's VAE. ``compare`` checks the two latent
+files bit for bit (``view(uint32)``) and that the DF11 latents are not degenerate (finite,
+variance above zero, moved away from the initial noise).
+
+Both sides run under the footprint watchdog. ``--orchestrate`` runs df11 and bf16 as subprocesses,
+one at a time, skipping a side whose ``result.json`` already carries this run's key, then compares
+the two sides' saved latents in-process.
+Usage (from the repository root of a synced checkout, ``--group bench``):
+    uv run python -m scripts.verify_image --orchestrate --model schnell --df11 DIR --base DIR --out DIR \
+        [--prompt "..."] [--seed 42] [--steps 4] [--size 1024] [--guidance 3.5] [--eval-policy per-block]
+Exit codes: 0 equal and non-degenerate, 1 the latents differ, 2 any error, 70/71 watchdog abort.
+"""
+
+import argparse
+import hashlib
+import json
+import subprocess
+import sys
+import traceback
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+# Run as a file, Python puts scripts/ (not the repository root) first on sys.path.
+_REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO))
+
+try:
+    import mlx.core as mx
+    from scripts._bench_common import (
+        move_stale_abort_aside,
+        provenance,
+        resume_key_diff,
+        write_json_atomic,
+    )
+    from scripts._watchdog import Watchdog, default_ceiling, phys_footprint
+    from scripts.verify_checkpoint import source_hash
+
+    from mlx_dfloat._memory_caps import install_memory_caps
+    from mlx_dfloat.format import open_checkpoint
+    from mlx_dfloat.integrate.providers import StreamingBF16Provider
+    from mlx_dfloat.mflux.flux1 import init as base_init
+    from mlx_dfloat.mflux.flux1.names import flux_name_map
+    from mlx_dfloat.mflux.flux1.transformer import (
+        base_extras,
+        base_transformer_index,
+        build_transformer,
+    )
+except Exception as exc:  # a broken environment is a tool error (2), never the mismatch code (1)
+    print(
+        f"error: cannot import the project modules ({exc}); run from a synced checkout",
+        file=sys.stderr,
+    )
+    raise SystemExit(2) from exc
+
+EXIT_OK, EXIT_MISMATCH, EXIT_ERROR = 0, 1, 2
+SIDES: tuple[str, ...] = ("df11", "bf16")
+DEFAULT_PROMPT = (
+    "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing "
+    "boat far out on the water"
+)
+
+
+class VerifyImageError(Exception):
+    """An input or tool problem of this check (exit 2), distinct from a real latent mismatch (exit 1)."""
+
+
+# --- pure parts (unit-tested without mflux) -----------------------------------------------------
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse the command line: one side (``df11``, ``bf16`` or ``compare``), or ``--orchestrate``."""
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--side", choices=(*SIDES, "compare"), help="the one side this process runs")
+    mode.add_argument("--orchestrate", action="store_true", help="run df11, bf16, then compare")
+    p.add_argument("--model", choices=("schnell", "dev", "krea-dev"), default="schnell")
+    p.add_argument("--df11", required=True, help="DF11 checkpoint directory")
+    p.add_argument(
+        "--base", required=True, help="base repository directory (encoders, VAE and transformer)"
+    )
+    p.add_argument("--out", type=Path, required=True, help="directory for both sides' outputs")
+    p.add_argument("--prompt", default=DEFAULT_PROMPT)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--steps", type=int, default=4)
+    p.add_argument("--size", type=int, default=1024)
+    p.add_argument("--guidance", type=float, default=3.5)
+    p.add_argument("--eval-policy", choices=("per-block", "depth2"), default="per-block")
+    p.add_argument(
+        "--wall-budget", type=float, default=7200.0, help="seconds before the watchdog aborts"
+    )
+    args = p.parse_args(argv)
+    # Absolute paths: the children run with the repository root as their cwd.
+    args.df11 = str(Path(args.df11).expanduser().resolve())
+    args.base = str(Path(args.base).expanduser().resolve())
+    args.out = args.out.expanduser().resolve()
+    return args
+
+
+def run_key(args: argparse.Namespace) -> dict[str, Any]:
+    """This run's resume key: every setting that changes the latents, plus the source and mlx version."""
+    return {
+        "model": args.model,
+        "seed": args.seed,
+        "steps": args.steps,
+        "size": args.size,
+        "prompt": args.prompt,
+        "guidance": args.guidance,
+        "eval_policy": args.eval_policy,
+        "df11": str(Path(args.df11).expanduser()),
+        "base": str(Path(args.base).expanduser()),
+        "source": source_hash(),
+        "mlx": mx.__version__,
+    }
+
+
+def nondegenerate(latents: mx.array, noise: mx.array) -> list[str]:
+    """The names of the checks ``latents`` fails: ``finite``, ``variance``, ``moved_from_noise``.
+
+    A non-finite tensor returns immediately with only ``"finite"``: variance and the noise
+    comparison are meaningless once a value is NaN or infinite.
+    """
+    failed: list[str] = []
+    if not bool(mx.isfinite(latents).all().item()):
+        failed.append("finite")
+        return failed
+    if float(mx.var(latents.astype(mx.float32)).item()) <= 0.0:
+        failed.append("variance")
+    if latents.shape == noise.shape and compare_latents(latents, noise):
+        failed.append("moved_from_noise")
+    return failed
+
+
+def compare_latents(a: mx.array, b: mx.array) -> bool:
+    """Whether ``a`` and ``b`` share a shape, a dtype and every bit (never a float ``==``, which equates ±0.0)."""
+    return (
+        a.shape == b.shape
+        and a.dtype == b.dtype
+        and bool(mx.array_equal(a.view(mx.uint32), b.view(mx.uint32)))
+    )
+
+
+def verdict(*, equal: bool, degenerate: list[str]) -> int:
+    """The exit code: 2 when the df11 latents are degenerate (nothing meaningful was compared), else 0/1."""
+    if degenerate:
+        return EXIT_ERROR
+    return EXIT_OK if equal else EXIT_MISMATCH
+
+
+def child_command(args: argparse.Namespace, side: str) -> list[str]:
+    """The subprocess argv for one side (never ``--orchestrate``; run with the repository root as cwd)."""
+    return [
+        sys.executable,
+        "-m",
+        "scripts.verify_image",
+        "--side",
+        side,
+        "--model",
+        args.model,
+        "--df11",
+        args.df11,
+        "--base",
+        args.base,
+        "--out",
+        str(args.out),
+        "--prompt",
+        args.prompt,
+        "--seed",
+        str(args.seed),
+        "--steps",
+        str(args.steps),
+        "--size",
+        str(args.size),
+        "--guidance",
+        str(args.guidance),
+        "--eval-policy",
+        args.eval_policy,
+        "--wall-budget",
+        str(args.wall_budget),
+    ]
+
+
+def _read_json(path: Path) -> Any | None:
+    """The parsed JSON at ``path``, or ``None`` when it's missing or not valid JSON."""
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def side_complete(path: Path, key: Mapping[str, Any]) -> bool:
+    """Whether ``path / "result.json"`` holds a successful run keyed exactly like ``key`` (the resume check)."""
+    data = _read_json(path / "result.json")
+    if not isinstance(data, dict):
+        return False
+    return data.get("exit_code") == EXIT_OK and not resume_key_diff(data.get("key"), key)
+
+
+def sides_ready(out_dir: Path, key: Mapping[str, Any]) -> list[str]:
+    """The problems blocking a compare: a side missing its result, not exit 0, or keyed differently than ``key``.
+
+    Empty exactly when both ``df11`` and ``bf16`` are complete and keyed exactly like ``key`` — the
+    gate ``run_compare`` checks before it will issue the 0/1 verdict, so a stale, failed or
+    different-run side is never silently compared.
+    """
+    problems: list[str] = []
+    for side in SIDES:
+        data = _read_json(out_dir / side / "result.json")
+        if not isinstance(data, dict):
+            problems.append(f"{side}: no result.json")
+            continue
+        if data.get("exit_code") != EXIT_OK:
+            problems.append(f"{side}: exit_code {data.get('exit_code')!r}, not 0")
+            continue
+        diff = resume_key_diff(data.get("key"), key)
+        if diff:
+            problems.append(f"{side}: key differs in {diff}")
+    return problems
+
+
+def _sha256_file(path: Path) -> str:
+    """The sha256 hex digest of ``path``'s bytes."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def pixels_identical(a: Path, b: Path) -> bool:
+    """Whether two image files decode to the same size, mode and pixels (their metadata ignored)."""
+    from PIL import Image
+
+    with Image.open(a) as image_a, Image.open(b) as image_b:
+        return (
+            image_a.size == image_b.size
+            and image_a.mode == image_b.mode
+            and image_a.tobytes() == image_b.tobytes()
+        )
+
+
+def max_phase_peak(peaks: Mapping[str, Any]) -> int:
+    """The largest per-phase MLX peak in a model report's ``peaks`` (0 when no phase was recorded).
+
+    The model resets MLX's process-wide peak counter at every phase boundary, so the counter read
+    at the end holds only the last phase; the per-phase values are the whole record.
+    """
+    return max(
+        (int(v["mlx_peak"]) for v in peaks.values() if isinstance(v, Mapping)),
+        default=0,
+    )
+
+
+# --- the df11 side (mflux-touching; not unit-tested here) ---------------------------------------
+
+
+class _LatentCapture:
+    """An mflux after-loop subscriber that keeps the final packed latents every subscriber is handed."""
+
+    def __init__(self) -> None:
+        """Start with no captured latents."""
+        self.latents: mx.array | None = None
+
+    def call_after_loop(self, seed: int, prompt: str, latents: mx.array, config: Any) -> None:
+        """Keep ``latents``; mflux calls every after-loop subscriber this way regardless of the rest."""
+        del seed, prompt, config
+        self.latents = latents
+
+
+def run_df11(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, Any]:
+    """Generate through ``DFloatFlux1``, capture the final latents, and save the image, latents and embeddings.
+
+    Raises:
+        VerifyImageError: The after-loop callback never ran (mflux's own loop never called it).
+    """
+    from mflux.models.flux.latent_creator.flux_latent_creator import FluxLatentCreator
+
+    from mlx_dfloat.mflux.flux1.model import DFloatFlux1
+
+    out_dir = args.out / "df11"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    model = DFloatFlux1(
+        args.model, df11_path=args.df11, base_path=args.base, eval_policy=args.eval_policy
+    )
+    capture = _LatentCapture()
+    model.callbacks.register(capture)
+    image = model.generate_image(
+        args.seed,
+        args.prompt,
+        num_inference_steps=args.steps,
+        height=args.size,
+        width=args.size,
+        guidance=args.guidance,
+    )
+    captured = capture.latents
+    if captured is None:
+        raise VerifyImageError("the after-loop callback never ran; no latents were captured")
+    mx.eval(captured)
+    # overwrite=True: without it, GeneratedImage.save renames around an existing image.png
+    # (image-1.png, ...) instead of replacing it, so a rerun after a failed attempt would leave a
+    # stale image.png behind while latents.safetensors/embeds.safetensors/result.json move on.
+    image.save(str(out_dir / "image.png"), export_json_metadata=False, overwrite=True)
+    mx.save_safetensors(str(out_dir / "latents.safetensors"), {"latents": captured})
+    prompt_embeds, pooled_prompt_embeds = model.prompt_cache[args.prompt]
+    mx.save_safetensors(
+        str(out_dir / "embeds.safetensors"),
+        {"prompt_embeds": prompt_embeds, "pooled_prompt_embeds": pooled_prompt_embeds},
+    )
+    noise = FluxLatentCreator.create_noise(args.seed, args.size, args.size)
+    degenerate = nondegenerate(captured, noise)
+    report = model.report()
+    return {
+        "exit_code": EXIT_OK if not degenerate else EXIT_ERROR,
+        "degenerate": degenerate,
+        "report": report,
+        "output_shape": list(captured.shape),
+        "output_dtype": str(captured.dtype),
+        "footprint_peak_bytes": max(watchdog.peak_footprint, phys_footprint()),
+        "mlx_peak_bytes_max_over_phases": max_phase_peak(report["peaks"]),
+    }
+
+
+# --- the bf16 side (mflux-touching; not unit-tested here) ---------------------------------------
+
+
+def run_bf16(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, Any]:
+    """Stream the base's BF16 transformer shards through the seam, mflux's exact loop body, then the VAE.
+
+    Raises:
+        VerifyImageError: The df11 side's saved embeddings are not present yet.
+    """
+    from mflux.models.common.config.config import Config
+    from mflux.models.common.config.model_config import ModelConfig
+    from mflux.models.flux.latent_creator.flux_latent_creator import FluxLatentCreator
+    from mflux.utils.image_util import ImageUtil
+
+    out_dir = args.out / "bf16"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    embeds_path = args.out / "df11" / "embeds.safetensors"
+    if not embeds_path.exists():
+        raise VerifyImageError(f"{embeds_path}: run the df11 side first")
+
+    df11_root = Path(args.df11).expanduser()
+    base_root = Path(args.base).expanduser()
+    ckpt = open_checkpoint(df11_root)
+    index = base_transformer_index(base_root / "transformer")
+    model_config = ModelConfig.from_name(model_name=args.model, base_model=None)
+    transformer, shapes = build_transformer(model_config, ckpt, extras=base_extras(index, ckpt))
+    provider = StreamingBF16Provider(
+        index, {n: ckpt.groups[n].matrix_names for n in shapes}, flux_name_map()
+    )
+    transformer.attach(provider, shapes, eval_policy=args.eval_policy)
+
+    embeds = mx.load(str(embeds_path))
+    prompt_embeds, pooled_prompt_embeds = embeds["prompt_embeds"], embeds["pooled_prompt_embeds"]
+    config = Config(
+        model_config,
+        num_inference_steps=args.steps,
+        height=args.size,
+        width=args.size,
+        guidance=args.guidance,
+        scheduler="linear",
+    )
+    latents = FluxLatentCreator.create_noise(args.seed, args.size, args.size)
+    mx.eval(latents, prompt_embeds, pooled_prompt_embeds)
+
+    for t in config.time_steps:
+        # Exactly mflux's own Flux1.generate_image step body (scale, transformer, scheduler step,
+        # eval); verify_step() is our seam's own contract and a no-op for this provider (it defers
+        # nothing), kept for the same reason bench_flux_step.denoise_step keeps it after every step.
+        latents = config.scheduler.scale_model_input(latents, t)
+        noise = transformer(
+            t=t,
+            config=config,
+            hidden_states=latents,
+            prompt_embeds=prompt_embeds,
+            pooled_prompt_embeds=pooled_prompt_embeds,
+        )
+        latents = config.scheduler.step(noise=noise, timestep=t, latents=latents)
+        mx.eval(latents)
+        transformer.verify_step()
+
+    mx.save_safetensors(str(out_dir / "latents.safetensors"), {"latents": latents})
+
+    vae = base_init.load_vae(base_root)
+    mx.clear_cache()
+    mx.set_cache_limit(0)  # the transformer-shaped buffers cannot serve the decoder
+    unpacked = FluxLatentCreator.unpack_latents(latents, args.size, args.size)
+    decoded = vae.decode(unpacked)  # (B, C, 1, H, W): VAE.decode's raw output, not VAEUtil's
+    # PIL.Image.save always overwrites an existing file at this path; no equivalent to
+    # GeneratedImage.save's rename-around-a-stale-file behaviour to guard against here.
+    ImageUtil.to_pil(decoded[:, :, 0, :, :]).save(str(out_dir / "image.png"))
+
+    return {
+        "exit_code": EXIT_OK,
+        "reads": provider.reads,
+        "output_shape": list(latents.shape),
+        "output_dtype": str(latents.dtype),
+        "footprint_peak_bytes": max(watchdog.peak_footprint, phys_footprint()),
+        "mlx_peak_bytes_process": int(mx.get_peak_memory()),  # never reset on this side
+    }
+
+
+# --- compare, orchestration and the CLI ----------------------------------------------------------
+
+
+def run_compare(args: argparse.Namespace) -> dict[str, Any]:
+    """Compare both sides' saved latents bit for bit, and report the df11 side's own degeneracy.
+
+    Refuses (``exit_code`` 2, never 0 or 1) unless ``sides_ready`` finds both sides complete and
+    keyed exactly like this run — a missing, failed or different-run side is never compared. The
+    two PNGs are also decoded and compared pixel for pixel (``pixels_identical``); their sha256
+    hashes are informational only, since the df11 PNG carries mflux's embedded metadata.
+
+    Raises:
+        OSError: A ready side's saved latents or image file is missing.
+        ValueError: A ready side's result.json turned invalid between ``sides_ready`` and here.
+    """
+    key = run_key(args)
+    df11_dir, bf16_dir = args.out / "df11", args.out / "bf16"
+    problems = sides_ready(args.out, key)
+    df11_result = _read_json(df11_dir / "result.json")
+    bf16_result = _read_json(bf16_dir / "result.json")
+    df11_key = df11_result.get("key") if isinstance(df11_result, dict) else None
+    bf16_key = bf16_result.get("key") if isinstance(bf16_result, dict) else None
+    if problems:
+        return {
+            "exit_code": EXIT_ERROR,
+            "error": "cannot compare: " + "; ".join(problems),
+            "df11_key": df11_key,
+            "bf16_key": bf16_key,
+        }
+    a = mx.load(str(df11_dir / "latents.safetensors"))["latents"]
+    b = mx.load(str(bf16_dir / "latents.safetensors"))["latents"]
+    equal = compare_latents(a, b)
+    degenerate = list(df11_result.get("degenerate", [])) if isinstance(df11_result, dict) else []
+    return {
+        "exit_code": verdict(equal=equal, degenerate=degenerate),
+        "equal": equal,
+        "degenerate": degenerate,
+        "df11_key": df11_key,
+        "bf16_key": bf16_key,
+        "pixels_identical": pixels_identical(df11_dir / "image.png", bf16_dir / "image.png"),
+        "df11_png_sha256": _sha256_file(df11_dir / "image.png"),
+        "bf16_png_sha256": _sha256_file(bf16_dir / "image.png"),
+    }
+
+
+def _write_compare(args: argparse.Namespace) -> int:
+    """Run the compare side and write ``out/compare.json`` (an error verdict on failure); return the exit code."""
+    try:
+        summary = run_compare(args)
+    except Exception as exc:  # any failure is a tool error (2), never the mismatch code (1)
+        summary = {"exit_code": EXIT_ERROR, "error": f"{type(exc).__name__}: {exc}"}
+        traceback.print_exc()
+    try:
+        write_json_atomic(args.out / "compare.json", summary)
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"error: cannot write compare.json ({exc})", file=sys.stderr)
+        summary["exit_code"] = EXIT_ERROR
+    code = int(summary["exit_code"])
+    if code == EXIT_OK:
+        print("ok: the latents are bit-identical and non-degenerate")
+    elif code == EXIT_MISMATCH:
+        print("mismatch: the df11 and bf16 latents differ", file=sys.stderr)
+    else:
+        print(f"exit {code}: {summary.get('error', summary.get('degenerate'))}", file=sys.stderr)
+    return code
+
+
+def _move_stale_result_aside(side_dir: Path, key: Mapping[str, Any]) -> None:
+    """Move a previous ``result.json`` in ``side_dir`` to ``result.previous.json`` if its key differs from ``key``.
+
+    Mirrors ``move_stale_abort_aside``: a side directory left over from a run with different
+    settings must never be mistaken for this run's outputs (its stale image/latents/embeddings
+    would otherwise sit next to a fresh ``result.json`` until this run overwrites them), and the
+    old record is kept, never deleted.
+    """
+    result_path = side_dir / "result.json"
+    if not result_path.exists():
+        return
+    data = _read_json(result_path)
+    stored_key = data.get("key") if isinstance(data, dict) else None
+    if resume_key_diff(stored_key, key):
+        result_path.replace(side_dir / "result.previous.json")
+
+
+def run_side(args: argparse.Namespace) -> int:
+    """Run one heavy side (``df11`` or ``bf16``) under the memory caps and the footprint watchdog; write ``result.json``."""
+    side = args.side
+    side_dir = args.out / side
+    caps = list(install_memory_caps())
+    side_dir.mkdir(parents=True, exist_ok=True)
+    key = run_key(args)
+    _move_stale_result_aside(side_dir, key)
+    move_stale_abort_aside(side_dir)
+    watchdog = Watchdog(side_dir, ceiling=default_ceiling(), budget=args.wall_budget).start()
+    run = run_df11 if side == "df11" else run_bf16
+    try:
+        summary = run(args, watchdog)
+    except Exception as exc:  # any failure is a tool error (2), never the mismatch code (1)
+        summary = {"exit_code": EXIT_ERROR, "error": f"{type(exc).__name__}: {exc}"}
+        traceback.print_exc()
+    finally:
+        watchdog.stop()
+    summary.update({"key": key, "memory_caps_gb": caps, "provenance": provenance()})
+    try:
+        write_json_atomic(side_dir / "result.json", summary)
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"error: cannot write {side_dir / 'result.json'} ({exc})", file=sys.stderr)
+        summary["exit_code"] = EXIT_ERROR
+    code = int(summary["exit_code"])
+    if code == EXIT_OK:
+        print(f"ok: {side} wrote {side_dir}")
+    else:
+        print(f"exit {code}: {summary.get('error', summary.get('degenerate'))}", file=sys.stderr)
+    return code
+
+
+def orchestrate(args: argparse.Namespace) -> int:
+    """Run the pending df11/bf16 subprocesses in order, then compare in-process; exit 2 on a child's failure."""
+    args.out.mkdir(parents=True, exist_ok=True)
+    key = run_key(args)
+    for side in SIDES:
+        side_dir = args.out / side
+        if side_complete(side_dir, key):
+            print(f"{side}: already complete, skipping")
+            continue
+        cmd = child_command(args, side)
+        print(f"{side}: {' '.join(cmd)}", flush=True)
+        code = subprocess.run(cmd, cwd=_REPO, check=False).returncode
+        if code != 0:
+            print(f"error: {side} exited {code}; stopping", file=sys.stderr)
+            return EXIT_ERROR
+    return _write_compare(args)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Entry point: one side, or ``--orchestrate`` (df11, then bf16, then compare)."""
+    args = parse_args(argv)
+    try:
+        if args.orchestrate:
+            return orchestrate(args)
+        if args.side == "compare":
+            return _write_compare(args)
+        return run_side(args)
+    except Exception as exc:  # a setup error is a tool error (2), never the mismatch code (1)
+        traceback.print_exc()
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

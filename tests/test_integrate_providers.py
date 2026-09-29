@@ -9,6 +9,7 @@ from tests._flux_fakes import (
     FF,
     FLUX_TABLE,
     D,
+    FakeSeamTransformer,
     FakeTransformer,
     Recorder,
     block_lists,
@@ -250,3 +251,129 @@ def test_resident_provider_refuses_a_shape_that_does_not_match_the_block():
         ResidentProvider({"transformer_blocks.0": missing}).weights_for(
             "transformer_blocks.0", shapes["transformer_blocks.0"]
         )
+
+
+def test_streaming_bf16_provider_reads_each_block_bit_exactly_from_the_shards_and_keeps_nothing(
+    tmp_path,
+):
+    # Bug caught: a shard read landing on the wrong attribute (name map bypassed), a dtype cast on
+    # the way (bf16 -> f16 loses bits), or the provider caching the block dicts (every block resident).
+    from tests._df11_fixtures import write_bf16_original
+
+    from mlx_dfloat._safetensors import read_header
+    from mlx_dfloat.integrate.providers import StreamingBF16Provider
+
+    tf = FakeSeamTransformer(Recorder(), n_double=1, n_single=1)
+    shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
+    _groups, names, source = df11_groups(shapes, np.random.default_rng(5))
+    bits = {m: arr for per in source.values() for m, arr in per.items()}
+    root = write_bf16_original(tmp_path / "bf16", bits)
+    index = {}
+    for shard in sorted(root.glob("*.safetensors")):
+        index.update({n: (shard, info) for n, info in read_header(shard).items()})
+    provider = StreamingBF16Provider(index, names, FLUX_TABLE)
+    for block, per in shapes.items():
+        weights = provider.weights_for(block, per)
+        assert weights.keys() == per.keys()
+        for matrix_name in names[block]:
+            attr = FLUX_TABLE.place(matrix_name).attr
+            assert np.array_equal(np.array(weights[attr].view(mx.uint16)), bits[matrix_name]), (
+                matrix_name
+            )
+    assert provider.reads == 20
+    assert provider.launches == 0
+    assert not provider.launching
+    assert set(vars(provider)) == {"_index", "_matrix_names", "_name_map", "launches", "reads"}
+    assert not any(isinstance(v, mx.array) for v in vars(provider).values())
+
+
+def test_streaming_bf16_provider_refuses_a_block_without_matrix_names():
+    # Bug caught: a block with no matrix_names entry reaching the index lookup loop instead of a
+    # clear refusal (a bare TypeError iterating over None).
+    from mlx_dfloat.integrate.providers import StreamingBF16Provider
+
+    tf = FakeSeamTransformer(Recorder(), n_double=1, n_single=1)
+    shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
+    _groups, names, _source = df11_groups(shapes, np.random.default_rng(6))
+    del names["single_transformer_blocks.0"]
+    provider = StreamingBF16Provider({}, names, FLUX_TABLE)
+    with pytest.raises(
+        DFloatIntegrationError, match=r"single_transformer_blocks\.0: no matrix names"
+    ):
+        provider.weights_for("single_transformer_blocks.0", shapes["single_transformer_blocks.0"])
+    assert provider.reads == 0
+
+
+def test_streaming_bf16_provider_refuses_a_name_missing_from_the_index():
+    # Bug caught: a missing matrix silently left at its placeholder (a zero-size matmul later).
+    from mlx_dfloat.integrate.providers import StreamingBF16Provider
+
+    tf = FakeSeamTransformer(Recorder(), n_double=1, n_single=0)
+    shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
+    _groups, names, _source = df11_groups(shapes, np.random.default_rng(6))
+    provider = StreamingBF16Provider({}, names, FLUX_TABLE)
+    with pytest.raises(DFloatIntegrationError, match="not in the BF16 index"):
+        provider.weights_for("transformer_blocks.0", shapes["transformer_blocks.0"])
+
+
+def test_streaming_bf16_provider_refuses_a_name_whose_placement_is_another_block(tmp_path):
+    # Bug caught: dropping the placement guard would let another block's matrix names (same count,
+    # present in the index) place their weights onto this block's attributes and pass silently.
+    from tests._df11_fixtures import write_bf16_original
+
+    from mlx_dfloat._safetensors import read_header
+    from mlx_dfloat.integrate.providers import StreamingBF16Provider
+
+    tf = FakeSeamTransformer(Recorder(), n_double=2, n_single=0)
+    shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
+    _groups, names, source = df11_groups(shapes, np.random.default_rng(7))
+    bits = {m: arr for per in source.values() for m, arr in per.items()}
+    root = write_bf16_original(tmp_path / "bf16", bits)
+    index = {}
+    for shard in sorted(root.glob("*.safetensors")):
+        index.update({n: (shard, info) for n, info in read_header(shard).items()})
+    swapped = {**names, "transformer_blocks.0": names["transformer_blocks.1"]}
+    provider = StreamingBF16Provider(index, swapped, FLUX_TABLE)
+    with pytest.raises(DFloatIntegrationError, match=r"not a matrix of transformer_blocks\.0"):
+        provider.weights_for("transformer_blocks.0", shapes["transformer_blocks.0"])
+
+
+def test_streaming_bf16_provider_refuses_a_shard_tensor_of_the_wrong_shape(tmp_path):
+    # Bug caught: a shard tensor whose shape differs from the block's placeholder (e.g. transposed)
+    # reaching the seam and the first matmul instead of being refused here, where it is still legible.
+    from tests._df11_fixtures import write_bf16_original
+
+    from mlx_dfloat._safetensors import read_header
+    from mlx_dfloat.integrate.providers import StreamingBF16Provider
+
+    tf = FakeSeamTransformer(Recorder(), n_double=1, n_single=0)
+    shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
+    _groups, names, source = df11_groups(shapes, np.random.default_rng(7))
+    bits = {m: arr for per in source.values() for m, arr in per.items()}
+    root = write_bf16_original(tmp_path / "bf16", bits)
+    index = {}
+    for shard in sorted(root.glob("*.safetensors")):
+        index.update({n: (shard, info) for n, info in read_header(shard).items()})
+    matrix_name = "transformer_blocks.0.ff.net.0.proj.weight"
+    attr = FLUX_TABLE.place(matrix_name).attr
+    transposed = tuple(reversed(shapes["transformer_blocks.0"][attr]))
+    wrong_path = tmp_path / "wrong.safetensors"
+    mx.save_safetensors(str(wrong_path), {"x": mx.zeros(transposed, dtype=mx.bfloat16)})
+    index[matrix_name] = (wrong_path, read_header(wrong_path)["x"])
+    provider = StreamingBF16Provider(index, names, FLUX_TABLE)
+    with pytest.raises(DFloatIntegrationError, match="shard tensor has shape"):
+        provider.weights_for("transformer_blocks.0", shapes["transformer_blocks.0"])
+
+
+def test_streaming_bf16_provider_refuses_the_none_policy():
+    # Bug caught: StreamingBF16Provider advertising every policy, so "none" is accepted and the
+    # whole BF16 transformer (fresh arrays per block) is kept alive in one step's lazy graph.
+    from mlx_dfloat.integrate.providers import StreamingBF16Provider
+    from mlx_dfloat.integrate.seam import attach_state
+
+    shapes = _shapes(1, 1)
+    provider = StreamingBF16Provider({}, {}, FLUX_TABLE)
+    with pytest.raises(DFloatIntegrationError, match="'none'"):
+        attach_state(provider, shapes, eval_policy="none")
+    attach_state(provider, shapes, eval_policy="per-block")
+    attach_state(provider, shapes, eval_policy="depth2")

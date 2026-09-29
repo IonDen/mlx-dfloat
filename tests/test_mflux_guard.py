@@ -79,3 +79,27 @@ def test_the_first_mflux_entry_points_raise_the_package_error_without_mflux(monk
         transformer.seam_transformer_class()
     with pytest.raises(DFloatDependencyError, match=r"install mlx-dfloat\[mflux\]"):
         rig.build_transformer("schnell", None)
+
+
+def test_the_model_class_is_reached_lazily_and_needs_mflux_only_then(monkeypatch):
+    # Bug caught: `mlx_dfloat.mflux` importing the model (and so mflux) eagerly, or the lazy path
+    # raising a bare ModuleNotFoundError instead of the package error with the install hint.
+    monkeypatch.delitem(sys.modules, "mlx_dfloat.mflux.flux1.model", raising=False)
+    import mlx_dfloat.mflux as adapters
+
+    _hide_mflux(monkeypatch)
+    with pytest.raises(DFloatDependencyError, match=r"install mlx-dfloat\[mflux\]"):
+        _ = adapters.DFloatFlux1
+    with pytest.raises(AttributeError):
+        _ = adapters.NoSuchName
+
+
+def test_a_star_import_of_the_mflux_package_needs_no_mflux(monkeypatch):
+    # Bug caught: `DFloatFlux1` listed in `mlx_dfloat.mflux.__all__`, so `from mlx_dfloat.mflux
+    # import *` resolves it through `__getattr__` and raises DFloatDependencyError without mflux.
+    monkeypatch.delitem(sys.modules, "mlx_dfloat.mflux.flux1.model", raising=False)
+    _hide_mflux(monkeypatch)
+    namespace: dict[str, object] = {}
+    exec("from mlx_dfloat.mflux import *", namespace)
+    assert callable(namespace["require_mflux"])
+    assert "DFloatFlux1" not in namespace

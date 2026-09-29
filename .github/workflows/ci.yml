@@ -40,8 +40,11 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --locked --group dev --extra mflux
       - run: uv run --extra mflux --group dev python -c "import mflux, mlx.core, importlib.metadata as m; print('mflux', m.version('mflux'))"
+      # No combined threshold: init.py's tests run in the default lane (its live ones skip without a token); the next step gates model.py on its own.
       - name: Integration tests (mflux lane)
-        run: uv run --extra mflux --group dev pytest -m mflux --run-network -q -p no:cacheprovider -rs
+        run: uv run --extra mflux --group dev pytest -m mflux --run-network --cov=mlx_dfloat.mflux.flux1.model --cov=mlx_dfloat.mflux.flux1.init --cov-config=.coveragerc-integration --cov-report=term-missing -q -p no:cacheprovider -rs
+      - name: model.py coverage on its own (mflux lane)
+        run: uv run --extra mflux --group dev coverage report --include='*/mflux/flux1/model.py' --fail-under=80
       - name: The lane collected mflux tests
         run: test "$(uv run --extra mflux --group dev pytest -m mflux --co -q -p no:cacheprovider | grep -c '::')" -ge 2
   build:

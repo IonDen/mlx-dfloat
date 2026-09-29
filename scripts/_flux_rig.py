@@ -37,6 +37,7 @@ from mlx_dfloat.integrate.providers import (
     DF11Provider,
     ResidentProvider,
     ReuseProvider,
+    StreamingBF16Provider,
     WeightProvider,
 )
 from mlx_dfloat.integrate.seam import MAX_NONE_POLICY_LAUNCHING_BLOCKS, _async_eval, _eval
@@ -292,6 +293,7 @@ __all__ = [
     "SeamMixin",
     "Shapes",
     "StaticNameMap",
+    "StreamingBF16Provider",
     "Tracer",
     "WeightProvider",
     "_async_eval",

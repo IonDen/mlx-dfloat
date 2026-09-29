@@ -2,6 +2,7 @@
 
 from mlx_dfloat._version import __version__
 from mlx_dfloat.errors import (
+    DFloatAccessError,
     DFloatBackendError,
     DFloatDependencyError,
     DFloatError,
@@ -12,6 +13,7 @@ from mlx_dfloat.errors import (
 )
 
 __all__ = [
+    "DFloatAccessError",
     "DFloatBackendError",
     "DFloatDependencyError",
     "DFloatError",

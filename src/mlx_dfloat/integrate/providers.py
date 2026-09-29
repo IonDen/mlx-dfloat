@@ -2,12 +2,15 @@
 
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
+from pathlib import Path
 from typing import Protocol, cast
 
 import mlx.core as mx
+import numpy as np
 
+from mlx_dfloat._safetensors import TensorInfo, read_array
 from mlx_dfloat.decode import DecodeResult, check_status, decode_group, split_matrices
-from mlx_dfloat.errors import DFloatIntegrationError
+from mlx_dfloat.errors import DFloatFormatError, DFloatIntegrationError
 from mlx_dfloat.format import MxGroup
 from mlx_dfloat.integrate.names import BlockShapes, NameMap
 
@@ -35,6 +38,81 @@ class WeightProvider(Protocol):
     def reset(self) -> None:
         """Drop per-step state after a step that raised."""
         ...
+
+
+def read_bf16(path: Path, info: TensorInfo) -> mx.array:
+    """One BF16 tensor of a safetensors file as a bf16 array (a bit view, never a cast).
+
+    Raises:
+        DFloatFormatError: The tensor is not BF16.
+    """
+    if info.dtype != "BF16":
+        raise DFloatFormatError(f"{info.name}: tensor is {info.dtype}, expected BF16")
+    return mx.array(np.ascontiguousarray(read_array(path, info))).view(mx.bfloat16)
+
+
+class StreamingBF16Provider:
+    """Reads each block's BF16 matrices from safetensors shards as the block runs; nothing stays resident.
+
+    ``index`` maps a checkpoint matrix name to ``(shard path, tensor info)``: a base repository's
+    weight index plus the shards' headers. The reference side of an image identity check, and the
+    seam's way of streaming an uncompressed model.
+    """
+
+    launching = False
+    # Each block reads fresh arrays from the shards; under "none" the whole BF16 transformer would
+    # stay alive in one step's lazy graph, so only the per-block boundaries are offered.
+    policies: tuple[str, ...] = ("per-block", "depth2")
+
+    def __init__(
+        self,
+        index: Mapping[str, tuple[Path, TensorInfo]],
+        matrix_names: Mapping[str, Sequence[str]],
+        name_map: NameMap,
+    ) -> None:
+        """Hold the index, each block's matrix names (the checkpoint's order) and the map that places them."""
+        self._index = index
+        self._matrix_names = matrix_names
+        self._name_map = name_map
+        self.launches = 0
+        self.reads = 0
+
+    def verify(self) -> None:
+        """Nothing deferred: no decode happened."""
+
+    def reset(self) -> None:
+        """No per-step state."""
+
+    def weights_for(self, block_name: str, shapes: BlockShapes) -> dict[str, mx.array]:
+        """Read the block's matrices from their shards (fresh arrays; the caller's step frees them).
+
+        Raises:
+            DFloatIntegrationError: No matrix names for the block, a name missing from the index, a
+                name that is not a matrix of this block, or a tensor of the wrong shape.
+            DFloatFormatError: A tensor that is not BF16.
+        """
+        names = self._matrix_names.get(block_name)
+        if names is None:
+            raise DFloatIntegrationError(f"{block_name}: no matrix names")
+        weights: dict[str, mx.array] = {}
+        for matrix_name in names:
+            entry = self._index.get(matrix_name)
+            if entry is None:
+                raise DFloatIntegrationError(f"{matrix_name}: not in the BF16 index")
+            placement = self._name_map.place(matrix_name)
+            if placement.block != block_name or placement.attr not in shapes:
+                raise DFloatIntegrationError(
+                    f"{matrix_name}: not a matrix of {block_name} with a known shape"
+                )
+            array = read_bf16(*entry)
+            self.reads += 1
+            if tuple(array.shape) != tuple(shapes[placement.attr]):
+                raise DFloatIntegrationError(
+                    f"{matrix_name}: shard tensor has shape {tuple(array.shape)}, "
+                    f"the block needs {shapes[placement.attr]}"
+                )
+            weights[placement.attr] = array
+        return weights
 
 
 class DF11Provider:

@@ -1,11 +1,15 @@
 """mflux's FLUX.1 Transformer with the block seam composed in front of its two per-block hooks."""
 
+import json
+from collections.abc import Mapping
 from functools import cache
+from pathlib import Path
 from typing import Any
 
 import mlx.core as mx
 from mlx.utils import tree_flatten
 
+from mlx_dfloat._safetensors import TensorInfo, read_header
 from mlx_dfloat.errors import DFloatFormatError, DFloatIntegrationError
 from mlx_dfloat.format import DF11Checkpoint
 from mlx_dfloat.integrate import seam
@@ -58,6 +62,12 @@ class SeamMixin:
                 "call attach(provider, shapes) before running a step"
             ) from exc
 
+    def detach(self) -> None:
+        """Forget the provider and the shapes; the next step needs a new ``attach``."""
+        if hasattr(self, "_seam"):
+            self._seam.provider.reset()
+            del self._seam
+
     def verify_step(self) -> None:
         """Run the provider's deferred checks; call it after the step's final ``mx.eval``."""
         seam.verify_step(self._state())
@@ -107,6 +117,52 @@ def seam_transformer_class() -> type:
     return type("SeamTransformer", (SeamMixin, Transformer), {})
 
 
+def base_transformer_index(
+    root: Path, *, index_file: str = "diffusion_pytorch_model.safetensors.index.json"
+) -> dict[str, tuple[Path, TensorInfo]]:
+    """Every tensor of a sharded BF16 transformer directory: name -> (shard path, tensor info), from the index.
+
+    Raises:
+        DFloatFormatError: No usable index (missing, malformed JSON, or a ``weight_map`` that is not
+            a non-empty object of shard-name strings), or a shard name that is not a plain file name
+            in ``root``.
+    """
+    try:
+        weight_map = json.loads((root / index_file).read_text(encoding="utf-8"))["weight_map"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise DFloatFormatError(f"{root / index_file}: no usable weight index: {exc}") from exc
+    if (
+        not isinstance(weight_map, dict)
+        or not weight_map
+        or not all(isinstance(v, str) for v in weight_map.values())
+    ):
+        raise DFloatFormatError(
+            f"{root / index_file}: weight_map must be a non-empty object of shard-name strings"
+        )
+    index: dict[str, tuple[Path, TensorInfo]] = {}
+    for shard_name in sorted(set(weight_map.values())):
+        if not isinstance(shard_name, str) or Path(shard_name).name != shard_name:
+            raise DFloatFormatError(
+                f"{root / index_file}: shard {shard_name!r} escapes the directory"
+            )
+        shard = root / shard_name
+        index.update({name: (shard, info) for name, info in read_header(shard).items()})
+    missing = sorted(set(weight_map) - set(index))
+    if missing:
+        raise DFloatFormatError(
+            f"{root / index_file}: tensors named by the index but absent from the shards: {missing[:5]}"
+        )
+    return index
+
+
+def base_extras(
+    index: Mapping[str, tuple[Path, TensorInfo]], ckpt: DF11Checkpoint
+) -> dict[str, tuple[Path, TensorInfo]]:
+    """The index minus the checkpoint's block matrices: what ``build_transformer`` loads as extras from a BF16 base."""
+    matrices = {m for group in ckpt.groups.values() for m in group.matrix_names}
+    return {name: entry for name, entry in index.items() if name not in matrices}
+
+
 def build_transformer(
     model_config: Any,
     ckpt: DF11Checkpoint,
@@ -114,13 +170,15 @@ def build_transformer(
     name_map: NameMap | None = None,
     n_double: int | None = None,
     n_single: int | None = None,
+    extras: Mapping[str, tuple[Path, TensorInfo]] | None = None,
 ) -> tuple[Any, Shapes]:
     """Construct mflux's ``Transformer`` (seamed) with placeholders for the matrices and the extras loaded.
 
     Block counts come from the checkpoint's groups, or ``n_double``/``n_single`` for a reduced-depth build
     (each between zero and the checkpoint's own count). Every block matrix is a placeholder and every other
-    parameter comes from the checkpoint's extras; the coverage of both is asserted, and so is the MLX
-    active memory the build added (under ``MAX_BUILD_ACTIVE_BYTES``).
+    parameter comes from ``extras`` (a BF16 base's index, via ``base_extras``) or, when ``extras`` is None,
+    the checkpoint's own extras; the coverage of both is asserted, and so is the MLX active memory the
+    build added (under ``MAX_BUILD_ACTIVE_BYTES``).
 
     Raises:
         DFloatFormatError: The groups are not FLUX.1's, an extra is not BF16 or has the wrong shape.
@@ -160,6 +218,7 @@ def build_transformer(
         names,
         counts={DOUBLE_PREFIX: n_double, SINGLE_PREFIX: n_single},
         dropped=DROPPED_EXTRAS,
+        extras=extras,
     )
     check_extras_cover(params, (name for name, _path, _info in plan), matrix_paths)
     weights: list[tuple[str, mx.array]] = []
