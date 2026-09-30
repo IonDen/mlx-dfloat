@@ -19,3 +19,7 @@ build/
 dist/
 *.egg-info/
 src/mlx_dfloat/_version.py
+
+bench/results/**/embeds*.safetensors
+bench/results/**/*.png
+*.png

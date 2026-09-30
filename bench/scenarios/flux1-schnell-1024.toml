@@ -1,0 +1,15 @@
+name = "flux1-schnell-1024"
+model = "schnell"
+df11_repo = "DFloat11/FLUX.1-schnell-DF11"
+df11_revision = "51a428b928197e0531cb93d6e438941e2d0b247e"
+base_repo = "black-forest-labs/FLUX.1-schnell"
+base_revision = "741f7c3ce8b383c54771c7003378a50191e9efe9"
+prompt = "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water"
+seed = 42
+steps = 5
+warmup = 2
+size = 1024
+rounds = 3
+cache_limit_bytes = 2500000000
+conditions = ["df11", "control", "df11-depth2", "control-depth2", "control-noeval", "q8"]
+wall_budget_s = 3600
