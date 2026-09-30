@@ -8,7 +8,7 @@ Python API installs no memory caps and no watchdog; the ``mlx-dfloat`` command d
 
 import logging
 import traceback
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -124,6 +124,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
         eval_policy: str = "per-block",
         cache_limit: int | None = None,
         fit_check: bool = True,
+        budget_bytes: int | None = None,
         quantize: int | None = None,
         lora_paths: list[str] | None = None,
         lora_scales: list[float] | None = None,
@@ -132,7 +133,9 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
         """Resolve the checkpoint and the base repository and build the model.
 
         The checkpoint headers, the base's tokenizers and the transformer's extras are read; the
-        encoder, VAE and compressed weights stay lazy until used.
+        encoder, VAE and compressed weights stay lazy until used. ``budget_bytes`` replaces the
+        device's budget (its recommended working set minus 2 GiB) in every call's fit estimate and
+        VAE decision, e.g. with a smaller Mac's watchdog ceiling when running under its limits.
 
         Raises:
             DFloatUnsupportedError: ``quantize``, ``lora_paths``, ``lora_scales`` or ``bake_lora=False``
@@ -183,6 +186,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
             eval_policy=eval_policy,
             cache_limit=cache_limit,
             fit_check=fit_check,
+            budget_bytes=budget_bytes,
         )
 
     @classmethod
@@ -208,6 +212,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
         eval_policy: str = "per-block",
         cache_limit: int | None = None,
         fit_check: bool = True,
+        budget_bytes: int | None = None,
     ) -> None:
         from mflux.models.flux.flux_initializer import FluxInitializer
 
@@ -239,6 +244,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
             cache_limit,
             fit_check,
         )
+        self._budget_override = budget_bytes
         self._provider: DF11Provider | None = None
         self._plan: CallPlan | None = None
         self._peaks: dict[str, dict[str, int]] = {}
@@ -367,7 +373,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
                 derived_minimum,
             )
         allowance = activation_allowance(height=height, width=width, text_tokens=tokens)
-        budget = budget_bytes()
+        budget = self._budget_override if self._budget_override is not None else budget_bytes()
         estimate = fit_for(
             sizes=self._sizes,
             largest=self._largest,
@@ -518,6 +524,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
                 "budget_bytes": fit.budget_bytes,
                 "fits": fit.fits,
             },
+            "sizes": asdict(self._sizes),
             "peaks": {"label": "sampled at phase boundaries", **self._peaks},
             "decode_launches": launches,
             "lifecycle": self._lifecycle.counters.as_dict(),
