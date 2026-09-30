@@ -7,21 +7,32 @@ import psutil
 import pytest
 
 import mlx_dfloat._watchdog as wd
-from mlx_dfloat._watchdog import Watchdog, verdict
+from mlx_dfloat._watchdog import Watchdog, verdict, watched_memory
 from mlx_dfloat.errors import DFloatDependencyError
 
 
-def test_memory_verdict_uses_process_rss():
-    # Bug caught: a watchdog that only counts MLX memory would miss a NumPy blow-up.
-    assert verdict(rss=11, ceiling=10, elapsed=1.0, budget=100.0) == "memory"
+def test_memory_verdict_uses_the_watched_number():
+    # Bug caught: a verdict comparing something other than the watched number to the ceiling
+    # (flip `memory > ceiling` to `<`, or read a different field).
+    assert verdict(memory=11, ceiling=10, elapsed=1.0, budget=100.0) == "memory"
 
 
 def test_wall_verdict():
-    assert verdict(rss=1, ceiling=10, elapsed=101.0, budget=100.0) == "wall"
+    # Bug caught: dropping the `elapsed > budget` branch.
+    assert verdict(memory=1, ceiling=10, elapsed=101.0, budget=100.0) == "wall"
 
 
 def test_no_verdict_under_both_limits():
-    assert verdict(rss=10, ceiling=10, elapsed=100.0, budget=100.0) is None
+    # Bug caught: `>=` instead of `>` at either limit.
+    assert verdict(memory=10, ceiling=10, elapsed=100.0, budget=100.0) is None
+
+
+def test_watched_memory_is_the_max_of_footprint_and_mlx_active_plus_cache():
+    # Bug caught: a footprint-only watchdog (misses an overrun held in MLX's cache pool) or a sum
+    # (double counts); and a tie resolving to "mlx" instead of "footprint".
+    assert watched_memory(footprint=10, mlx_active=3, mlx_cache=2) == (10, "footprint")
+    assert watched_memory(footprint=4, mlx_active=3, mlx_cache=2) == (5, "mlx")
+    assert watched_memory(footprint=5, mlx_active=3, mlx_cache=2) == (5, "footprint")  # tie
 
 
 class _FixedRssProcess:
@@ -84,6 +95,10 @@ def test_watchdog_fires_memory_abort_and_writes_the_artifact(tmp_path, monkeypat
         "rss",
         "mlx_active",
         "mlx_cache",
+        "verdict_memory",
+        "verdict_counter",
+        "peak_watched",
+        "peak_mlx",
     }
 
 
@@ -116,7 +131,18 @@ def test_a_stopped_watchdog_never_writes_an_abort_or_exits(tmp_path, monkeypatch
     monkeypatch.setattr(wd, "_exit", exit_codes.append)
     watchdog = Watchdog(tmp_path, ceiling=0, budget=1e9, interval=3600).start()
     watchdog.stop()
-    watchdog._fire("memory", {"rss": 1, "mlx_active": 0, "mlx_cache": 0, "elapsed": 0.0})
+    watchdog._fire(
+        "memory",
+        {
+            "footprint": 1,
+            "rss": 1,
+            "mlx_active": 0,
+            "mlx_cache": 0,
+            "elapsed": 0.0,
+            "verdict_memory": 1,
+            "verdict_counter": "footprint",
+        },
+    )
     assert exit_codes == []
     assert not (tmp_path / "abort.json").exists()
 
@@ -152,17 +178,54 @@ def test_watchdog_still_exits_when_the_artifact_write_itself_fails(tmp_path, mon
     assert exit_codes[0] == 70
 
 
-def test_verdict_uses_the_os_footprint_not_rss_plus_mlx(monkeypatch, tmp_path):
-    # Bug caught: counting mx.load'ed arrays twice (RSS and MLX active) and false-aborting at half
-    # the real ceiling.
-    monkeypatch.setattr(wd, "phys_footprint", lambda: 10**9)
-    monkeypatch.setattr(psutil, "Process", _FixedRssProcess(rss=10**12))
-    monkeypatch.setattr(wd.mx, "get_active_memory", lambda: 10**12)
-    monkeypatch.setattr(wd.mx, "get_cache_memory", lambda: 0)
-    reason, sample = wd.Watchdog(tmp_path, ceiling=5 * 10**9, budget=60)._sample()
+def test_a_sample_over_the_ceiling_only_through_mlx_cache_aborts_naming_the_counter(
+    tmp_path, monkeypatch
+):
+    # Bug caught: the sampler feeding the footprint alone to the verdict (the 2026-09-27 state),
+    # so an overrun held in MLX's cache pool never trips; or the artifact not naming the counter.
+    monkeypatch.setattr(wd, "phys_footprint", lambda: 4)
+    _stub_memory(monkeypatch, rss=1, mlx_active=3, mlx_cache=2)
+    watchdog = wd.Watchdog(tmp_path, ceiling=4, budget=1e9)
+    reason, sample = watchdog._sample()
+    assert reason == "memory"
+    assert sample["verdict_memory"] == 5
+    assert sample["verdict_counter"] == "mlx"
+    exit_codes: list[int] = []
+    monkeypatch.setattr(wd, "_exit", exit_codes.append)
+    watchdog._fire("memory", sample)
+    artifact = json.loads((tmp_path / "abort.json").read_text())
+    assert artifact["verdict_counter"] == "mlx"
+    assert artifact["verdict_memory"] == 5
+    # Bug caught: _fire writing a constant or the wrong peak (footprint 4 differs from 5).
+    assert artifact["peak_footprint"] == 4
+    assert artifact["peak_watched"] == 5
+    assert artifact["peak_mlx"] == 5
+    assert exit_codes == [70]
+
+
+def test_the_watched_number_is_a_maximum_not_a_sum(tmp_path, monkeypatch):
+    # Bug caught: summing RSS or the footprint with MLX active + cache. An `mx.load`ed array lands
+    # in both RSS and MLX active, so a sum double counts it; the maximum does not.
+    monkeypatch.setattr(wd, "phys_footprint", lambda: 3 * 10**9)
+    _stub_memory(monkeypatch, rss=10**12, mlx_active=3 * 10**9, mlx_cache=0)
+    reason, sample = wd.Watchdog(tmp_path, ceiling=5 * 10**9, budget=1e9)._sample()
     assert reason is None
-    assert sample["footprint"] == 10**9
-    assert sample["rss"] == 10**12
+    assert sample["verdict_memory"] == 3 * 10**9
+
+
+def test_the_watchdog_tracks_the_peaks_of_all_three_numbers_and_resets_them(tmp_path, monkeypatch):
+    # Bug caught: peak_watched tracking the footprint only (the tier rows and the proof cap would
+    # use a number the ceiling is not enforced on), or reset_peak leaving one of them.
+    watchdog = wd.Watchdog(tmp_path, ceiling=10**15, budget=1e9)
+    monkeypatch.setattr(wd, "phys_footprint", lambda: 4)
+    _stub_memory(monkeypatch, rss=0, mlx_active=3, mlx_cache=2)
+    watchdog._sample()
+    monkeypatch.setattr(wd, "phys_footprint", lambda: 6)
+    _stub_memory(monkeypatch, rss=0, mlx_active=1, mlx_cache=0)
+    watchdog._sample()
+    assert (watchdog.peak_footprint, watchdog.peak_mlx, watchdog.peak_watched) == (6, 5, 6)
+    watchdog.reset_peak()
+    assert (watchdog.peak_footprint, watchdog.peak_mlx, watchdog.peak_watched) == (0, 0, 0)
 
 
 def test_footprint_over_the_ceiling_aborts_with_70(monkeypatch, tmp_path):

@@ -1,11 +1,13 @@
-"""Process-level watchdog for heavy scripts: an OS-footprint ceiling plus a wall-clock backstop.
+"""Process-level watchdog for heavy scripts: a memory ceiling plus a wall-clock backstop.
 
-The ceiling is checked against the process's OS-accounted memory footprint (``phys_footprint``,
-what macOS memory pressure sees), not process RSS plus MLX active and cache memory summed: a
-buffer loaded with ``mx.load`` appears in both RSS and MLX active memory (verified: a 1 GiB load
-moves both by about 1 GiB), so the old summed total double-counted it and would false-abort at
-half the real ceiling. ``rss``, ``mlx_active``, and ``mlx_cache`` still ride along in every sample
-and abort artifact as diagnostics. A sampling failure (psutil, MLX, the footprint read, or the
+The ceiling is checked against the larger of the process's OS-accounted memory footprint
+(``phys_footprint``, what macOS memory pressure sees) and MLX active + cache memory, never a sum
+of RSS and MLX: a buffer loaded with ``mx.load`` appears in both RSS and MLX active memory
+(verified: a 1 GiB load moves both by about 1 GiB), so a sum double-counts it and would
+false-abort at half the real ceiling, while the maximum still catches an overrun held in MLX's
+cache pool. The abort artifact names the counter that tripped (``verdict_counter``) and records
+the peaks of the footprint, of MLX active + cache, and of the watched maximum. ``rss``,
+``mlx_active``, and ``mlx_cache`` ride along in every sample and abort artifact as diagnostics. A sampling failure (psutil, MLX, the footprint read, or the
 artifact write itself) still aborts the process instead of leaving the job running unwatched.
 """
 
@@ -85,14 +87,21 @@ def phys_footprint() -> int:
     return int(info.ri_phys_footprint)
 
 
-def verdict(*, rss: int, ceiling: int, elapsed: float, budget: float) -> str | None:
-    """Decide whether to abort: "memory", "wall", or None.
+def watched_memory(*, footprint: int, mlx_active: int, mlx_cache: int) -> tuple[int, str]:
+    """The number the ceiling is enforced against and which counter produced it.
 
-    ``rss`` is whatever single memory number the caller is enforcing the ceiling against; the
-    caller (``Watchdog``) feeds it the process's OS-accounted footprint (``phys_footprint``),
-    since the verdict itself stays a pure function of one memory number.
+    The number is max(OS footprint, MLX active + cache). A maximum cannot double count the way a
+    sum of RSS and MLX active did (an ``mx.load``ed array lands in both), and it catches an
+    overrun that sits in MLX's cache pool, which the footprint alone reports late. A tie names
+    the footprint.
     """
-    if rss > ceiling:
+    mlx = mlx_active + mlx_cache
+    return (footprint, "footprint") if footprint >= mlx else (mlx, "mlx")
+
+
+def verdict(*, memory: int, ceiling: int, elapsed: float, budget: float) -> str | None:
+    """Decide whether to abort: "memory", "wall", or None. ``memory`` is ``watched_memory``'s number."""
+    if memory > ceiling:
         return "memory"
     if elapsed > budget:
         return "wall"
@@ -122,8 +131,11 @@ class Watchdog:
         """
         self._psutil = _psutil()
         self.out_dir, self.ceiling, self.budget, self.interval = out_dir, ceiling, budget, interval
-        # Peak OS-accounted footprint seen so far: the verdict's own memory number.
+        # Peaks seen so far: the OS footprint, MLX active + cache, and the watched maximum the
+        # ceiling is enforced on.
         self.peak_footprint = 0
+        self.peak_mlx = 0
+        self.peak_watched = 0
         self._stop = threading.Event()
         # Held while an abort is written: stop() waits for it, so no abort can land after the
         # caller has stopped the watchdog and written its own verdict.
@@ -138,8 +150,10 @@ class Watchdog:
         return self
 
     def reset_peak(self) -> None:
-        """Start ``peak_footprint`` over, so a later window's peak is not hidden by an earlier spike."""
+        """Start all three peaks over, so a later window's peak is not hidden by an earlier spike."""
         self.peak_footprint = 0
+        self.peak_mlx = 0
+        self.peak_watched = 0
 
     def stop(self) -> None:
         """Stop sampling. After this returns the watchdog never writes an abort or exits."""
@@ -148,24 +162,35 @@ class Watchdog:
         if self._thread.is_alive():
             self._thread.join(timeout=1)
 
-    def _sample(self) -> tuple[str | None, dict[str, float]]:
+    def _sample(self) -> tuple[str | None, dict[str, float | str]]:
         elapsed = time.monotonic() - self._start
-        sample: dict[str, float] = {
+        sample: dict[str, float | str] = {
             "footprint": 0,
             "rss": 0,
             "mlx_active": 0,
             "mlx_cache": 0,
             "elapsed": elapsed,
+            "verdict_memory": 0,
+            "verdict_counter": "footprint",
         }
         try:
             footprint = int(phys_footprint())
             sample["footprint"] = footprint
             sample["rss"] = int(self._psutil.Process().memory_info().rss)
-            sample["mlx_active"] = int(mx.get_active_memory())
-            sample["mlx_cache"] = int(mx.get_cache_memory())
+            active = int(mx.get_active_memory())
+            cache = int(mx.get_cache_memory())
+            sample["mlx_active"] = active
+            sample["mlx_cache"] = cache
+            memory, counter = watched_memory(
+                footprint=footprint, mlx_active=active, mlx_cache=cache
+            )
+            sample["verdict_memory"] = memory
+            sample["verdict_counter"] = counter
             self.peak_footprint = max(self.peak_footprint, footprint)
+            self.peak_mlx = max(self.peak_mlx, active + cache)
+            self.peak_watched = max(self.peak_watched, memory)
             reason = verdict(
-                rss=footprint, ceiling=self.ceiling, elapsed=elapsed, budget=self.budget
+                memory=memory, ceiling=self.ceiling, elapsed=elapsed, budget=self.budget
             )
         except Exception:  # a dead sampler must still abort, not run the job unwatched
             reason = "sample_error"
@@ -178,7 +203,7 @@ class Watchdog:
                 self._fire(reason, sample)
                 return
 
-    def _fire(self, reason: str, sample: dict[str, float]) -> None:
+    def _fire(self, reason: str, sample: dict[str, float | str]) -> None:
         with self._lock:
             if self._stop.is_set():
                 return  # the caller already stopped us and recorded its own result
@@ -197,6 +222,10 @@ class Watchdog:
                             "rss": sample["rss"],
                             "mlx_active": sample["mlx_active"],
                             "mlx_cache": sample["mlx_cache"],
+                            "verdict_memory": sample.get("verdict_memory", 0),
+                            "verdict_counter": sample.get("verdict_counter", "footprint"),
+                            "peak_watched": self.peak_watched,
+                            "peak_mlx": self.peak_mlx,
                         },
                         indent=1,
                     )
