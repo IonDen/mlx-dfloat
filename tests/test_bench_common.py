@@ -105,6 +105,14 @@ def test_parity_conditions_names_only_the_failed_checks_in_argument_order():
     assert parity_conditions(z=False, a=True, m=0) == ["z", "m"]
 
 
+def test_parity_conditions_skips_a_none_and_still_fails_a_false():
+    # Bug caught: None treated as a failure (the q8 mode, which has no compressed set, could never
+    # pass its parity check), or `not ok` kept so a None passes but a False is also skipped.
+    assert parity_conditions(compressed_loaded=None, limits_recorded=True) == []
+    assert parity_conditions(compressed_loaded=None, finite=False) == ["finite"]
+    assert parity_conditions(compressed_loaded=False, finite=True) == ["compressed_loaded"]
+
+
 @pytest.mark.parametrize(
     ("mismatched", "errors", "want"),
     [(1, 3, 1), (0, 1, 2), (0, 0, 0)],
@@ -192,6 +200,7 @@ PROVENANCE_KEYS = {
     "cache_limit",
     "cache_memory",
     "power",
+    "date",
 }
 
 
@@ -199,29 +208,49 @@ def test_provenance_records_every_listed_key_from_its_source(monkeypatch):
     # Bug caught: a key dropped or renamed, pmset not parsed, or git state not recorded.
     run, calls = _fake_run()
     monkeypatch.setattr(bc.subprocess, "run", run)
-    prov = provenance()
+    prov = provenance((20, 22))
     assert set(prov) == PROVENANCE_KEYS
     assert prov["git"] == "abc123"
     assert prov["power"] == {"ac": True, "battery_pct": 97}
     assert prov["mlx"] == mx.__version__
     assert prov["device_info"] == dict(mx.device_info())
+    assert prov["memory_caps_gb"] == [20, 22]
     assert re.fullmatch(r"[0-9a-f]{64}", prov["source_hash"])
     assert ["pmset", "-g", "batt"] in calls
     json.dumps(prov)  # the record must serialize as-is
+
+
+def test_provenance_takes_the_caps_instead_of_reinstalling_them(monkeypatch):
+    # Bug caught: provenance calling install_memory_caps() again, which puts the host's memory cap
+    # back over a smaller tier's limits in the middle of a capped run and records the host caps.
+    # The probe limit is not a whole GiB, so no cap install can leave it in place by coincidence.
+    import datetime
+
+    monkeypatch.setattr(bc.subprocess, "run", _fake_run()[0])
+    probe = 3 * 1024**3 + 4096
+    before = mx.set_memory_limit(probe)
+    try:
+        prov = provenance((0, 0))
+        after = mx.set_memory_limit(before)
+    finally:
+        mx.set_memory_limit(before)
+    assert after == probe
+    assert prov["memory_caps_gb"] == [0, 0]
+    assert prov["date"] == datetime.date.today().isoformat()
 
 
 def test_provenance_marks_a_dirty_tree(monkeypatch):
     # Bug caught: an edited, uncommitted script's numbers recorded against the clean commit.
     run, _ = _fake_run(porcelain=" M scripts/bench_decode_kernel.py\n")
     monkeypatch.setattr(bc.subprocess, "run", run)
-    assert provenance()["git"] == "abc123-dirty"
+    assert provenance((20, 22))["git"] == "abc123-dirty"
 
 
 def test_provenance_survives_missing_git_and_pmset(monkeypatch):
     # Bug caught: a machine without git or pmset crashing the bench instead of recording unknowns.
     run, _ = _fake_run(fail=("git", "pmset"))
     monkeypatch.setattr(bc.subprocess, "run", run)
-    prov = provenance()
+    prov = provenance((20, 22))
     assert prov["git"] == "unknown"
     assert prov["power"] == {"ac": None, "battery_pct": None}
 
@@ -231,7 +260,7 @@ def test_provenance_reads_the_cache_limit_without_changing_it(monkeypatch):
     monkeypatch.setattr(bc.subprocess, "run", _fake_run()[0])
     before = mx.set_cache_limit(1_400_000_000)
     try:
-        assert provenance()["cache_limit"] == 1_400_000_000
+        assert provenance((20, 22))["cache_limit"] == 1_400_000_000
         assert mx.set_cache_limit(before) == 1_400_000_000
     finally:
         mx.set_cache_limit(before)
@@ -244,7 +273,7 @@ def test_provenance_records_the_mflux_version_when_installed(monkeypatch):
     monkeypatch.setattr(
         bc.metadata, "version", lambda name: "0.20.1" if name == "mflux" else real(name)
     )
-    assert provenance()["mflux"] == "0.20.1"
+    assert provenance((20, 22))["mflux"] == "0.20.1"
 
 
 def test_provenance_records_no_mflux_when_absent(monkeypatch):
@@ -255,7 +284,7 @@ def test_provenance_records_no_mflux_when_absent(monkeypatch):
         raise bc.metadata.PackageNotFoundError(name)
 
     monkeypatch.setattr(bc.metadata, "version", missing)
-    assert provenance()["mflux"] is None
+    assert provenance((20, 22))["mflux"] is None
 
 
 # --- calibration ramp ---------------------------------------------------------------------------

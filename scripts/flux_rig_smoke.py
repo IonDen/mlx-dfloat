@@ -244,7 +244,6 @@ def smoke(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, object]:
         "mlx_peak_memory_bytes": int(mx.get_peak_memory()),
         "footprint_peak_bytes": max(watchdog.peak_footprint, phys_footprint()),
         "timings_s": timings,
-        "provenance": provenance(),
     }
 
 
@@ -258,6 +257,7 @@ def main(argv: list[str] | None = None) -> int:
     watchdog = Watchdog(args.out, ceiling=default_ceiling(), budget=args.wall_budget).start()
     try:
         summary = smoke(args, watchdog)
+        summary["provenance"] = provenance(caps)
     except Exception as exc:  # any unexpected failure is a tool error (2), never the verdict (0/1)
         summary = {"exit_code": EXIT_ERROR, "error": f"{type(exc).__name__}: {exc}"}
         traceback.print_exc()

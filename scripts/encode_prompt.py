@@ -9,8 +9,9 @@ encoders (schnell and dev share them). ``--synthetic`` writes seeded ``mx.random
 the same shapes instead and records that in the metadata, for a run without the encoder weights.
 
 The file holds ``prompt_embeds`` (``(1, 256, 4096)``, dev ``(1, 512, 4096)``) and
-``pooled_prompt_embeds`` (``(1, 768)``) plus string metadata: model, seed, prompt, root, token
-length, whether it is synthetic, and the mflux and mlx versions.
+``pooled_prompt_embeds`` (``(1, 768)``) plus string metadata: model, seed, prompt, root, the base
+revision (the root directory's name), token length, whether it is synthetic, and the mflux and mlx
+versions.
 
 Usage (from the repository root of a synced checkout, ``--group bench``):
     uv run python -m scripts.encode_prompt --model schnell --root SNAPSHOT_DIR --out embeds.safetensors \
@@ -80,7 +81,12 @@ def synthetic_embeds(model: str, seed: int) -> tuple[mx.array, mx.array]:
 def build_metadata(
     *, model: str, seed: int, prompt: str, root: str, token_length: int, synthetic: bool
 ) -> dict[str, str]:
-    """The safetensors metadata of an embeddings file: every value a string, as the format requires."""
+    """The safetensors metadata of an embeddings file: every value a string, as the format requires.
+
+    ``base_revision`` is the name of ``root``, which the Hub cache sets to the snapshot's commit
+    (``"synthetic"`` for synthetic embeddings): the scenario orchestrator reuses an embeddings file
+    only when it came from the scenario's pinned base.
+    """
     try:
         mflux_version = metadata.version("mflux")
     except metadata.PackageNotFoundError:
@@ -90,6 +96,7 @@ def build_metadata(
         "seed": str(seed),
         "prompt": prompt,
         "root": root,
+        "base_revision": "synthetic" if synthetic else Path(root).name,
         "token_length": str(token_length),
         "synthetic": "true" if synthetic else "false",
         "mflux": mflux_version,

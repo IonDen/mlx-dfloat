@@ -341,7 +341,7 @@ def main(argv: list[str] | None = None) -> int:
         watchdog = Watchdog(
             args.out.parent, ceiling=default_ceiling(), budget=args.wall_budget
         ).start()
-        prov = provenance()
+        prov = provenance(caps)
         data |= {"df11": str(args.df11), "memory_caps_gb": caps, "cache_limit": CACHE_LIMIT}
         for name in selected:
             if name in groups:

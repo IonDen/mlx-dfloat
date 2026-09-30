@@ -253,6 +253,41 @@ class PrefetchProvider:
         return weights
 
 
+class ZeroProvider:
+    """The q8 mode's provider: mflux's plain quantized transformer has no seam, so nothing is provided.
+
+    It exists so the step bench's launch bookkeeping reads zero for every step; ``weights_for``
+    is a wiring error (no placeholder asks for weights in a transformer without a seam).
+    """
+
+    launching = False
+    policies = ("none",)
+
+    @property
+    def launches(self) -> int:
+        """Always zero: no decode ever runs."""
+        return 0
+
+    @property
+    def pending(self) -> list[tuple[str, mx.array]]:
+        """Always a fresh empty list: nothing is deferred."""
+        return []
+
+    def verify(self) -> None:
+        """Nothing deferred."""
+
+    def reset(self) -> None:
+        """No per-step state."""
+
+    def weights_for(self, block_name: str, shapes: BlockShapes) -> dict[str, mx.array]:
+        """Refused: the q8 transformer has no seam.
+
+        Raises:
+            RigError: Always.
+        """
+        raise RigError(f"{block_name}: the q8 mode's transformer has no seam to hand weights to")
+
+
 # --- the benches' entry ------------------------------------------------------------------------------
 
 
@@ -296,6 +331,7 @@ __all__ = [
     "StreamingBF16Provider",
     "Tracer",
     "WeightProvider",
+    "ZeroProvider",
     "_async_eval",
     "_eval",
     "build_transformer",

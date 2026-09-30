@@ -161,6 +161,9 @@ omit = [
   "scripts/regpressure.py",
   "scripts/ci_metal_probe.py",
   "scripts/flux_rig_smoke.py",
+  # mflux's loader and quantizer; its pure release-order logic is tested through a fake loader in
+  # tests/test_q8_rig.py, the real build by the slow test.
+  "scripts/_q8_rig.py",
   # every test here is @pytest.mark.mflux; measured by the integration lane instead, see ci.yml.
   # init.py stays OUT of this list: most of it has real offline (non-mflux) tests in
   # tests/test_flux1_init.py, so it must keep gating the required 85% threshold too.

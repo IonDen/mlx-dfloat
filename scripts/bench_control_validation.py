@@ -405,7 +405,6 @@ def run_mode(
         **measured,
         **inputs,
         "timings_s": timings,
-        "provenance": provenance(),
     }
 
 
@@ -492,7 +491,8 @@ def orchestrate(args: argparse.Namespace) -> int:
             "key": key,
             "rounds_requested": args.rounds,
             "runs_complete": [(r["round"], r["mode"]) for r in results],
-            "provenance": provenance(),
+            # The orchestrator installs no caps: it loads no model.
+            "provenance": provenance((0, 0)),
         }
     )
     write_json_atomic(out_dir / "report.json", rep)

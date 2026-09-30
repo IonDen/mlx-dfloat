@@ -344,3 +344,31 @@ def test_a_step_that_raises_midway_leaves_no_stale_look_ahead():
     assert inner.pending == []
     mx.eval(tf(*inputs()))  # block 0 is served again, not refused
     tf.verify_step()
+
+
+# --- the q8 mode's provider -------------------------------------------------------------------------
+
+
+def test_zero_provider_never_launches_and_refuses_to_hand_out_weights():
+    # Bug caught: a q8 run whose provider silently returns weights (the quantized transformer has no
+    # placeholders to fill, so any call is a wiring error), or counts launches it never makes (the
+    # step bench's per-step launch check would then fail the q8 child).
+    zero = rig.ZeroProvider()
+    assert zero.launches == 0
+    assert zero.launching is False
+    assert zero.policies == ("none",)
+    with pytest.raises(RigError, match="q8"):
+        zero.weights_for("transformer_blocks.0", {})
+    zero.verify()
+    zero.reset()
+    assert zero.launches == 0
+
+
+def test_zero_provider_pending_is_a_fresh_empty_list_each_time():
+    # Bug caught: a shared mutable list (a class attribute) that a caller appending to would leak
+    # into every other ZeroProvider.
+    zero = rig.ZeroProvider()
+    first = zero.pending
+    first.append(("x", None))
+    assert zero.pending == []
+    assert rig.ZeroProvider().pending == []
