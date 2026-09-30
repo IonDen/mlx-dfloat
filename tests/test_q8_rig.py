@@ -5,6 +5,7 @@ imports mflux or loads a model; the real build is ``tests/test_bench_q8_slow.py`
 """
 
 import gc
+import json
 import weakref
 from pathlib import Path
 from types import SimpleNamespace
@@ -200,6 +201,8 @@ def test_pinned_snapshot_returns_the_revision_directory_from_the_local_cache_onl
     # Bug caught: a call that may download (local_files_only missing), drops the revision (the newest
     # cached snapshot would be used), or widens the patterns.
     snap = tmp_path / BASE_REVISION
+    (snap / "transformer").mkdir(parents=True)
+    (snap / "transformer" / "w.safetensors").write_bytes(b"x")
     calls: list[dict] = []
     _fake_download(monkeypatch, str(snap), calls)
     got = q8.pinned_snapshot(BASE_REPO, BASE_REVISION, allow_patterns=("transformer/*",))
@@ -231,3 +234,84 @@ def test_pinned_snapshot_turns_a_missing_local_entry_into_the_download_hint(monk
         f'hf download {BASE_REPO} --revision {BASE_REVISION} --include "transformer/*" '
         '--include "vae/*"'
     ) in str(exc.value)
+
+
+# --- weight-file completeness ----------------------------------------------------------------------
+
+SHARDS = (
+    "diffusion_pytorch_model-00001-of-00002.safetensors",
+    "diffusion_pytorch_model-00002-of-00002.safetensors",
+)
+
+
+def _snapshot_with_index(tmp_path, *, shards_present=()):
+    snap = tmp_path / BASE_REVISION
+    tdir = snap / "transformer"
+    tdir.mkdir(parents=True)
+    (tdir / "config.json").write_text("{}")
+    weight_map = {"a": SHARDS[0], "b": SHARDS[1], "c": SHARDS[0]}
+    (tdir / "diffusion_pytorch_model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": weight_map})
+    )
+    for name in shards_present:
+        (tdir / name).write_bytes(b"x")
+    return snap
+
+
+def test_missing_weight_files_reports_every_shard_the_index_names(tmp_path):
+    # Bug caught: a snapshot holding only config + index passing as complete (random-init weights).
+    snap = _snapshot_with_index(tmp_path)
+    assert sorted(q8.missing_weight_files(snap, ["transformer/*"])) == [
+        f"transformer/{SHARDS[0]}",
+        f"transformer/{SHARDS[1]}",
+    ]
+
+
+def test_pinned_snapshot_refuses_missing_shards_with_names_and_hint(monkeypatch, tmp_path):
+    # Bug caught: pinned_snapshot returning the half-cached directory, or an error without the
+    # missing names or the command that fixes it.
+    snap = _snapshot_with_index(tmp_path)
+    _fake_download(monkeypatch, str(snap), [])
+    with pytest.raises(DFloatIntegrationError) as exc:
+        q8.pinned_snapshot(BASE_REPO, BASE_REVISION, allow_patterns=["transformer/*"])
+    msg = str(exc.value)
+    assert BASE_REPO in msg
+    assert BASE_REVISION in msg
+    assert SHARDS[0] in msg
+    assert SHARDS[1] in msg
+    assert f'hf download {BASE_REPO} --revision {BASE_REVISION} --include "transformer/*"' in msg
+
+
+def test_complete_shards_pass(monkeypatch, tmp_path):
+    # Bug caught: the check rejecting a complete snapshot (index alone treated as failure).
+    snap = _snapshot_with_index(tmp_path, shards_present=SHARDS)
+    _fake_download(monkeypatch, str(snap), [])
+    assert q8.pinned_snapshot(BASE_REPO, BASE_REVISION, allow_patterns=["transformer/*"]) == snap
+    assert q8.missing_weight_files(snap, ["transformer/*"]) == []
+
+
+def test_dangling_symlink_shard_counts_as_missing(tmp_path):
+    # Bug caught: os.path.exists-free name check accepting a blob link whose blob was deleted.
+    snap = _snapshot_with_index(tmp_path, shards_present=(SHARDS[0],))
+    (snap / "transformer" / SHARDS[1]).symlink_to(tmp_path / "no-such-blob")
+    assert q8.missing_weight_files(snap, ["transformer/*"]) == [f"transformer/{SHARDS[1]}"]
+
+
+def test_weight_directory_without_safetensors_or_index_is_missing(tmp_path):
+    # Bug caught: a text_encoder/ holding only config.json passing (no index to check against).
+    snap = tmp_path / BASE_REVISION
+    (snap / "text_encoder").mkdir(parents=True)
+    (snap / "text_encoder" / "config.json").write_text("{}")
+    assert q8.missing_weight_files(snap, ["text_encoder/*"]) == ["text_encoder/*.safetensors"]
+
+
+def test_tokenizer_directory_needs_no_safetensors(tmp_path):
+    # Bug caught: every <dir>/* pattern demanding weights, refusing tokenizer-only directories.
+    snap = tmp_path / BASE_REVISION
+    (snap / "tokenizer").mkdir(parents=True)
+    assert q8.missing_weight_files(snap, ["tokenizer/*"]) == []
+
+
+def test_star_pattern_is_not_checked(tmp_path):
+    # Bug caught: the DF11 repos' ["*"] pattern being treated as a directory named "*".
+    assert q8.missing_weight_files(tmp_path / BASE_REVISION, ["*"]) == []

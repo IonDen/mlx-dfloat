@@ -13,6 +13,7 @@ used, so the release order is unit-tested with fakes in a venv without mflux.
 """
 
 import gc
+import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,39 @@ Loader = Callable[[Any, Path], Any]
 Applier = Callable[[Any, Any, Any], None]
 Evaluate = Callable[[Any], None]
 MakeTransformer = Callable[[str, int, int], Any]
+
+
+WEIGHT_DIRS = ("transformer", "text_encoder", "text_encoder_2", "vae")
+
+
+def missing_weight_files(root: Path, patterns: Sequence[str]) -> list[str]:
+    """Weight files the ``<dir>/*`` patterns promise that are absent under ``root`` (relative paths).
+
+    A directory with a ``*.safetensors.index.json`` must hold every shard its ``weight_map`` names
+    (a dangling link counts as absent); a FLUX weight directory without an index must hold at
+    least one ``*.safetensors``. Other directories and the ``*`` pattern are not checked.
+    """
+    missing: list[str] = []
+    for pattern in patterns:
+        directory, sep, tail = pattern.partition("/")
+        if not sep or tail != "*" or "*" in directory:
+            continue
+        folder = root / directory
+        indexes = sorted(folder.glob("*.safetensors.index.json")) if folder.is_dir() else []
+        if indexes:
+            for index in indexes:
+                try:
+                    weight_map = json.loads(index.read_text())["weight_map"]
+                    shards = sorted({str(v) for v in weight_map.values()})
+                except (OSError, ValueError, KeyError, AttributeError):
+                    missing.append(f"{directory}/{index.name} (unreadable)")
+                    continue
+                missing.extend(f"{directory}/{n}" for n in shards if not (folder / n).exists())
+        elif directory in WEIGHT_DIRS and not (
+            folder.is_dir() and any(p.exists() for p in folder.glob("*.safetensors"))
+        ):
+            missing.append(f"{directory}/*.safetensors")
+    return missing
 
 
 def pinned_snapshot(repo_id: str, revision: str, *, allow_patterns: Sequence[str]) -> Path:
@@ -60,6 +94,15 @@ def pinned_snapshot(repo_id: str, revision: str, *, allow_patterns: Sequence[str
     if root.name != revision:
         raise DFloatIntegrationError(
             f"{repo_id}: the local snapshot is {root.name!r}, not the pinned revision {revision!r}"
+        )
+    absent = missing_weight_files(root, patterns)
+    if absent:
+        shown = ", ".join(absent[:5])
+        more = f" (and {len(absent) - 5} more)" if len(absent) > 5 else ""
+        includes = " ".join(f'--include "{p}"' for p in patterns)
+        raise DFloatIntegrationError(
+            f"{repo_id}@{revision}: the local snapshot is missing weight files: {shown}{more}; "
+            f"download them: hf download {repo_id} --revision {revision} {includes}"
         )
     return root
 
