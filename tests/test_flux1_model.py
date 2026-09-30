@@ -225,6 +225,39 @@ def test_a_64_gb_budget_keeps_the_set_through_the_vae_at_1024(tmp_path, monkeypa
     assert not model.plan_call(height=1024, width=1024).drop_set_before_vae
 
 
+def test_a_budget_passed_to_the_model_replaces_the_device_budget_in_the_fit_refusal(
+    tmp_path, monkeypatch
+):
+    # Bug caught: plan_call ignoring the constructor's budget_bytes (a --tier 16 run planned and
+    # refused against the host's 23 GiB instead of the tier's). The fixture patches the device
+    # budget to 23 GiB, where schnell at 1024² fits; only the 10 GiB override refuses it.
+    model = _fake_model(tmp_path, monkeypatch, sizes=SCHNELL_SIZES, budget_bytes=10 * GIB)
+    with pytest.raises(DFloatResourceError, match=r"10\.0 GiB"):
+        model.plan_call(height=1024, width=1024)
+
+
+def test_a_32_gb_ceiling_passed_as_the_budget_drops_the_set_before_the_vae(tmp_path, monkeypatch):
+    # Bug caught (the rev 1 bug): the override ignored in the VAE decision. The device budget is
+    # patched to 40 GiB (the set kept through the decode); the 22.96 GiB override must drop it, or
+    # a capped run keeps the set resident and aborts in the VAE decode.
+    model = _fake_model(tmp_path, monkeypatch, sizes=SCHNELL_SIZES, budget_bytes=int(22.96 * GIB))
+    _budget(monkeypatch, 40 * GIB)
+    assert model.plan_call(height=1024, width=1024).drop_set_before_vae is True
+
+
+def test_the_report_carries_the_component_sizes(tmp_path, monkeypatch):
+    # Bug caught: the sizes missing from the report (the README's weights column reads
+    # sizes.compressed + sizes.extras), or one component dropped or mislabelled.
+    model = _fake_model(tmp_path, monkeypatch)
+    # The fixture's own FluxSizes(compressed=1_000, extras=100, encoders=1_000, vae=10).
+    assert model.report()["sizes"] == {
+        "compressed": 1_000,
+        "extras": 100,
+        "encoders": 1_000,
+        "vae": 10,
+    }
+
+
 def test_a_call_planned_to_drop_the_set_runs_the_loop_with_it_and_the_guard_drops_it(
     tmp_path, monkeypatch
 ):
