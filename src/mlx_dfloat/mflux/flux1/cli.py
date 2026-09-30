@@ -17,6 +17,7 @@ from typing import Any
 import mlx.core as mx
 
 from mlx_dfloat._memory_caps import install_memory_caps
+from mlx_dfloat._scrub import scrub_home
 from mlx_dfloat._watchdog import Watchdog, default_ceiling, phys_footprint
 from mlx_dfloat.bench import capped
 from mlx_dfloat.bench.capped import TierLimits, host_tier_gb, limits_record, tier_limits
@@ -263,7 +264,7 @@ def _finish(args: argparse.Namespace, report: dict[str, Any]) -> int:
     if args.report is not None:
         try:
             args.report.parent.mkdir(parents=True, exist_ok=True)
-            args.report.write_text(json.dumps(report, indent=1, default=str))
+            args.report.write_text(json.dumps(scrub_home(report), indent=1, default=str))
         except OSError as exc:
             print(f"error: the report was not written: {exc}", file=sys.stderr)
             return EXIT_ERROR

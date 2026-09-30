@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -744,3 +745,22 @@ def test_a_proof_ceiling_above_the_host_ceiling_installs_nothing_and_starts_no_w
     assert calls == []
     assert watchdogs == []
     assert report["exit_code"] == 2
+
+
+def test_finish_writes_the_report_with_the_home_directory_as_a_tilde(tmp_path):
+    # Bug caught: the report file carrying absolute home paths (snapshot roots, paths inside an
+    # error string) into a result JSON that gets committed to a public repo.
+    home = str(Path.home())
+    report = {
+        "exit_code": 2,
+        "output": "x.png",
+        "df11": {"root": f"{home}/.cache/huggingface/hub/models--a/snapshots/s"},
+        "error": f"cannot read {home}/.cache/x: missing",
+    }
+    path = tmp_path / "r.json"
+    code = gen._finish(SimpleNamespace(report=path), report)
+    assert code == 2
+    written = json.loads(path.read_text())
+    assert written["df11"]["root"] == "~/.cache/huggingface/hub/models--a/snapshots/s"
+    assert written["error"] == "cannot read ~/.cache/x: missing"
+    assert home not in path.read_text()

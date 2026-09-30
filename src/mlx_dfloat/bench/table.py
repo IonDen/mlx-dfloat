@@ -70,10 +70,12 @@ def tier_row_from_generate_report(report: Mapping[str, Any], *, source: str) -> 
     ceiling = int(_need(tier, "ceiling_bytes", "limits.tier"))
     watched = int(_need(report, "watched_peak_bytes", "report"))
     phases = [
-        v["mlx"] for k, v in peaks.items() if k != "label" and isinstance(v, Mapping) and "mlx" in v
+        v["mlx_peak"]
+        for k, v in peaks.items()
+        if k != "label" and isinstance(v, Mapping) and "mlx_peak" in v
     ]
     if not phases:
-        raise DFloatFormatError("report peaks carry no phase with an 'mlx' number")
+        raise DFloatFormatError("report peaks carry no phase with an 'mlx_peak' number")
     return TierRow(
         mac_gb=int(_need(tier, "tier_gb", "limits.tier")),
         ceiling_bytes=ceiling,
