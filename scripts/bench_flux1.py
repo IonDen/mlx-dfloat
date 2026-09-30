@@ -36,7 +36,6 @@ exits 70/71 itself (a child's watchdog abort is reported as exit 2).
 
 import argparse
 import dataclasses
-import re
 import shlex
 import subprocess
 import sys
@@ -59,6 +58,7 @@ try:
     from scripts._q8_rig import pinned_snapshot
     from scripts.verify_checkpoint import source_hash
 
+    from mlx_dfloat._scrub import scrub_home
     from mlx_dfloat.bench import preflight
     from mlx_dfloat.bench.capped import host_tier_gb
     from mlx_dfloat.bench.results import (
@@ -224,29 +224,6 @@ def encode_argv(scenario: Scenario, *, base_root: Path, out: Path) -> list[str]:
         *("--model", scenario.model, "--prompt", scenario.prompt, "--seed", str(scenario.seed)),
         *("--root", str(base_root), "--out", str(out)),
     ]
-
-
-def scrub_home(value: Any, home: str = str(Path.home())) -> Any:
-    """``value`` with every occurrence of ``home`` as a whole path component written as ``~``.
-
-    Walks dicts, lists and tuples (tuples come back as lists, as JSON writes them); a sibling
-    directory that merely shares the prefix (``/Users/ab2`` for ``/Users/ab``) is left alone.
-    """
-    home = home.rstrip("/")
-    if not home:
-        return value
-    pattern = re.compile(re.escape(home) + r"(?=/|\s|$)")
-    return _scrub(value, pattern)
-
-
-def _scrub(value: Any, pattern: re.Pattern[str]) -> Any:
-    if isinstance(value, str):
-        return pattern.sub("~", value)
-    if isinstance(value, Mapping):
-        return {k: _scrub(v, pattern) for k, v in value.items()}
-    if isinstance(value, list | tuple):
-        return [_scrub(v, pattern) for v in value]
-    return value
 
 
 def reproducer(scenario_file: Path, *, tier: int | None) -> str:

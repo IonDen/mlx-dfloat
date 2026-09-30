@@ -27,7 +27,7 @@ TIER = {
     "sizes": {"compressed": 10 * GIB, "extras": 0},
     "watched_peak_bytes": 20 * GIB,
     "footprint_peak_bytes": 20 * GIB,
-    "peaks": {"denoise": {"mlx": 17 * GIB}},
+    "peaks": {"denoise": {"mlx_peak": 17 * GIB}},
 }
 PASS = {
     "label": "PROOF",

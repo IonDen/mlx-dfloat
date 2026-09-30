@@ -1,5 +1,8 @@
 """README fragments rendered from result data, and the marker splice."""
 
+import json
+from pathlib import Path
+
 import pytest
 
 from mlx_dfloat.bench.capped import GIB
@@ -146,8 +149,8 @@ REPORT = {
     "footprint_peak_bytes": int(19.94 * GIB),
     "peaks": {
         "label": "sampled at phase boundaries",
-        "encode": {"mlx": 1},
-        "denoise": {"mlx": int(17.4 * GIB)},
+        "encode": {"mlx_peak": 1},
+        "denoise": {"mlx_peak": int(17.4 * GIB)},
     },
 }
 
@@ -161,6 +164,23 @@ def test_tier_row_from_generate_report_reads_the_ceiling_sizes_and_peaks():
     assert row.mlx_peak_bytes == int(17.4 * GIB)
     assert row.status == "target"
     assert row.limits_note == "host caps"
+
+
+def test_tier_row_reads_a_report_the_generate_command_actually_wrote():
+    # Bug caught: the consumer reading a phase key the producer never writes ("mlx" for "mlx_peak"),
+    # so every real report fails with "report peaks carry no phase" (the hand-built REPORT hid it).
+    path = Path(__file__).parent / "fixtures" / "generate_report_schnell_1024.json"
+    report = json.loads(path.read_text())
+    row = tier_row_from_generate_report(report, source="schnell-1024.json")
+    assert row.watched_peak_bytes == 21266019216
+    assert row.footprint_peak_bytes == 21266019216
+    # the largest phase mlx_peak in the file is denoise's
+    assert row.mlx_peak_bytes == 18725825760
+    assert row.ceiling_bytes == 24653119488
+    assert row.label == "MEASURED"
+    assert row.status == "target"
+    assert row.limits_note == "host caps"
+    assert row.df11_bytes == 16195141095 + 113899648
 
 
 def test_tier_row_marks_over_budget_and_refuses_a_proof_report():
