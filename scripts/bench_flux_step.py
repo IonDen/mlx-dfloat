@@ -37,6 +37,21 @@ the mode's expectation (0 or 57), and the final latents must be finite. The MLX 
 watchdog's footprint peak are reset right before the timed steps, so the JSON carries the timed
 steps' own peaks (``step_*``) next to the process-lifetime ones.
 
+``--scenario FILE`` (single runs only; the scenario orchestrator ``scripts/bench_flux1.py`` passes
+it to every child) takes the model, size, steps, warm-up, seed, cache limit and wall budget from a
+scenario file (``mlx_dfloat.bench.scenario``); giving any of those flags as well is a usage error
+(prefix abbreviations are off, so ``--step`` cannot slip past the check). The child refuses a
+``--df11`` directory whose name is not the scenario's pinned DF11 revision, and its key and JSON
+carry the scenario hash. ``q8`` is a scenario-only mode (``SCENARIO_MODES``): mflux's transformer
+quantized to 8 bits at load, no decode launches, no eval inside the step. ``--tier GB`` (single
+runs only) emulates a smaller Mac: the tier's MLX defaults instead of the host caps, and a
+watchdog ceiling at the tier's budget minus its reserve (``mlx_dfloat.bench.capped``); the host's
+own tier keeps the host caps. Every child JSON carries a ``limits`` record (the tier's numbers,
+the limits in force after the cache limit was set, and which path installed them), its ``label``
+(MEASURED for the host tier, CAPPED below it), ``tier_gb``, ``scenario_hash``, and the watchdog's
+watched peak (``step_watched_peak_bytes``, ``watched_peak_bytes``). Home-directory prefixes in the
+key and the embeddings path are written as ``~``.
+
 ``--orchestrate`` runs the five modes as subprocesses, interleaved per round in the order
 ``df11, control, df11-depth2, control-depth2, control-noeval``, one at a time, each writing
 ``DIR/round{r}-{mode}.json``; a run whose complete JSON exists is skipped, so an interrupted
@@ -52,6 +67,9 @@ orchestration with exit 2; the report records which run and suppresses the poole
 Usage (from the repository root of a synced checkout, ``--group bench``):
     uv run python -m scripts.bench_flux_step --mode MODE --df11 DIR --embeds FILE --out FILE \
         [--steps 5] [--warmup 2] [--model schnell|dev] [--size 1024] [--seed 42] [--wall-budget S]
+        [--tier GB]
+    uv run python -m scripts.bench_flux_step --scenario FILE --mode MODE --df11 SNAPSHOT \
+        --embeds FILE --out FILE [--round R] [--tier GB] [--trace]
     uv run python -m scripts.bench_flux_step --orchestrate --rounds 3 --out-dir DIR --df11 DIR \
         --embeds FILE [--steps 5] [--warmup 2] [--model schnell|dev] [--size 1024] [--wall-budget S]
 Exit codes: 0 ok, 2 any error (a non-finite latent, a failed parity condition, a decode status
@@ -93,15 +111,27 @@ try:
         ReuseProvider,
         Tracer,
         WeightProvider,
+        ZeroProvider,
         build_transformer,
         load_resident_set,
         summarize_trace,
     )
-    from scripts._watchdog import Watchdog, default_ceiling, phys_footprint
+    from scripts._q8_rig import BITS, GROUP_SIZE, build_q8_transformer, pinned_snapshot
+    from scripts._watchdog import Watchdog, default_ceiling, phys_footprint, watched_memory
     from scripts.verify_checkpoint import source_hash
 
     from mlx_dfloat._memory_caps import install_memory_caps
+    from mlx_dfloat.bench.capped import (
+        TierLimits,
+        current_limits,
+        host_tier_gb,
+        limits_record,
+        tier_limits,
+    )
+    from mlx_dfloat.bench.capped import apply as apply_limits
+    from mlx_dfloat.bench.scenario import Scenario, load_scenario, scenario_hash
     from mlx_dfloat.decode import DecodeResult
+    from mlx_dfloat.errors import DFloatFormatError, DFloatUnsupportedError
     from mlx_dfloat.format import DF11Checkpoint, MxGroup, open_checkpoint
     from mlx_dfloat.integrate.names import NameMap
     from mlx_dfloat.mflux.flux1.names import flux_name_map
@@ -119,6 +149,19 @@ MODES: tuple[str, ...] = ("df11", "control", "df11-depth2", "control-depth2", "c
 # Experiment modes, run only when ``--modes`` names them: the look-ahead decode of the next block,
 # on a second GPU stream (``df11-prefetch``) or on the default one (``df11-prefetch-inline``).
 EXTRA_MODES: tuple[str, ...] = ("df11-prefetch", "df11-prefetch-inline")
+# Modes a single run accepts only with ``--scenario``: ``q8`` quantizes the scenario's pinned base
+# transformer, so it has no meaning without one, and the legacy orchestration never runs it.
+SCENARIO_MODES: tuple[str, ...] = ("q8",)
+# The settings a scenario file fixes; giving one of these flags next to ``--scenario`` is an error.
+SCENARIO_FIXED_FLAGS: tuple[str, ...] = (
+    "--model",
+    "--size",
+    "--steps",
+    "--warmup",
+    "--seed",
+    "--cache-limit",
+    "--wall-budget",
+)
 _POLICIES = {
     "df11": "per-block",
     "control": "per-block",
@@ -127,6 +170,7 @@ _POLICIES = {
     "control-noeval": "none",
     "df11-prefetch": "per-block",
     "df11-prefetch-inline": "per-block",
+    "q8": "none",  # a plain quantized transformer: no seam, no eval inside the step
 }
 # (label, df11 mode, control mode): the paired overheads the report computes.
 PAIRS: tuple[tuple[str, str, str], ...] = (
@@ -168,7 +212,9 @@ def mode_policy(mode: str) -> str:
     try:
         return _POLICIES[mode]
     except KeyError:
-        raise BenchError(f"unknown mode {mode!r}; choose from {MODES + EXTRA_MODES}") from None
+        raise BenchError(
+            f"unknown mode {mode!r}; choose from {MODES + EXTRA_MODES + SCENARIO_MODES}"
+        ) from None
 
 
 def is_df11(mode: str) -> bool:
@@ -245,12 +291,20 @@ def run_key(
     source: str,
     mlx: str,
     cache_limit: int,
+    scenario_hash: str | None = None,
+    tier_gb: int | None = None,
 ) -> dict[str, Any]:
     """The settings a run's JSON is keyed on; two runs may share an out dir only when they agree.
 
     The checkpoint path is resolved so the same checkpoint reached from another cwd matches; the
     embeddings metadata (prompt, seed, model, synthetic, versions) identifies the file's content.
     The MLX cache limit is part of the key because it changes what a step allocates.
+    ``scenario_hash`` is None outside a scenario run. ``tier_gb`` is the tier the process runs
+    under, resolved (the host's own tier when no ``--tier`` is given, see ``current_key``); the
+    default None is for benches without tiers (the reduced-depth control validation). Both paths
+    and the embeddings metadata values are written with the home directory as ``~``
+    (``redact_home``), so a committed result names no user; a key stored before that reads as a
+    conflict, never as a match.
     """
     return {
         "model": model,
@@ -258,13 +312,87 @@ def run_key(
         "steps": steps,
         "warmup": warmup,
         "seed": seed,
-        "df11": str(Path(df11).resolve()),
-        "embeds": str(embeds),
-        "embeds_meta": dict(embeds_meta),
+        "df11": redact_home(str(Path(df11).resolve())),
+        "embeds": redact_home(str(embeds)),
+        "embeds_meta": redact_meta(embeds_meta),
         "source": source,
         "mlx": mlx,
         "cache_limit": cache_limit,
+        "scenario_hash": scenario_hash,
+        "tier_gb": tier_gb,
     }
+
+
+def redact_home(text: str, home: str = str(Path.home())) -> str:
+    """``text`` with a leading ``home`` directory written as ``~`` (only a whole leading component)."""
+    home = home.rstrip("/")
+    if home and (text == home or text.startswith(home + "/")):
+        return "~" + text[len(home) :]
+    return text
+
+
+def redact_meta(meta: Mapping[str, str]) -> dict[str, str]:
+    """``meta`` with every value through ``redact_home`` (the encoder records its snapshot root)."""
+    return {k: redact_home(v) for k, v in meta.items()}
+
+
+def embeds_record(path: Path, meta: Mapping[str, str]) -> dict[str, Any]:
+    """The run JSON's ``embeds`` record: the file's path and metadata, home written as ``~``."""
+    return {"path": redact_home(str(path)), "metadata": redact_meta(meta)}
+
+
+def conflicting_flags(
+    argv: Sequence[str], fixed: Sequence[str] = SCENARIO_FIXED_FLAGS
+) -> list[str]:
+    """The ``fixed`` flags ``argv`` gives (as ``--flag value`` or ``--flag=value``), each once, in order."""
+    found: list[str] = []
+    for token in argv:
+        name = token.split("=", 1)[0] if token.startswith("--") else None
+        if name in fixed and name not in found:
+            found.append(name)
+    return found
+
+
+def settings_from_scenario(scenario: Scenario) -> dict[str, Any]:
+    """The run settings a scenario fixes, under their ``parse_args`` names."""
+    return {
+        "model": scenario.model,
+        "size": scenario.size,
+        "steps": scenario.steps,
+        "warmup": scenario.warmup,
+        "seed": scenario.seed,
+        "cache_limit": scenario.cache_limit_bytes,
+        "wall_budget": scenario.wall_budget_s,
+    }
+
+
+def check_df11_pin(df11: Path, revision: str) -> None:
+    """Refuse a DF11 snapshot directory that is not the scenario's pinned revision.
+
+    The Hub cache names a snapshot directory after its commit, so the name is the revision.
+
+    Raises:
+        BenchError: ``df11``'s name is not ``revision``.
+    """
+    if Path(df11).name != revision:
+        raise BenchError(
+            f"{redact_home(str(df11))} is not the scenario's pinned DF11 snapshot: its name "
+            f"must be {revision}"
+        )
+
+
+def limits_for_process(
+    tier_gb: int | None, *, host_ram_bytes: int, host_recommended_bytes: int
+) -> TierLimits:
+    """The limits record of this process: ``tier_gb``'s, or the host's own tier when it is None.
+
+    Raises:
+        DFloatUnsupportedError: The tier is larger than the host.
+    """
+    tier = host_tier_gb(host_ram_bytes) if tier_gb is None else tier_gb
+    return tier_limits(
+        tier, host_ram_bytes=host_ram_bytes, host_recommended_bytes=host_recommended_bytes
+    )
 
 
 def resume_conflicts(
@@ -499,9 +627,27 @@ def _cache_limit_bytes(text: str) -> int:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse the command line: one mode (``--mode``, ``--out``) or ``--orchestrate`` (``--out-dir``)."""
     p = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,  # `--step 9` must not become --steps behind the scenario check
     )
-    p.add_argument("--mode", choices=MODES + EXTRA_MODES, help="the one mode this process runs")
+    p.add_argument(
+        "--mode",
+        choices=MODES + EXTRA_MODES + SCENARIO_MODES,
+        help="the one mode this process runs (q8 only with --scenario)",
+    )
+    p.add_argument(
+        "--scenario",
+        type=Path,
+        default=None,
+        help="scenario TOML fixing the run settings (single runs only; see the docstring)",
+    )
+    p.add_argument(
+        "--tier",
+        type=int,
+        default=None,
+        help="emulate a Mac of this many GB (single runs only; default: this host's own tier)",
+    )
     p.add_argument(
         "--modes",
         nargs="+",
@@ -538,6 +684,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--wall-budget", type=float, default=3600.0, help="seconds before the watchdog aborts"
     )
     args = p.parse_args(argv)
+    if args.orchestrate and (args.scenario is not None or args.tier is not None):
+        p.error("--orchestrate takes no --scenario or --tier (the scenario orchestrator does)")
+    if args.tier is not None and args.tier < 1:
+        p.error("--tier must be >= 1")
+    if args.mode in SCENARIO_MODES and args.scenario is None:
+        p.error(f"--mode {args.mode} needs --scenario (it runs only as a scenario condition)")
+    args.scenario_spec, args.scenario_hash = None, None
+    if args.scenario is not None:
+        given = conflicting_flags(sys.argv[1:] if argv is None else argv)
+        if given:
+            p.error(f"--scenario fixes {', '.join(given)}; drop them from the command line")
+        try:
+            args.scenario_spec = load_scenario(args.scenario)
+        except DFloatFormatError as exc:
+            p.error(str(exc))
+        args.scenario_hash = scenario_hash(args.scenario_spec)
+        for name, value in settings_from_scenario(args.scenario_spec).items():
+            setattr(args, name, value)
     if args.modes is not None and not args.orchestrate:
         p.error("--modes applies to --orchestrate; a single run takes --mode")
     if args.modes is None:
@@ -554,7 +718,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         # construction, so at least one warm-up step is required.
         p.error("--steps and --warmup must be >= 1, --rounds >= 0")
     # Children run with the repository root as cwd, so every path they receive must be absolute.
-    for name in ("out", "out_dir", "df11", "embeds"):
+    for name in ("out", "out_dir", "df11", "embeds", "scenario"):
         if getattr(args, name) is not None:
             setattr(args, name, Path(getattr(args, name)).resolve())
     return args
@@ -580,6 +744,10 @@ def current_key(args: argparse.Namespace) -> dict[str, Any]:
         source=source_hash(),
         mlx=mx.__version__,
         cache_limit=args.cache_limit,
+        scenario_hash=args.scenario_hash,
+        # The resolved tier (what limits_for_process runs under): `--tier <host>` keys the same as
+        # no tier, and another host's results conflict instead of resuming.
+        tier_gb=host_tier_gb(host_memory()["host_ram_bytes"]) if args.tier is None else args.tier,
     )
 
 
@@ -620,7 +788,13 @@ def make_provider(
     block decoded once by that same backend (the control's only extra memory). ``decode`` is the
     Metal backend by default; tests inject a counting reference decode. ``name_map`` defaults to
     the real FLUX.1 map (``flux_name_map()``, which imports mflux); tests inject the fakes' table.
+
+    Raises:
+        BenchError: ``mode`` is a scenario-only mode (``q8``), whose provider is a ``ZeroProvider``
+            built by ``run_mode`` without the checkpoint.
     """
+    if mode in SCENARIO_MODES:
+        raise BenchError(f"{mode} has no DF11 provider; run_mode builds its ZeroProvider")
     names = flux_name_map() if name_map is None else name_map
     decoder = DF11Provider(
         resident, {n: ckpt.groups[n].matrix_names for n in shapes}, names, decode=decode
@@ -649,7 +823,8 @@ def denoise_step(
     """The upstream loop body for step ``t``, timed to its eval; then ``verify_step()``, timed on its own.
 
     Returns ``(latents, step seconds, verify seconds)``. The measured window holds exactly what
-    upstream runs per step; the status validation is DF11's separate, reported cost.
+    upstream runs per step; the status validation is DF11's separate, reported cost. A transformer
+    without a seam (mflux's own, in the q8 mode) has no ``verify_step``: its verify time is 0.0.
     """
     start = time.perf_counter()
     latents = config.scheduler.scale_model_input(latents, t)
@@ -659,7 +834,10 @@ def denoise_step(
     latents = config.scheduler.step(noise=noise, timestep=t, latents=latents)
     mx.eval(latents)
     stop = time.perf_counter()
-    transformer.verify_step()
+    verify = getattr(transformer, "verify_step", None)
+    if verify is None:
+        return latents, stop - start, 0.0
+    verify()
     return latents, stop - start, time.perf_counter() - stop
 
 
@@ -690,7 +868,7 @@ def step_inputs(
     )  # float32, as upstream
     mx.eval(latents)
     record = {
-        "embeds": {"path": str(args.embeds), "metadata": embeds_meta},
+        "embeds": embeds_record(args.embeds, embeds_meta),
         "latent_dtype": str(latents.dtype),
         "embeds_dtype": {
             "prompt_embeds": str(prompt.dtype),
@@ -698,6 +876,16 @@ def step_inputs(
         },
     }
     return config, latents, prompt, pooled, record
+
+
+def _watched_now(footprint: int) -> int:
+    """The number the watchdog enforces, sampled now: the larger of ``footprint`` and MLX active + cache."""
+    memory, _source = watched_memory(
+        footprint=footprint,
+        mlx_active=int(mx.get_active_memory()),
+        mlx_cache=int(mx.get_cache_memory()),
+    )
+    return memory
 
 
 def time_steps(
@@ -711,7 +899,7 @@ def time_steps(
     warmup: int,
     steps: int,
     per_step: int,
-    compressed_loaded: bool,
+    compressed_loaded: bool | None,
     limits_recorded: bool,
     watchdog: Watchdog,
     label: str,
@@ -725,7 +913,8 @@ def time_steps(
 
     ``per_step`` is the decode launches every step must make (``label`` names the mode in errors);
     ``compressed_loaded`` and ``limits_recorded`` are the two conditions the caller establishes
-    (``compressed_set_loaded``, ``limits_in_force``). The provider's deferred status words are read
+    (``compressed_set_loaded``, ``limits_in_force``); ``compressed_loaded`` is None for a mode with
+    no compressed set (q8), and the check is then skipped. The provider's deferred status words are read
     by ``verify_step`` inside every step, so "nothing pending" is not a condition here; the
     queue-then-drain contract is tested on the provider itself.
 
@@ -736,9 +925,10 @@ def time_steps(
     """
     launches_per_step: list[int] = []
     footprint_peak = phys_footprint()
+    watched_peak = _watched_now(footprint_peak)
 
     def run_steps(first: int, count: int) -> tuple[list[float], list[float]]:
-        nonlocal latents, footprint_peak
+        nonlocal latents, footprint_peak, watched_peak
         seconds: list[float] = []
         verify: list[float] = []
         for t in range(first, first + count):
@@ -747,7 +937,9 @@ def time_steps(
             seconds.append(took)
             verify.append(checked)
             launches_per_step.append(provider.launches - before)
-            footprint_peak = max(footprint_peak, phys_footprint())
+            footprint = phys_footprint()
+            footprint_peak = max(footprint_peak, footprint)
+            watched_peak = max(watched_peak, _watched_now(footprint))
         return seconds, verify
 
     warmup_s, warmup_verify_s = run_steps(0, warmup)
@@ -762,10 +954,12 @@ def time_steps(
     # The timed steps' own peaks, apart from the load and warm-up spike: snapshot the lifetime
     # peaks so far, then start both counters over.
     lifetime_footprint_peak = max(footprint_peak, watchdog.peak_footprint)
+    lifetime_watched_peak = max(watched_peak, watchdog.peak_watched)
     lifetime_mlx_peak = int(mx.get_peak_memory())
     mx.reset_peak_memory()
     watchdog.reset_peak()
     footprint_peak = phys_footprint()
+    watched_peak = _watched_now(footprint_peak)
     step_s, verify_s = run_steps(warmup, steps)
     if any(n != per_step for n in launches_per_step[warmup:]):
         raise BenchError(
@@ -805,10 +999,23 @@ def time_steps(
             lifetime_footprint_peak, footprint_peak, watchdog.peak_footprint
         ),
         "watchdog_peak_footprint_bytes": max(lifetime_footprint_peak, watchdog.peak_footprint),
+        "step_watched_peak_bytes": max(watched_peak, watchdog.peak_watched),
+        "watched_peak_bytes": max(lifetime_watched_peak, watched_peak, watchdog.peak_watched),
         "mlx_peak_memory_bytes": max(lifetime_mlx_peak, int(mx.get_peak_memory())),
         "cache_memory_bytes": int(mx.get_cache_memory()),
         "output_shape": list(latents.shape),
         "output_dtype": str(latents.dtype),
+    }
+
+
+def q8_record(root: Path, cache_limit: int) -> dict[str, Any]:
+    """The q8 mode's settings for the run JSON: the base it was quantized from and how."""
+    return {
+        "base_root": redact_home(str(root)),
+        "bits": BITS,
+        "group_size": GROUP_SIZE,
+        "eval_policy": mode_policy("q8"),
+        "cache_limit_bytes": cache_limit,
     }
 
 
@@ -817,24 +1024,55 @@ def run_mode(
 ) -> dict[str, Any]:
     """Build, load, warm up, assert the parity conditions, time the steps; the result dict.
 
+    The DF11 and control modes build the seamed transformer and load the whole compressed set.
+    ``q8`` never opens the checkpoint: it resolves the scenario's pinned base from the local Hub
+    cache (``transformer/*`` only), builds mflux's transformer quantized to 8 bits at load
+    (``build_q8_transformer``) and runs it with a ``ZeroProvider``; its record carries
+    ``"compressed_set": None`` and the ``q8`` settings, and the compressed-set condition is skipped.
+
     Raises:
         ParityError: A parity condition failed before the timed loop.
-        BenchError: A timed step's launches differ from the mode's, or the final latents are not finite.
+        BenchError: A timed step's launches differ from the mode's, the final latents are not
+            finite, or ``--trace`` was given for q8 (there is no seam to trace).
+        DFloatIntegrationError: The q8 base is not in the local cache at the pinned revision.
     """
     mode, policy = args.mode, mode_policy(args.mode)
     timings: dict[str, float] = {}
-    ckpt = open_checkpoint(args.df11)
-    start = time.perf_counter()
-    transformer, shapes = build_transformer(args.model, ckpt, n_double=N_DOUBLE, n_single=N_SINGLE)
-    timings["build_s"] = time.perf_counter() - start
-    start = time.perf_counter()
-    resident = load_resident_set(ckpt)  # every group, in every mode: the same footprint baseline
-    timings["load_resident_s"] = time.perf_counter() - start
-    start = time.perf_counter()
-    provider = make_provider(mode, ckpt, resident, shapes)
-    timings["provider_s"] = time.perf_counter() - start
-    tracer = Tracer() if args.trace else None
-    transformer.attach(provider, shapes, eval_policy=policy, tracer=tracer)
+    provider: Any
+    compressed_loaded: bool | None
+    tracer: Tracer | None = None
+    extra: dict[str, Any] = {}
+    if mode == "q8":
+        if args.trace:
+            raise BenchError("q8 runs mflux's own transformer: there is no seam to trace")
+        scenario = args.scenario_spec
+        root = pinned_snapshot(
+            scenario.base_repo, scenario.base_revision, allow_patterns=["transformer/*"]
+        )
+        start = time.perf_counter()
+        transformer = build_q8_transformer(args.model, root, n_double=N_DOUBLE, n_single=N_SINGLE)
+        timings["load_q8_s"] = time.perf_counter() - start
+        provider = ZeroProvider()
+        compressed_loaded = None
+        extra = {"compressed_set": None, "q8": q8_record(root, args.cache_limit)}
+    else:
+        ckpt = open_checkpoint(args.df11)
+        start = time.perf_counter()
+        transformer, shapes = build_transformer(
+            args.model, ckpt, n_double=N_DOUBLE, n_single=N_SINGLE
+        )
+        timings["build_s"] = time.perf_counter() - start
+        start = time.perf_counter()
+        resident = load_resident_set(
+            ckpt
+        )  # every group, in every mode: the same footprint baseline
+        timings["load_resident_s"] = time.perf_counter() - start
+        start = time.perf_counter()
+        provider = make_provider(mode, ckpt, resident, shapes)
+        timings["provider_s"] = time.perf_counter() - start
+        tracer = Tracer() if args.trace else None
+        transformer.attach(provider, shapes, eval_policy=policy, tracer=tracer)
+        compressed_loaded = compressed_set_loaded(resident, shapes)
     config, latents, prompt, pooled, inputs = step_inputs(args)
     measured = time_steps(
         transformer,
@@ -846,7 +1084,7 @@ def run_mode(
         warmup=args.warmup,
         steps=args.steps,
         per_step=expected_launches(mode, n_double=N_DOUBLE, n_single=N_SINGLE, steps=1),
-        compressed_loaded=compressed_set_loaded(resident, shapes),
+        compressed_loaded=compressed_loaded,
         limits_recorded=limits_recorded,
         watchdog=watchdog,
         label=mode,
@@ -866,14 +1104,23 @@ def run_mode(
         "guidance": GUIDANCE,
         "n_double": N_DOUBLE,
         "n_single": N_SINGLE,
+        **extra,
         **measured,
         **inputs,
         "timings_s": timings,
-        "provenance": provenance(),
     }
 
 
 Measure = Callable[..., dict[str, Any]]
+
+
+def host_memory() -> dict[str, int]:
+    """This Mac's RAM and recommended working set, as ``limits_for_process``'s keyword arguments."""
+    info = mx.device_info()
+    return {
+        "host_ram_bytes": int(info["memory_size"]),
+        "host_recommended_bytes": int(info["max_recommended_working_set_size"]),
+    }
 
 
 def run_one(
@@ -882,27 +1129,56 @@ def run_one(
     measure: Measure | None = None,
     key: Callable[[argparse.Namespace], dict[str, Any]] | None = None,
     cache_limit: int = FLUX_CACHE_LIMIT,
+    limits: TierLimits | None = None,
 ) -> int:
-    """Run one mode under the caps, the cache limit and the watchdog; write ``--out``.
+    """Run one mode under the limits, the cache limit and the watchdog; write ``--out``.
 
     ``measure(args, watchdog, limits_recorded=...)`` returns the run's result dict (default
     ``run_mode``) and ``key(args)`` its resume key (default ``current_key``); another bench with the
     same run discipline (the reduced-depth control validation) passes its own. ``cache_limit`` is
     the MLX buffer-cache limit to set for the process (``--cache-limit``; the rig's by default).
+
+    ``limits`` is the tier to run under (``limits_for_process``); None means this host's own tier.
+    The host tier installs the host caps and keeps the default watchdog ceiling; a smaller tier
+    installs its MLX defaults instead (``apply_limits``; no host caps, recorded as ``[0, 0]``) and
+    the watchdog aborts at its ceiling. Either way the cache limit is set afterwards, then the
+    limits in force are read back into the ``limits`` record. A scenario run first checks that
+    ``--df11`` is the scenario's pinned snapshot (a mismatch is exit 2, nothing measured).
     """
     measure = run_mode if measure is None else measure
     key_of = current_key if key is None else key
-    caps = list(install_memory_caps())
-    mx.set_cache_limit(cache_limit)  # no getter in mlx 0.32.2: the requested value is recorded
-    limits_recorded = limits_in_force(caps)
+    if limits is None:
+        limits = limits_for_process(None, **host_memory())
+    if limits.is_host:
+        caps = list(install_memory_caps())
+        ceiling, applied = default_ceiling(), "host-caps"
+        limits_recorded = limits_in_force(caps)
+    else:
+        apply_limits(limits)
+        caps = [0, 0]
+        ceiling, applied = limits.ceiling_bytes, "tier-defaults"
+        limits_recorded = True
+    mx.set_cache_limit(cache_limit)  # after the tier's defaults, so the requested value wins
+    effective = current_limits()
+    record = limits_record(
+        limits,
+        effective_memory_limit=effective["memory"],
+        effective_cache_limit=effective["cache"],
+        effective_wired_limit=effective["wired"],
+        applied=applied,
+    )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     move_stale_abort_aside(args.out.parent)
-    watchdog = Watchdog(args.out.parent, ceiling=default_ceiling(), budget=args.wall_budget).start()
+    watchdog = Watchdog(args.out.parent, ceiling=ceiling, budget=args.wall_budget).start()
     summary: dict[str, Any]
     this_key: dict[str, Any] | None = None
+    scenario: Scenario | None = getattr(args, "scenario_spec", None)
     try:
         this_key = key_of(args)
+        if scenario is not None:
+            check_df11_pin(args.df11, scenario.df11_revision)
         summary = measure(args, watchdog, limits_recorded=limits_recorded)
+        summary["provenance"] = provenance(caps)
     except ParityError as exc:
         summary = {
             "exit_code": EXIT_ERROR,
@@ -921,6 +1197,11 @@ def run_one(
             "memory_caps_gb": caps,
             "cache_limit_bytes": cache_limit,
             "key": this_key,
+            "limits": record,
+            "label": limits.label,
+            "tier_gb": limits.tier_gb,
+            "scenario_hash": getattr(args, "scenario_hash", None),
+            "watchdog_ceiling_bytes": ceiling,
         }
     )
     try:
@@ -935,7 +1216,8 @@ def run_one(
             f"spread {summary['spread']:.3f} over {args.steps} steps "
             f"(+ {summary['verify_median_s']:.4f} s status validation, outside the window), "
             f"{summary['launches_expected_per_step']} launches/step, footprint peak "
-            f"{summary['footprint_peak_bytes'] / 1024**3:.2f} GiB"
+            f"{summary['footprint_peak_bytes'] / 1024**3:.2f} GiB, {limits.label} "
+            f"({limits.tier_gb} GB)"
         )
     else:
         print(f"exit {code}: {summary.get('error')}", file=sys.stderr)
@@ -1029,7 +1311,8 @@ def orchestrate(args: argparse.Namespace) -> int:
             "warmup": args.warmup,
             "model": args.model,
             "size": args.size,
-            "provenance": provenance(),
+            # The orchestrator installs no caps: it loads no model.
+            "provenance": provenance((0, 0)),
         }
     )
     write_json_atomic(out_dir / "report.json", rep)
@@ -1041,7 +1324,14 @@ def main(argv: list[str] | None = None) -> int:
     """Entry point."""
     args = parse_args(argv)
     if not args.orchestrate:
-        return run_one(args, cache_limit=args.cache_limit)
+        limits = None  # run_one records the host tier itself
+        if args.tier is not None:
+            try:
+                limits = limits_for_process(args.tier, **host_memory())
+            except DFloatUnsupportedError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return EXIT_ERROR
+        return run_one(args, cache_limit=args.cache_limit, limits=limits)
     try:
         return orchestrate(args)
     except Exception as exc:  # a setup or report error is a tool error (2), never 1

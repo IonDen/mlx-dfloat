@@ -508,7 +508,7 @@ def run_side(args: argparse.Namespace) -> int:
         traceback.print_exc()
     finally:
         watchdog.stop()
-    summary.update({"key": key, "memory_caps_gb": caps, "provenance": provenance()})
+    summary.update({"key": key, "memory_caps_gb": caps, "provenance": provenance(caps)})
     try:
         write_json_atomic(side_dir / "result.json", summary)
     except (OSError, TypeError, ValueError) as exc:

@@ -93,9 +93,10 @@ def source_hash() -> str:
 
     Recurses through ``src/mlx_dfloat`` (not just its top level, so a package-side change like
     the watchdog is covered) and also covers this script, the helper it imports from ``scripts/``
-    (``_bench_common.py``) and the FLUX rig and step bench (``_flux_rig.py``,
-    ``bench_flux_step.py``), so an edit to a script on a measurement's hot path invalidates its
-    stored results too, not just an edit to the package.
+    (``_bench_common.py``) and the FLUX rig, step bench, q8 rig and scenario orchestrator
+    (``_flux_rig.py``, ``bench_flux_step.py``, ``_q8_rig.py``, ``bench_flux1.py``, ``bench_table.py``), so an edit to
+    a script on a measurement's hot path invalidates its stored results too, not just an edit to
+    the package.
     """
     files = sorted(_SRC.rglob("*.py")) + sorted(
         [
@@ -103,6 +104,9 @@ def source_hash() -> str:
             _SCRIPTS / "_bench_common.py",
             _SCRIPTS / "_flux_rig.py",
             _SCRIPTS / "bench_flux_step.py",
+            _SCRIPTS / "_q8_rig.py",
+            _SCRIPTS / "bench_flux1.py",
+            _SCRIPTS / "bench_table.py",
         ]
     )
     digest = hashlib.sha256()

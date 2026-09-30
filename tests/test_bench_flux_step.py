@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from scripts._bench_common import write_json_atomic
+from scripts._bench_common import resume_key_diff, write_json_atomic
 from scripts._flux_rig import FLUX_CACHE_LIMIT, DF11Provider, ReuseProvider, install_placeholders
 from scripts.bench_flux_step import (
     MODES,
@@ -53,19 +53,38 @@ FIXTURES = [
     {"round": 2, "mode": "control", "step_s": [1.0, 1.2, 1.1], "verify_s": [0.0, 0.0, 0.0]},
     {"round": 3, "mode": "df11", "step_s": [9.0, 9.0, 9.0], "verify_s": [0.5, 0.5, 0.5]},
 ]
-KEY = run_key(
-    model="schnell",
-    size=1024,
-    steps=5,
-    warmup=2,
-    seed=42,
-    df11=Path("/ckpt"),
-    embeds=Path("/e.safetensors"),
-    embeds_meta={"synthetic": "true", "seed": "42"},
-    source="abc",
-    mlx="0.32.2",
-    cache_limit=FLUX_CACHE_LIMIT,
-)
+KEY_KWARGS = {
+    "model": "schnell",
+    "size": 1024,
+    "steps": 5,
+    "warmup": 2,
+    "seed": 42,
+    "df11": Path("/ckpt"),
+    "embeds": Path("/e.safetensors"),
+    "embeds_meta": {"synthetic": "true", "seed": "42"},
+    "source": "abc",
+    "mlx": "0.32.2",
+    "cache_limit": FLUX_CACHE_LIMIT,
+}
+KEY = run_key(**KEY_KWARGS)
+# The legacy orchestration's child settings (the scenario-free path).
+CHILD_KWARGS = {
+    "steps": 5,
+    "warmup": 2,
+    "model": "schnell",
+    "size": 1024,
+    "seed": 42,
+    "wall_budget": 1200.0,
+    "cache_limit": FLUX_CACHE_LIMIT,
+    "trace": False,
+}
+REPO = Path(__file__).resolve().parents[1]
+SCENARIO_FILE = REPO / "bench/scenarios/flux1-schnell-1024.toml"
+# The committed schnell scenario's DF11 pin (bench/scenarios/flux1-schnell-1024.toml).
+SCHNELL_DF11_REVISION = "51a428b928197e0531cb93d6e438941e2d0b247e"
+BASE_REVISION = "741f7c3ce8b383c54771c7003378a50191e9efe9"  # the schnell scenario's pinned base
+GIB = 1024**3
+HOST_REC = 24 * GIB  # a 32 GB host's recommended working set, a round figure for the tests
 
 
 # --- modes and policies --------------------------------------------------------------------------
@@ -185,14 +204,7 @@ def test_child_command_runs_the_module_for_one_mode_and_round_without_orchestrat
         out=tmp_path / "round2-df11-depth2.json",
         df11=tmp_path / "ckpt",
         embeds=tmp_path / "e.safetensors",
-        steps=5,
-        warmup=2,
-        model="dev",
-        size=768,
-        seed=42,
-        wall_budget=1200.0,
-        cache_limit=FLUX_CACHE_LIMIT,
-        trace=False,
+        **{**CHILD_KWARGS, "model": "dev", "size": 768},
     )
     assert cmd[:3] == [sys.executable, "-m", "scripts.bench_flux_step"]
     assert "--orchestrate" not in cmd
@@ -223,14 +235,7 @@ def test_child_command_forwards_trace_and_a_custom_cache_limit(tmp_path):
         out=tmp_path / "r.json",
         df11=tmp_path / "ckpt",
         embeds=tmp_path / "e.safetensors",
-        steps=5,
-        warmup=2,
-        model="schnell",
-        size=1024,
-        seed=42,
-        wall_budget=1200.0,
-        cache_limit=2_500_000_000,
-        trace=True,
+        **{**CHILD_KWARGS, "cache_limit": 2_500_000_000, "trace": True},
     )
     assert cmd[-1] == "--trace"
     flags = dict(zip(cmd[3:-1:2], cmd[4:-1:2], strict=True))
@@ -407,6 +412,8 @@ def test_run_key_resolves_the_checkpoint_path_and_carries_every_setting(tmp_path
         "source": "deadbeef",
         "mlx": "0.32.2",
         "cache_limit": 2_500_000_000,
+        "scenario_hash": None,
+        "tier_gb": None,
     }
 
 
@@ -528,11 +535,13 @@ class _FakeTransformer:
 
 
 class _FakeWatchdog:
-    def __init__(self, peak_footprint=0):
+    def __init__(self, peak_footprint=0, peak_watched=0):
         self.peak_footprint = peak_footprint
+        self.peak_watched = peak_watched
 
     def reset_peak(self):
         self.peak_footprint = 0
+        self.peak_watched = 0
 
 
 def _time(
@@ -616,6 +625,17 @@ def test_time_steps_records_the_timed_steps_own_peaks_apart_from_the_lifetime_pe
     assert out["step_footprint_peak_bytes"] < 10**13
     assert out["mlx_peak_memory_bytes"] >= 256 * 1024**2
     assert out["step_mlx_peak_bytes"] < 256 * 1024**2
+
+
+def test_time_steps_records_the_watched_peak_of_the_timed_steps_and_of_the_lifetime():
+    # Bug caught: the watched peak (the number the watchdog enforces, the one the tier rows use)
+    # left out of the result, read without the reset (the load spike lands in the step peak), or
+    # the lifetime value lost to that reset.
+    provider = _FakeProvider()
+    transformer = _FakeTransformer(provider, [0] * 5)
+    out = _time(transformer, provider, per_step=0, watchdog=_FakeWatchdog(peak_watched=10**13))
+    assert out["watched_peak_bytes"] >= 10**13
+    assert 0 < out["step_watched_peak_bytes"] < 10**13
 
 
 # --- the parity condition helpers ----------------------------------------------------------------
@@ -786,7 +806,7 @@ def test_run_one_writes_the_injected_measurement_under_the_injected_key(
             "verify_median_s": 0.0,
             "launches_expected_per_step": 0,
             "footprint_peak_bytes": 1,
-            "limits": limits_recorded,
+            "limits_recorded": limits_recorded,
         }
 
     args = _one_run_args(tmp_path)
@@ -794,7 +814,7 @@ def test_run_one_writes_the_injected_measurement_under_the_injected_key(
     written = json.loads((tmp_path / "r.json").read_text())
     assert code == 0
     assert written["key"] == {"double": 4}
-    assert written["limits"] is True
+    assert written["limits_recorded"] is True
     assert written["mode"] == "control"
 
 
@@ -1004,7 +1024,7 @@ def test_run_one_sets_and_records_the_requested_cache_limit(tmp_path, restore_ca
             "verify_median_s": 0.0,
             "launches_expected_per_step": 0,
             "footprint_peak_bytes": 1,
-            "limits": limits_recorded,
+            "limits_recorded": limits_recorded,
         }
 
     args = _one_run_args(tmp_path)
@@ -1013,7 +1033,7 @@ def test_run_one_sets_and_records_the_requested_cache_limit(tmp_path, restore_ca
     assert code == 0
     assert seen["limit"] == 2_000_000_000
     assert written["cache_limit_bytes"] == 2_000_000_000
-    assert written["limits"] is True
+    assert written["limits_recorded"] is True
 
 
 # --- prefetch modes -------------------------------------------------------------------------------
@@ -1169,3 +1189,593 @@ def test_report_pools_a_shared_control_over_each_pairs_own_rounds():
     assert out["overhead"]["prefetch"] == pytest.approx(0.1)
     assert out["pooled"]["control"]["n"] == 2  # the per-block pair's rounds
     assert out["pooled"]["df11-prefetch"]["n"] == 1
+
+
+# --- scenario runs, the tier flag and the limits record -----------------------------------------
+
+
+def _scenario_run_args(tmp_path, *extra, mode="df11", df11=None):
+    df11 = df11 if df11 is not None else tmp_path / SCHNELL_DF11_REVISION
+    return [
+        *("--scenario", str(SCENARIO_FILE), "--mode", mode, "--out", str(tmp_path / "r.json")),
+        *("--df11", str(df11), "--embeds", "e", *extra),
+    ]
+
+
+def _error_line(capsys):
+    """argparse's own error line (the usage block above it names every flag, so it proves nothing)."""
+    return capsys.readouterr().err.strip().splitlines()[-1]
+
+
+def test_q8_is_scenario_only_with_no_launches_and_the_none_policy():
+    # Bug caught: q8 appended to MODES (the legacy five-mode recipe would grow a sixth child), q8
+    # counted as a DF11 mode (its steps would be refused for making no launches), or given an
+    # eval policy (the quantized transformer has no seam to evaluate at).
+    from scripts.bench_flux_step import SCENARIO_MODES, is_df11
+
+    assert "q8" not in MODES
+    assert "q8" in SCENARIO_MODES
+    assert mode_policy("q8") == "none"
+    assert is_df11("q8") is False
+    assert expected_launches("q8", n_double=19, n_single=38, steps=5) == 0
+
+
+@pytest.mark.parametrize(
+    ("argv", "want"),
+    [
+        (["--scenario", "s.toml", "--mode", "df11", "--round", "1", "--trace"], []),
+        (["--scenario", "s.toml", "--steps", "9"], ["--steps"]),
+        (["--scenario", "s.toml", "--steps=9"], ["--steps"]),
+        (
+            ["--model", "dev", "--size", "512", "--warmup", "1", "--seed", "7"],
+            ["--model", "--size", "--warmup", "--seed"],
+        ),
+        (["--cache-limit", "5", "--wall-budget", "60"], ["--cache-limit", "--wall-budget"]),
+        (["--steps", "1", "--steps", "2"], ["--steps"]),  # named once
+        (["--out", "--steps.json"], []),  # begins with a flag's text but is not that flag
+    ],
+)
+def test_conflicting_flags_names_every_scenario_fixed_flag_given(argv, want):
+    # Bug caught: a fixed flag missing from SCENARIO_FIXED_FLAGS (the scenario would silently win
+    # over the command line, or the other way round), or the `--flag=value` form slipping through.
+    from scripts.bench_flux_step import conflicting_flags
+
+    assert conflicting_flags(argv) == want
+
+
+def test_parse_args_refuses_an_abbreviated_fixed_flag_with_a_scenario(tmp_path, capsys):
+    # Bug caught: argparse's prefix matching left on, so `--step 9` sets --steps unnoticed by the
+    # exact-name conflict check and the scenario run's recipe is changed or silently overridden.
+    import re
+
+    with pytest.raises(SystemExit) as exc:
+        parse_args(_scenario_run_args(tmp_path, "--step", "9"))
+    assert exc.value.code == 2
+    assert re.search(r"--step(?!s)", _error_line(capsys))
+
+
+def test_parse_args_scenario_mode_refuses_fixed_flags(tmp_path, capsys):
+    # Bug caught: a --steps next to --scenario accepted, so the child's JSON claims the scenario's
+    # hash while it ran another step count (or the flag is dropped without a word).
+    with pytest.raises(SystemExit) as exc:
+        parse_args(_scenario_run_args(tmp_path, "--steps", "9"))
+    assert exc.value.code == 2
+    line = _error_line(capsys)
+    assert "--steps" in line
+    assert "--scenario" in line
+
+
+def test_parse_args_scenario_mode_takes_the_settings_from_the_file(tmp_path):
+    # The values are the committed schnell scenario's (bench/scenarios/flux1-schnell-1024.toml).
+    # Bug caught: a scenario run left on the parser defaults (1.4 GB cache limit instead of the
+    # file's 2.5 GB, 3600 s kept by accident), or no hash carried to the key and the JSON.
+    from mlx_dfloat.bench.scenario import load_scenario, scenario_hash
+
+    args = parse_args(_scenario_run_args(tmp_path))
+    assert (args.model, args.size, args.steps, args.warmup, args.seed) == (
+        "schnell",
+        1024,
+        5,
+        2,
+        42,
+    )
+    assert args.cache_limit == 2_500_000_000
+    assert args.wall_budget == 3600.0
+    assert args.scenario_hash == scenario_hash(load_scenario(SCENARIO_FILE))
+    assert args.scenario_spec.df11_revision == SCHNELL_DF11_REVISION
+
+
+def test_parse_args_refuses_q8_without_a_scenario(capsys):
+    # Bug caught: a scenario-free q8 run, which has no pinned base checkpoint to quantize.
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["--mode", "q8", "--out", "r.json", "--df11", "d", "--embeds", "e"])
+    assert exc.value.code == 2
+    line = _error_line(capsys)
+    assert "q8" in line
+    assert "--scenario" in line
+
+
+def test_parse_args_accepts_q8_with_a_scenario(tmp_path):
+    # Bug caught: q8 missing from --mode's choices, so the orchestrator's q8 child cannot start.
+    assert parse_args(_scenario_run_args(tmp_path, mode="q8")).mode == "q8"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ("--scenario", str(SCENARIO_FILE)),
+        ("--tier", "24"),
+    ],
+)
+def test_parse_args_refuses_a_scenario_or_tier_on_the_legacy_orchestration(extra, capsys):
+    # Bug caught: the scenario-free orchestration accepting a scenario or a tier it never forwards
+    # to its children (their JSONs would claim neither).
+    with pytest.raises(SystemExit):
+        parse_args(["--orchestrate", "--out-dir", "o", "--df11", "d", "--embeds", "e", *extra])
+    line = _error_line(capsys)
+    assert "--orchestrate" in line
+    assert extra[0] in line
+
+
+def test_parse_args_refuses_an_unreadable_scenario(tmp_path, capsys):
+    # Bug caught: a DFloatFormatError escaping parse_args as a traceback (exit 1, the bit-mismatch
+    # code) instead of a usage error naming the file.
+    bad = tmp_path / "bad.toml"
+    bad.write_text('name = "x"\n')
+    with pytest.raises(SystemExit) as exc:
+        parse_args(
+            ["--scenario", str(bad), "--mode", "df11", "--out", "r", "--df11", "d", "--embeds", "e"]
+        )
+    assert exc.value.code == 2
+    line = _error_line(capsys)
+    assert "bad.toml" in line
+    assert "missing" in line
+
+
+def test_parse_args_refuses_a_tier_below_one(capsys):
+    # Bug caught: --tier 0 reaching tier_limits (a zero-byte budget; the watchdog aborts at once).
+    with pytest.raises(SystemExit):
+        parse_args(["--mode", "df11", "--out", "r", "--df11", "d", "--embeds", "e", "--tier", "0"])
+    assert "--tier must be >= 1" in _error_line(capsys)
+
+
+def test_legacy_orchestrate_still_runs_the_five_modes():
+    # Bug caught: q8 (or any scenario-only mode) reaching the legacy orchestration's default list or
+    # its --modes choices.
+    args = parse_args(["--orchestrate", "--out-dir", "o", "--df11", "d", "--embeds", "e"])
+    assert args.modes == list(MODES)
+    with pytest.raises(SystemExit):
+        parse_args(
+            ["--orchestrate", "--out-dir", "o", "--df11", "d", "--embeds", "e", "--modes", "q8"]
+        )
+
+
+def test_settings_from_scenario_maps_every_keyed_field():
+    # Bug caught: a keyed setting not taken from the file (the run would use the parser default
+    # while its key claims the scenario), or a field mapped to the wrong option.
+    from scripts.bench_flux_step import settings_from_scenario
+
+    from mlx_dfloat.bench.scenario import Scenario
+
+    scenario = Scenario(
+        name="t",
+        model="dev",
+        df11_repo="o/d",
+        df11_revision="a" * 40,
+        base_repo="o/b",
+        base_revision="b" * 40,
+        prompt="p",
+        seed=7,
+        steps=3,
+        warmup=1,
+        size=512,
+        rounds=2,
+        cache_limit_bytes=2_000_000_001,
+        conditions=("df11", "control"),
+        wall_budget_s=900.0,
+    )
+    assert settings_from_scenario(scenario) == {
+        "model": "dev",
+        "size": 512,
+        "steps": 3,
+        "warmup": 1,
+        "seed": 7,
+        "cache_limit": 2_000_000_001,
+        "wall_budget": 900.0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("text", "want"),
+    [
+        ("/Users/x/hf/snap", "~/hf/snap"),
+        ("/Users/x", "~"),
+        ("/Users/xy/hf", "/Users/xy/hf"),  # another user whose name extends this one
+        ("/opt/Users/x/hf", "/opt/Users/x/hf"),  # the home path not at the start
+    ],
+)
+def test_redact_home_replaces_only_a_leading_home_directory(text, want):
+    # Bug caught: a bare prefix match (/Users/xy redacted as ~y) or a replace anywhere in the text.
+    from scripts.bench_flux_step import redact_home
+
+    assert redact_home(text, home="/Users/x") == want
+
+
+def test_run_key_includes_the_scenario_hash_and_the_tier_and_redacts_home():
+    # Bug caught: a result file that carries the user's home path (committed results must not),
+    # or a key without the scenario hash or the tier (a tier-24 child would resume into the
+    # 32 GB rows' files, or a changed recipe into the old one's).
+    key = run_key(
+        **{
+            **KEY_KWARGS,
+            "df11": Path.home() / "hf" / "snap",
+            "embeds": Path.home() / "runs" / "e.safetensors",
+        },
+        scenario_hash="f" * 64,
+        tier_gb=24,
+    )
+    assert key["df11"] == "~/hf/snap"
+    assert key["embeds"] == "~/runs/e.safetensors"
+    assert key["scenario_hash"] == "f" * 64
+    assert key["tier_gb"] == 24
+
+
+def test_check_df11_pin():
+    # Bug caught: a scenario child timing a checkpoint other than the pinned DF11 revision.
+    from scripts.bench_flux_step import check_df11_pin
+
+    check_df11_pin(Path("/hub/snapshots") / SCHNELL_DF11_REVISION, SCHNELL_DF11_REVISION)
+    with pytest.raises(BenchError, match=SCHNELL_DF11_REVISION):
+        check_df11_pin(Path("/hub/snapshots/main"), SCHNELL_DF11_REVISION)
+
+
+def test_check_df11_pin_names_the_directory_without_the_home_path():
+    # Bug caught: the refusal (written into the failed child's JSON as `error`) carrying the
+    # absolute snapshot path, so a committed result names the user.
+    from scripts.bench_flux_step import check_df11_pin
+
+    with pytest.raises(BenchError) as exc:
+        check_df11_pin(Path.home() / "hub" / "main", SCHNELL_DF11_REVISION)
+    assert "~/hub/main" in str(exc.value)
+    assert str(Path.home()) not in str(exc.value)
+
+
+def test_embeds_record_and_the_key_redact_the_home_path_in_the_metadata():
+    # encode_prompt records the resolved snapshot root (under ~/.cache) in the metadata.
+    # Bug caught: that root, or the embeddings path, written verbatim into the key or the run
+    # JSON's `embeds` record, so every committed child JSON names the user.
+    from scripts.bench_flux_step import embeds_record
+
+    meta = {"root": str(Path.home() / ".cache" / "hf" / "snap"), "prompt": "a lighthouse"}
+    record = embeds_record(Path.home() / "runs" / "e.safetensors", meta)
+    assert record == {
+        "path": "~/runs/e.safetensors",
+        "metadata": {"root": "~/.cache/hf/snap", "prompt": "a lighthouse"},
+    }
+    key = run_key(**{**KEY_KWARGS, "embeds_meta": meta})
+    assert key["embeds_meta"] == {"root": "~/.cache/hf/snap", "prompt": "a lighthouse"}
+
+
+def test_limits_for_process_gives_the_host_record_without_a_tier_and_capped_with_one():
+    # Worked by hand: 32 GiB host, recommended 24 GiB. Host tier 32: MEASURED, reserve 2 GiB (above
+    # 24 GB), ceiling 22 GiB. Tier 24: recommended 24 * 2/3 = 16 GiB, reserve 1.5 GiB, ceiling
+    # 14.5 GiB, CAPPED. Bug caught: a missing record without --tier, or the host tier labelled CAPPED.
+    from scripts.bench_flux_step import limits_for_process
+
+    from mlx_dfloat.errors import DFloatUnsupportedError
+
+    host = limits_for_process(None, host_ram_bytes=32 * GIB, host_recommended_bytes=HOST_REC)
+    assert (host.tier_gb, host.is_host, host.label) == (32, True, "MEASURED")
+    assert host.ceiling_bytes == 22 * GIB
+    capped = limits_for_process(24, host_ram_bytes=32 * GIB, host_recommended_bytes=HOST_REC)
+    assert (capped.tier_gb, capped.is_host, capped.label) == (24, False, "CAPPED")
+    assert capped.ceiling_bytes == int(14.5 * GIB)
+    with pytest.raises(DFloatUnsupportedError):
+        limits_for_process(48, host_ram_bytes=32 * GIB, host_recommended_bytes=HOST_REC)
+
+
+def _measured(seen):
+    def measure(args, watchdog, *, limits_recorded):
+        seen["limits_recorded"] = limits_recorded
+        return {
+            "exit_code": 0,
+            "policy": "per-block",
+            "median_s": 1.0,
+            "spread": 0.0,
+            "verify_median_s": 0.0,
+            "launches_expected_per_step": 0,
+            "footprint_peak_bytes": 1,
+        }
+
+    return measure
+
+
+@pytest.fixture
+def fake_limits(monkeypatch):
+    """Record the cap installers instead of running them; the fake apply sets the tier's cache limit
+    the way the real one does, so a later set_cache_limit is what the effective value shows."""
+    import mlx.core as mx
+    import scripts.bench_flux_step as bfs
+
+    calls = []
+
+    def install():
+        calls.append("install_memory_caps")
+        return (20, 22)
+
+    def apply(limits):
+        calls.append(("apply_limits", limits.tier_gb))
+        mx.set_cache_limit(limits.cache_limit_bytes)
+        return {}
+
+    monkeypatch.setattr(bfs, "install_memory_caps", install)
+    monkeypatch.setattr(bfs, "apply_limits", apply)
+    monkeypatch.setattr(bfs, "default_ceiling", lambda: 30 * GIB + 7)
+    monkeypatch.setattr(
+        bfs,
+        "host_memory",
+        lambda: {"host_ram_bytes": 32 * GIB, "host_recommended_bytes": HOST_REC},
+    )
+    return calls
+
+
+def test_run_one_records_the_limits_effective_values_and_label(
+    tmp_path, restore_cache_limit, fake_limits
+):
+    # Bug caught (host): no limits record without --tier, the host tier labelled CAPPED, or the
+    # tier defaults installed on the host. Bug caught (tier 24): the host caps installed over the
+    # tier's limits, the host ceiling kept (the run would never abort at the tier's budget), or the
+    # scenario's cache limit set before apply_limits (the tier's 15.2 GiB would stay in force).
+    from scripts.bench_flux_step import limits_for_process, run_one
+
+    args = parse_args(_scenario_run_args(tmp_path))
+    seen = {}
+    assert run_one(args, measure=_measured(seen), key=lambda a: {}, cache_limit=2_500_000_000) == 0
+    host = json.loads((tmp_path / "r.json").read_text())
+    assert fake_limits == ["install_memory_caps"]
+    assert host["limits"]["applied"] == "host-caps"
+    assert host["label"] == "MEASURED"
+    assert host["tier_gb"] == 32
+    assert host["watchdog_ceiling_bytes"] == 30 * GIB + 7
+    assert host["memory_caps_gb"] == [20, 22]
+    assert host["limits"]["effective"]["cache_limit_bytes"] == 2_500_000_000
+    assert host["limits"]["tier"]["tier_gb"] == 32
+    assert host["scenario_hash"] == args.scenario_hash
+    assert seen["limits_recorded"] is True
+
+    fake_limits.clear()
+    tier = limits_for_process(24, host_ram_bytes=32 * GIB, host_recommended_bytes=HOST_REC)
+    code = run_one(
+        args, measure=_measured(seen), key=lambda a: {}, cache_limit=2_500_000_000, limits=tier
+    )
+    capped = json.loads((tmp_path / "r.json").read_text())
+    assert code == 0
+    assert fake_limits == [("apply_limits", 24)]
+    assert capped["limits"]["applied"] == "tier-defaults"
+    assert capped["label"] == "CAPPED"
+    assert capped["tier_gb"] == 24
+    assert capped["watchdog_ceiling_bytes"] == int(14.5 * GIB)
+    assert capped["memory_caps_gb"] == [0, 0]
+    assert capped["provenance"]["memory_caps_gb"] == [0, 0]
+    assert capped["limits"]["effective"]["cache_limit_bytes"] == 2_500_000_000
+    assert seen["limits_recorded"] is True
+
+
+def test_run_one_refuses_a_df11_dir_off_the_scenario_pin(
+    tmp_path, restore_cache_limit, fake_limits
+):
+    # Bug caught: the pin never checked by the child, so a scenario JSON times another checkpoint.
+    from scripts.bench_flux_step import run_one
+
+    args = parse_args(_scenario_run_args(tmp_path, df11=tmp_path / "main"))
+    seen = {}
+    assert run_one(args, measure=_measured(seen), key=lambda a: {}) == 2
+    written = json.loads((tmp_path / "r.json").read_text())
+    assert SCHNELL_DF11_REVISION in written["error"]
+    assert seen == {}  # nothing measured
+
+
+class _Q8Transformer:
+    """mflux's plain transformer as the q8 mode sees it: callable, no seam (no attach, no verify_step)."""
+
+    def __call__(self, *, t, config, hidden_states, prompt_embeds, pooled_prompt_embeds):
+        return hidden_states * 0.5
+
+
+def test_run_mode_q8_times_the_quantized_transformer_from_the_pinned_base(tmp_path, monkeypatch):
+    # Bug caught: the q8 child opening the DF11 checkpoint or loading its resident set (16 GB it never
+    # uses, and a footprint that is not q8's), resolving the base off the scenario's pin or with more
+    # than the transformer's files, building at reduced depth, attaching a seam, or a record without
+    # the q8 settings the report cites (bits, group size, eval policy, cache limit).
+    import mlx.core as mx
+    import scripts.bench_flux_step as bfs
+
+    snap = Path.home() / "hub" / BASE_REVISION
+    seen = {}
+
+    def pinned(repo, revision, *, allow_patterns):
+        seen["pinned"] = (repo, revision, list(allow_patterns))
+        return snap
+
+    def build(model, root, *, n_double, n_single):
+        seen["build"] = (model, root, n_double, n_single)
+        return _Q8Transformer()
+
+    def refuse(*a, **k):
+        raise AssertionError("the q8 mode touched the DF11 checkpoint")
+
+    inputs = (
+        _FakeConfig(_FakeScheduler()),
+        mx.ones((1, 4, 8), dtype=mx.float32),
+        mx.zeros((1, 2, 4)),
+        mx.zeros((1, 4)),
+        {"latent_dtype": "mlx.core.float32"},
+    )
+    monkeypatch.setattr(bfs, "pinned_snapshot", pinned)
+    monkeypatch.setattr(bfs, "build_q8_transformer", build)
+    monkeypatch.setattr(bfs, "open_checkpoint", refuse)
+    monkeypatch.setattr(bfs, "load_resident_set", refuse)
+    monkeypatch.setattr(bfs, "build_transformer", refuse)
+    monkeypatch.setattr(bfs, "step_inputs", lambda args: inputs)
+    args = parse_args(_scenario_run_args(tmp_path, mode="q8"))
+    out = bfs.run_mode(args, _FakeWatchdog(), limits_recorded=True)
+    assert seen["pinned"] == (
+        "black-forest-labs/FLUX.1-schnell",
+        BASE_REVISION,
+        ["transformer/*"],
+    )
+    assert seen["build"] == ("schnell", snap, 19, 38)
+    assert out["mode"] == "q8"
+    assert out["policy"] == "none"
+    assert out["compressed_set"] is None
+    assert out["q8"] == {
+        "base_root": f"~/hub/{BASE_REVISION}",
+        "bits": 8,
+        "group_size": 64,
+        "eval_policy": "none",
+        "cache_limit_bytes": 2500000000,
+    }
+    assert "load_q8_s" in out["timings_s"]
+    assert "load_resident_s" not in out["timings_s"]
+    assert out["launches_per_step"] == [0] * 7  # 2 warm-up + 5 timed, none of them launching
+    assert out["verify_s"] == [0.0] * 5
+    assert out["latent_dtype"] == "mlx.core.float32"
+
+
+def test_run_mode_q8_refuses_trace_before_building(tmp_path, monkeypatch):
+    # Bug caught: --trace accepted for q8, so the run either crashes in the report (no seam recorded
+    # a step) or writes "traced" for a run nothing traced; refused before the base is resolved.
+    import scripts.bench_flux_step as bfs
+
+    def refuse(*a, **k):
+        raise AssertionError("resolved the base for a run that must be refused")
+
+    monkeypatch.setattr(bfs, "pinned_snapshot", refuse)
+    args = parse_args(_scenario_run_args(tmp_path, "--trace", mode="q8"))
+    with pytest.raises(BenchError, match="trace"):
+        bfs.run_mode(args, _FakeWatchdog(), limits_recorded=True)
+
+
+def test_make_provider_refuses_the_q8_mode():
+    # Bug caught: q8 falling through to the control branch (not a DF11 mode), which would decode two
+    # DF11 blocks and hand a ReuseProvider to a run that must never touch the checkpoint.
+    import numpy as np
+    from tests._flux_fakes import FLUX_TABLE
+
+    ckpt, groups, shapes, _source = _fake_rig(np.random.default_rng(6))
+    calls = []
+    with pytest.raises(BenchError, match="q8"):
+        make_provider(
+            "q8",
+            ckpt,
+            groups,
+            shapes,
+            decode=_counting_reference_decode(calls),
+            name_map=FLUX_TABLE,
+        )
+    assert calls == []
+
+
+def test_denoise_step_on_a_transformer_without_verify_step_reports_no_verify_time():
+    # Bug caught: `verify_step()` called unconditionally (mflux's plain q8 transformer has none, so
+    # every q8 step raises AttributeError), or a verify time other than 0.0 recorded for it.
+    import mlx.core as mx
+    from scripts.bench_flux_step import denoise_step
+
+    latents, took, verify = denoise_step(
+        _Q8Transformer(),
+        _FakeConfig(_FakeScheduler()),
+        mx.ones((1, 4, 8), dtype=mx.float32),
+        mx.zeros((1, 2, 4)),
+        mx.zeros((1, 4)),
+        0,
+    )
+    assert verify == 0.0
+    assert took > 0.0
+    assert latents.tolist() == [[[0.5] * 8] * 4]  # 1 - 0.5, the fake scheduler's step
+
+
+def test_time_steps_passes_a_run_with_no_compressed_set():
+    # Bug caught: compressed_loaded=None (the q8 mode) failing the parity check before any step is
+    # timed.
+    provider = _FakeProvider()
+    out = _time(_FakeTransformer(provider, [0] * 5), provider, per_step=0, loaded=None)
+    assert len(out["step_s"]) == 3
+
+
+def test_main_hands_run_one_the_tier_limits_and_refuses_a_tier_above_the_host(
+    tmp_path, monkeypatch, capsys
+):
+    # Bug caught: --tier parsed but never turned into limits (the child runs under the host caps
+    # while its key says tier 24), or a tier above the host escaping as a traceback (exit 1).
+    import scripts.bench_flux_step as bfs
+
+    seen = {}
+
+    def run_one(args, **kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(bfs, "run_one", run_one)
+    monkeypatch.setattr(
+        bfs,
+        "host_memory",
+        lambda: {"host_ram_bytes": 32 * GIB, "host_recommended_bytes": HOST_REC},
+    )
+    assert bfs.main(_scenario_run_args(tmp_path, "--tier", "24")) == 0
+    assert seen["limits"].tier_gb == 24
+    assert seen["limits"].label == "CAPPED"
+    seen.clear()
+    assert bfs.main(_scenario_run_args(tmp_path)) == 0
+    assert seen["limits"] is None  # run_one records the host tier itself
+    assert bfs.main(_scenario_run_args(tmp_path, "--tier", "48")) == 2
+    assert "48" in capsys.readouterr().err
+
+
+def test_current_key_carries_the_scenario_hash_and_the_tier(tmp_path, monkeypatch):
+    # Bug caught: a child key without the tier or the hash, so the orchestrator's key (which has
+    # them) reads every finished child as a conflict, or a tier-24 child as a 32 GB one.
+    import scripts.bench_flux_step as bfs
+
+    monkeypatch.setattr(bfs, "embeds_metadata", lambda path: {"synthetic": "true"})
+    monkeypatch.setattr(bfs, "source_hash", lambda: "abc")
+    args = parse_args(_scenario_run_args(tmp_path, "--tier", "24"))
+    key = bfs.current_key(args)
+    assert key["tier_gb"] == 24
+    assert key["scenario_hash"] == args.scenario_hash
+    assert key["cache_limit"] == 2_500_000_000
+
+
+def _host(monkeypatch, bfs, ram_gb):
+    monkeypatch.setattr(bfs, "embeds_metadata", lambda path: {"synthetic": "true"})
+    monkeypatch.setattr(bfs, "source_hash", lambda: "abc")
+    monkeypatch.setattr(
+        bfs,
+        "host_memory",
+        lambda: {"host_ram_bytes": ram_gb * GIB, "host_recommended_bytes": ram_gb * GIB * 3 // 4},
+    )
+
+
+def test_current_key_keys_the_resolved_tier_so_the_host_tier_matches_no_tier(tmp_path, monkeypatch):
+    # Bug caught: the key carrying the requested --tier (None without it), so `--tier 32` on a
+    # 32 GB host (the same limits) reads as a conflict with a no-tier run of the same recipe.
+    import scripts.bench_flux_step as bfs
+
+    _host(monkeypatch, bfs, 32)
+    plain = bfs.current_key(parse_args(_scenario_run_args(tmp_path)))
+    tiered = bfs.current_key(parse_args(_scenario_run_args(tmp_path, "--tier", "32")))
+    assert plain["tier_gb"] == 32
+    assert plain == tiered
+
+
+def test_current_key_of_another_host_tier_differs(tmp_path, monkeypatch):
+    # Bug caught: a no-tier key with nothing host-specific in it (paths are redacted), so a
+    # results directory measured on this 32 GB Mac resumes as complete on a 64 GB one.
+    import scripts.bench_flux_step as bfs
+
+    _host(monkeypatch, bfs, 32)
+    here = bfs.current_key(parse_args(_scenario_run_args(tmp_path)))
+    _host(monkeypatch, bfs, 64)
+    there = bfs.current_key(parse_args(_scenario_run_args(tmp_path)))
+    assert there["tier_gb"] == 64
+    assert resume_key_diff(here, there) == ["tier_gb"]

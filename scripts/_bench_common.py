@@ -11,6 +11,7 @@ out of this run's way.
 This module imports none of the scripts it serves at module level, so any of them may import it.
 """
 
+import datetime
 import json
 import platform
 import re
@@ -23,8 +24,6 @@ from importlib import metadata
 from pathlib import Path
 
 import mlx.core as mx
-
-from mlx_dfloat._memory_caps import install_memory_caps
 
 _REPO = Path(__file__).resolve().parents[1]
 _PERCENT = re.compile(r"(\d+)%")
@@ -108,9 +107,9 @@ def per_dispatch_guard(bytes_out: int, measured_bps: float, limit_s: float = 0.2
         )
 
 
-def parity_conditions(**checks: bool) -> list[str]:
-    """The names of the checks that failed (falsy values), in argument order."""
-    return [name for name, ok in checks.items() if not ok]
+def parity_conditions(**checks: bool | None) -> list[str]:
+    """The names of the checks that failed (falsy values), in argument order; None is not applicable."""
+    return [name for name, ok in checks.items() if ok is not None and not ok]
 
 
 def bench_exit_code(*, mismatched: int, errors: int) -> int:
@@ -273,13 +272,15 @@ def _mflux_version() -> str | None:
         return None
 
 
-def provenance() -> dict[str, object]:
+def provenance(caps: Sequence[int]) -> dict[str, object]:
     """The machine and code state a bench result was measured on.
 
     ``cache_limit`` is read by setting a probe limit and restoring the previous one straight away
     (MLX exposes no getter; ``mx.set_cache_limit`` only swaps the value and returns the old one).
-    ``memory_caps_gb`` comes from ``install_memory_caps()``, which is idempotent: the bench scripts
-    have already installed the same caps. ``power["ac"]`` is None when ``pmset`` cannot run.
+    ``memory_caps_gb`` records ``caps``, the (wired, memory) GB the caller installed (``(0, 0)``
+    when it installed none, as a capped run or an orchestrator does); nothing is installed here,
+    so a capped run's tier limits stay in force. ``date`` is the ISO date of the run.
+    ``power["ac"]`` is None when ``pmset`` cannot run.
     """
     from scripts.verify_checkpoint import source_hash  # lazy: verify_checkpoint imports this module
 
@@ -293,8 +294,9 @@ def provenance() -> dict[str, object]:
         "mflux": _mflux_version(),
         "macos": platform.mac_ver()[0],
         "device_info": dict(mx.device_info()),
-        "memory_caps_gb": list(install_memory_caps()),
+        "memory_caps_gb": list(caps),
         "cache_limit": cache_limit,
         "cache_memory": cache_memory,
         "power": _power(),
+        "date": datetime.date.today().isoformat(),
     }

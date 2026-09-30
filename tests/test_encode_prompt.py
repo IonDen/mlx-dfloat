@@ -50,3 +50,23 @@ def test_metadata_values_are_all_strings_and_record_the_run():
     assert md["prompt"] == DEFAULT_PROMPT
     assert md["token_length"] == "256"
     assert "mflux" in md
+
+
+@pytest.mark.parametrize(
+    ("root", "synthetic", "want"),
+    [
+        (
+            "/hub/models--x/snapshots/741f7c3ce8b383c54771c7003378a50191e9efe9",
+            False,
+            "741f7c3ce8b383c54771c7003378a50191e9efe9",
+        ),
+        ("synthetic", True, "synthetic"),
+    ],
+)
+def test_metadata_records_the_base_revision_from_the_root_dir_name(root, synthetic, want):
+    # Bug caught: no base_revision (the scenario orchestrator could not tell embeddings from another
+    # encoder snapshot apart and would reuse them), or the whole root path recorded in its place.
+    md = build_metadata(
+        model="schnell", seed=42, prompt="p", root=root, token_length=256, synthetic=synthetic
+    )
+    assert md["base_revision"] == want

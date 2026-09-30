@@ -114,6 +114,22 @@ because it would need an 8 GB caption encoder resident next to the compressed tr
 accepted and ignored, matching mflux's own FLUX.1 behavior. The command never overwrites an existing output file;
 it picks a new name instead, and the report names the file it wrote.
 
+## Measured numbers
+
+The blocks below are generated from the files under `bench/results/` by `scripts/bench_table.py`.
+
+<!-- bench:tier-table -->
+No result files yet.
+<!-- /bench:tier-table -->
+
+<!-- bench:overhead -->
+No result files yet.
+<!-- /bench:overhead -->
+
+<!-- bench:harness-proof -->
+No result files yet.
+<!-- /bench:harness-proof -->
+
 ## Relationship to DFloat11
 
 This is not a fork and not affiliated with the DFloat11 authors. It reads the checkpoint format they publish. Credit
