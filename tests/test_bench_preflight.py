@@ -11,6 +11,7 @@ from mlx_dfloat.bench.preflight import (
     parse_memory_pressure,
     parse_ps,
     parse_therm,
+    preflight_exclude,
     sample,
 )
 
@@ -66,7 +67,7 @@ PS_REAL_HEAD = (
 PS = (
     "  123  2048 /usr/bin/python3 -m scripts.bench_flux_step --mode df11\n"
     "  124 4194304 /Users/x/.venv/bin/python -m scripts.bench_flux_step --mode control\n"
-    "  125 4194304 /Applications/ClaudeCode.app/Contents/MacOS/claude\n"
+    "  125 4194304 /opt/indexer/bin/indexer --generate-symbols\n"
     "  126 4194304 /usr/bin/ssh host\n"
 )
 
@@ -113,19 +114,40 @@ def test_parse_memory_pressure_reads_the_free_percentage_not_a_page_count():
     assert parse_memory_pressure("garbage") is None
 
 
-def test_parse_ps_lists_heavy_processes_above_the_threshold_and_excludes_the_editor():
-    # Red if: RSS is read as bytes instead of KiB (nothing crosses 1 GiB), the exclude patterns
-    # are ignored (this session's own process reads as busy), or a non-matching command is listed.
+def test_parse_ps_lists_heavy_processes_above_the_threshold_by_pid_and_executable():
+    # Red if: RSS is read as bytes instead of KiB (nothing crosses 1 GiB), a non-matching command is
+    # listed, or the full command line (arguments, home paths) is recorded instead of the pid and
+    # the executable's name.
     busy = parse_ps(PS, patterns=HEAVY_PATTERNS, min_rss_bytes=GIB)
-    assert busy == ("/Users/x/.venv/bin/python -m scripts.bench_flux_step --mode control",)
+    assert busy == ("python (pid 124)", "indexer (pid 125)")
+
+
+def test_parse_ps_skips_commands_that_contain_an_excluded_substring():
+    # Red if: the exclude list is ignored, or it also hides a heavy process it does not name.
+    busy = parse_ps(PS, patterns=HEAVY_PATTERNS, exclude=("indexer",))
+    assert busy == ("python (pid 124)",)
+
+
+@pytest.mark.parametrize(
+    ("value", "want"),
+    [
+        (None, ()),
+        ("", ()),
+        ("indexer", ("indexer",)),
+        (" indexer , /opt/x ,,", ("indexer", "/opt/x")),
+    ],
+)
+def test_preflight_exclude_reads_comma_separated_substrings_from_the_environment(value, want):
+    # Red if: a default list is shipped (an unset variable must exclude nothing), blanks or
+    # surrounding spaces are kept (an empty substring would exclude every process).
+    environ = {} if value is None else {"MLX_DFLOAT_PREFLIGHT_EXCLUDE": value}
+    assert preflight_exclude(environ) == want
 
 
 def test_parse_ps_threshold_is_inclusive_and_real_output_lists_nothing():
     # Red if: the comparison is `>` instead of `>=` (1 GiB == 1048576 KiB), or system daemons match.
     at_line = "  7 1048576 /usr/bin/python -m scripts.bench_flux_step\n"
-    assert parse_ps(at_line, patterns=HEAVY_PATTERNS) == (
-        "/usr/bin/python -m scripts.bench_flux_step",
-    )
+    assert parse_ps(at_line, patterns=HEAVY_PATTERNS) == ("python (pid 7)",)
     below = "  7 1048575 /usr/bin/python -m scripts.bench_flux_step\n"
     assert parse_ps(below, patterns=HEAVY_PATTERNS) == ()
     assert parse_ps(PS_REAL_HEAD, patterns=HEAVY_PATTERNS, min_rss_bytes=0) == ()
@@ -259,7 +281,7 @@ def test_sample_assembles_the_parsed_probes():
     assert got.cpu_speed_limit == 65
     assert got.lid_open is True
     assert got.memory_free_percent == 82
-    assert got.busy_processes == ("/usr/bin/python -m scripts.bench_flux_step",)
+    assert got.busy_processes == ("python (pid 9)",)
     assert isinstance(got.free_disk_bytes, int)
     assert got.free_disk_bytes > 0
     assert len(seen) == 6
@@ -290,3 +312,13 @@ def test_as_dict_carries_every_field():
         "memory_free_percent",
         "busy_processes",
     }
+
+
+def test_sample_applies_the_exclude_list_from_the_environment(monkeypatch):
+    # Red if: sample() ignores MLX_DFLOAT_PREFLIGHT_EXCLUDE, so a process the user named still
+    # trips the busy gate.
+    ps_text = "  9 4194304 /opt/indexer/bin/indexer --generate-symbols\n"
+    monkeypatch.setenv("MLX_DFLOAT_PREFLIGHT_EXCLUDE", "indexer")
+    assert sample(run=_runner({"ps": ps_text})).busy_processes == ()
+    monkeypatch.delenv("MLX_DFLOAT_PREFLIGHT_EXCLUDE")
+    assert sample(run=_runner({"ps": ps_text})).busy_processes == ("indexer (pid 9)",)

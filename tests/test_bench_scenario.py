@@ -82,26 +82,75 @@ def test_a_missing_required_field_is_refused_by_name():
         scenario_from_mapping(data)
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("prompt", "another"),
-        ("cache_limit_bytes", 1),
-        ("base_revision", "0" * 40),
-        ("conditions", ["df11"]),
-        ("steps", 6),
-        ("size", 512),
-        ("seed", 43),
-        ("name", "x"),
-        ("wall_budget_s", 1),
-    ],
-)
-def test_the_hash_changes_with_every_field(field, value):
+# One valid change per Scenario field; a field added to Scenario without an entry here fails the
+# parametrized test below with a KeyError instead of going unchecked.
+_HASH_CHANGES = {
+    "name": "x",
+    "model": "dev",
+    "df11_repo": "DFloat11/FLUX.1-dev-DF11",
+    "df11_revision": "1" * 40,
+    "base_repo": "black-forest-labs/FLUX.1-dev",
+    "base_revision": "0" * 40,
+    "prompt": "another",
+    "seed": 43,
+    "steps": 6,
+    "warmup": 3,
+    "size": 512,
+    "rounds": 2,
+    "cache_limit_bytes": 1,
+    "conditions": ["df11"],
+    "wall_budget_s": 1,
+}
+
+
+@pytest.mark.parametrize("field", [f.name for f in dataclasses.fields(Scenario)])
+def test_the_hash_changes_with_every_field(field):
     # Bug caught: a field left out of the hashed dict (its change would not invalidate a result).
     a = scenario_from_mapping(GOOD)
-    b = scenario_from_mapping({**GOOD, field: value})
+    b = scenario_from_mapping({**GOOD, field: _HASH_CHANGES[field]})
+    assert getattr(a, field) != getattr(b, field)
     assert scenario_hash(a) != scenario_hash(b)
     assert len(scenario_hash(a)) == 64
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "../escape",
+        "a/b",
+        "Flux1",
+        "",
+        ".hidden",
+        "-dash",
+        "a..b",
+        "tiers",
+        "harness-proof",
+        "a" * 65,
+        "name with space",
+    ],
+)
+def test_a_name_that_is_not_a_plain_directory_name_is_refused(name):
+    # Bug caught: the scenario name used as a directory under the results root unchecked, so a
+    # name like "../escape" writes outside it, or "tiers" / "harness-proof" mixes a scenario into
+    # the table's own inputs.
+    with pytest.raises(DFloatFormatError, match="name"):
+        scenario_from_mapping({**GOOD, "name": name})
+
+
+@pytest.mark.parametrize("name", ["a", "0", "a" * 64, "flux1-dev_1024.v2"])
+def test_a_plain_name_up_to_64_characters_is_accepted(name):
+    # Bug caught: the length bound off by one (64 refused) or a valid character refused.
+    assert scenario_from_mapping({**GOOD, "name": name}).name == name
+
+
+def test_a_cache_limit_mlx_cannot_take_is_refused():
+    # Bug caught: a cache limit at or above 2**63 accepted here and failing inside the child's
+    # mx.set_cache_limit (an overflow after the scenario was already accepted).
+    with pytest.raises(DFloatFormatError, match="cache_limit_bytes"):
+        scenario_from_mapping({**GOOD, "cache_limit_bytes": 2**63})
+    assert scenario_from_mapping({**GOOD, "cache_limit_bytes": 2**63 - 1}).cache_limit_bytes == (
+        2**63 - 1
+    )
 
 
 def test_the_hash_does_not_depend_on_key_order():

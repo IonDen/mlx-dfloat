@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import mlx.core as mx
+import mlx.nn as nn
 from huggingface_hub import snapshot_download
 from huggingface_hub.errors import LocalEntryNotFoundError
 
@@ -27,6 +28,7 @@ from mlx_dfloat.mflux import require_mflux
 
 BITS = 8
 GROUP_SIZE = 64  # mlx's affine default, which mflux's single-component applier leaves in place
+MODE = "affine"
 MODELS: tuple[str, ...] = ("schnell", "dev")
 
 Loader = Callable[[Any, Path], Any]
@@ -146,6 +148,26 @@ def _mflux_transformer(model: str, n_double: int, n_single: int) -> Any:
     return Transformer(
         config, num_transformer_blocks=n_double, num_single_transformer_blocks=n_single
     )
+
+
+def q8_quantization(transformer: Any) -> dict[str, Any]:
+    """The quantization the built transformer really carries, read off its first block's first QuantizedLinear.
+
+    Raises:
+        DFloatIntegrationError: The block holds no quantized Linear, or it is not 8-bit, group
+            size 64, affine (``BITS``, ``GROUP_SIZE``, ``MODE``).
+    """
+    block = transformer.transformer_blocks[0]
+    layer = next((m for _, m in block.named_modules() if isinstance(m, nn.QuantizedLinear)), None)
+    if layer is None:
+        raise DFloatIntegrationError("the q8 transformer's first block has no quantized Linear")
+    found = {"bits": int(layer.bits), "group_size": int(layer.group_size), "mode": str(layer.mode)}
+    if (found["bits"], found["group_size"], found["mode"]) != (BITS, GROUP_SIZE, MODE):
+        raise DFloatIntegrationError(
+            f"the q8 transformer was built as {found}, not {BITS}-bit, group size {GROUP_SIZE}, "
+            f"{MODE}"
+        )
+    return found
 
 
 def evaluate_by_block(transformer: Any) -> None:

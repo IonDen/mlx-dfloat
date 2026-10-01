@@ -43,13 +43,15 @@ scenario file (``mlx_dfloat.bench.scenario``); giving any of those flags as well
 (prefix abbreviations are off, so ``--step`` cannot slip past the check). The child refuses a
 ``--df11`` directory whose name is not the scenario's pinned DF11 revision, and its key and JSON
 carry the scenario hash. ``q8`` is a scenario-only mode (``SCENARIO_MODES``): mflux's transformer
-quantized to 8 bits at load, no decode launches, no eval inside the step. ``--tier GB`` (single
+quantized to 8 bits at load (the record carries the bits, group size and mode read off a built
+block, refused unless 8 / 64 / affine), no decode launches, no eval inside the step. ``--tier GB`` (single
 runs only) emulates a smaller Mac: the tier's MLX defaults instead of the host caps, and a
 watchdog ceiling at the tier's budget minus its reserve (``mlx_dfloat.bench.capped``); the host's
 own tier keeps the host caps. Every child JSON carries a ``limits`` record (the tier's numbers,
 the limits in force after the cache limit was set, and which path installed them), its ``label``
 (MEASURED for the host tier, CAPPED below it), ``tier_gb``, ``scenario_hash``, and the watchdog's
-watched peak (``step_watched_peak_bytes``, ``watched_peak_bytes``). Home-directory prefixes in the
+watched peak (``step_watched_peak_bytes``, ``watched_peak_bytes``) and its MLX active + cache peak
+over the timed steps (``step_watched_mlx_peak_bytes``). Home-directory prefixes in the
 key and the embeddings path are written as ``~``.
 
 ``--orchestrate`` runs the five modes as subprocesses, interleaved per round in the order
@@ -116,12 +118,13 @@ try:
         load_resident_set,
         summarize_trace,
     )
-    from scripts._q8_rig import BITS, GROUP_SIZE, build_q8_transformer, pinned_snapshot
+    from scripts._q8_rig import build_q8_transformer, pinned_snapshot, q8_quantization
     from scripts._watchdog import Watchdog, default_ceiling, phys_footprint, watched_memory
     from scripts.verify_checkpoint import source_hash
 
     from mlx_dfloat._memory_caps import install_memory_caps
     from mlx_dfloat.bench.capped import (
+        GIB,
         TierLimits,
         current_limits,
         host_tier_gb,
@@ -228,15 +231,34 @@ def expected_launches(mode: str, *, n_double: int, n_single: int, steps: int) ->
     return (n_double + n_single) * steps if is_df11(mode) else 0
 
 
-def limits_in_force(caps: Sequence[int]) -> bool:
-    """Whether both memory caps installed (non-zero GB).
+def requested_limits(
+    limits: TierLimits, caps: Sequence[int], cache_limit: int
+) -> dict[str, int] | None:
+    """The memory, wired and cache limits this process asked MLX for; None when a cap failed.
 
-    ``caps`` is what ``install_memory_caps`` returned; a 0 means that cap failed to install. The
-    MLX cache limit is not part of the condition: mlx 0.32.2 has no getter (``set_cache_limit``
-    only swaps the value and returns the previous one), so a read-back would compare the requested
-    value with itself. The requested limit is recorded as ``cache_limit_bytes`` and keyed.
+    On the host tier, ``caps`` is what ``install_memory_caps`` returned (wired GB, memory GB; a 0
+    means that cap failed to install). On a smaller tier they are the tier's own limits. The cache
+    limit is the one set last (``cache_limit``) on both paths.
     """
-    return len(caps) == 2 and all(c > 0 for c in caps)
+    if limits.is_host:
+        if len(caps) != 2 or not all(c > 0 for c in caps):
+            return None
+        return {"memory": caps[1] * GIB, "wired": caps[0] * GIB, "cache": cache_limit}
+    return {
+        "memory": limits.memory_limit_bytes,
+        "wired": limits.wired_limit_bytes,
+        "cache": cache_limit,
+    }
+
+
+def limits_in_force(effective: Mapping[str, int], requested: Mapping[str, int] | None) -> bool:
+    """Whether the limits read back from MLX (``current_limits``) equal the ones requested.
+
+    A None request (a cap that failed to install) is never in force.
+    """
+    if requested is None:
+        return False
+    return all(int(effective[k]) == int(requested[k]) for k in ("memory", "wired", "cache"))
 
 
 def compressed_set_loaded(resident: Mapping[str, Any], shapes: Mapping[str, Any]) -> bool:
@@ -923,7 +945,8 @@ def time_steps(
 
     ``per_step`` is the decode launches every step must make (``label`` names the mode in errors);
     ``compressed_loaded`` and ``limits_recorded`` are the two conditions the caller establishes
-    (``compressed_set_loaded``, ``limits_in_force``); ``compressed_loaded`` is None for a mode with
+    (``compressed_set_loaded``; ``limits_in_force`` on the limits read back at start);
+    ``compressed_loaded`` is None for a mode with
     no compressed set (q8), and the check is then skipped. The provider's deferred status words are read
     by ``verify_step`` inside every step, so "nothing pending" is not a condition here; the
     queue-then-drain contract is tested on the provider itself.
@@ -1010,6 +1033,8 @@ def time_steps(
         ),
         "watchdog_peak_footprint_bytes": max(lifetime_footprint_peak, watchdog.peak_footprint),
         "step_watched_peak_bytes": max(watched_peak, watchdog.peak_watched),
+        # The watchdog's MLX active + cache peak over the timed steps (None if it never sampled).
+        "step_watched_mlx_peak_bytes": watchdog.peak_mlx,
         "watched_peak_bytes": max(lifetime_watched_peak, watched_peak, watchdog.peak_watched),
         "mlx_peak_memory_bytes": max(lifetime_mlx_peak, int(mx.get_peak_memory())),
         "cache_memory_bytes": int(mx.get_cache_memory()),
@@ -1018,12 +1043,16 @@ def time_steps(
     }
 
 
-def q8_record(root: Path, cache_limit: int) -> dict[str, Any]:
-    """The q8 mode's settings for the run JSON: the base it was quantized from and how."""
+def q8_record(root: Path, cache_limit: int, quantization: Mapping[str, Any]) -> dict[str, Any]:
+    """The q8 mode's settings for the run JSON: the base it was quantized from and how.
+
+    ``quantization`` is what ``q8_quantization`` read off the built transformer.
+    """
     return {
         "base_root": redact_home(str(root)),
-        "bits": BITS,
-        "group_size": GROUP_SIZE,
+        "bits": quantization["bits"],
+        "group_size": quantization["group_size"],
+        "mode": quantization["mode"],
         "eval_policy": mode_policy("q8"),
         "cache_limit_bytes": cache_limit,
     }
@@ -1062,9 +1091,10 @@ def run_mode(
         start = time.perf_counter()
         transformer = build_q8_transformer(args.model, root, n_double=N_DOUBLE, n_single=N_SINGLE)
         timings["load_q8_s"] = time.perf_counter() - start
+        quantization = q8_quantization(transformer)
         provider = ZeroProvider()
         compressed_loaded = None
-        extra = {"compressed_set": None, "q8": q8_record(root, args.cache_limit)}
+        extra = {"compressed_set": None, "q8": q8_record(root, args.cache_limit, quantization)}
     else:
         ckpt = open_checkpoint(args.df11)
         start = time.perf_counter()
@@ -1152,34 +1182,55 @@ def run_one(
     The host tier installs the host caps and keeps the default watchdog ceiling; a smaller tier
     installs its MLX defaults instead (``apply_limits``; no host caps, recorded as ``[0, 0]``) and
     the watchdog aborts at its ceiling. Either way the cache limit is set afterwards, then the
-    limits in force are read back into the ``limits`` record. A scenario run first checks that
-    ``--df11`` is the scenario's pinned snapshot (a mismatch is exit 2, nothing measured).
+    limits in force are read back into the ``limits`` record, and the ``limits_recorded`` parity
+    condition holds only when the read-back equals what was requested (``requested_limits``). A
+    setup failure (limits, the out dir, the watchdog) is exit 2, with a JSON error at ``--out``
+    when it can be written. A scenario run first checks that ``--df11`` is the scenario's pinned
+    snapshot (a mismatch is exit 2, nothing measured).
     """
     measure = run_mode if measure is None else measure
     key_of = current_key if key is None else key
-    if limits is None:
-        limits = limits_for_process(None, **host_memory())
-    if limits.is_host:
-        caps = list(install_memory_caps())
-        ceiling, applied = default_ceiling(), "host-caps"
-        limits_recorded = limits_in_force(caps)
-    else:
-        apply_limits(limits)
-        caps = [0, 0]
-        ceiling, applied = limits.ceiling_bytes, "tier-defaults"
-        limits_recorded = True
-    mx.set_cache_limit(cache_limit)  # after the tier's defaults, so the requested value wins
-    effective = current_limits()
-    record = limits_record(
-        limits,
-        effective_memory_limit=effective["memory"],
-        effective_cache_limit=effective["cache"],
-        effective_wired_limit=effective["wired"],
-        applied=applied,
-    )
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    move_stale_abort_aside(args.out.parent)
-    watchdog = Watchdog(args.out.parent, ceiling=ceiling, budget=args.wall_budget).start()
+    caps: list[int] = [0, 0]
+    try:
+        if limits is None:
+            limits = limits_for_process(None, **host_memory())
+        if limits.is_host:
+            caps = list(install_memory_caps())
+            ceiling, applied = default_ceiling(), "host-caps"
+        else:
+            apply_limits(limits)
+            ceiling, applied = limits.ceiling_bytes, "tier-defaults"
+        mx.set_cache_limit(cache_limit)  # after the tier's defaults, so the requested value wins
+        effective = current_limits()
+        limits_recorded = limits_in_force(effective, requested_limits(limits, caps, cache_limit))
+        record = limits_record(
+            limits,
+            effective_memory_limit=effective["memory"],
+            effective_cache_limit=effective["cache"],
+            effective_wired_limit=effective["wired"],
+            applied=applied,
+        )
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        move_stale_abort_aside(args.out.parent)
+        watchdog = Watchdog(args.out.parent, ceiling=ceiling, budget=args.wall_budget).start()
+    except Exception as exc:  # a setup failure is exit 2 with a record where one can be written
+        error = f"{type(exc).__name__}: {exc}"
+        print(f"exit {EXIT_ERROR}: setup failed: {error}", file=sys.stderr)
+        failed = {
+            "exit_code": EXIT_ERROR,
+            "error": f"setup failed: {error}",
+            "mode": args.mode,
+            "round": args.round,
+            "memory_caps_gb": caps,
+            "cache_limit_bytes": cache_limit,
+            "key": None,
+            "scenario_hash": getattr(args, "scenario_hash", None),
+        }
+        try:
+            write_json_atomic(args.out, failed)
+        except (OSError, TypeError, ValueError) as write_exc:
+            print(f"error: cannot write {args.out} ({write_exc})", file=sys.stderr)
+        return EXIT_ERROR
     summary: dict[str, Any]
     this_key: dict[str, Any] | None = None
     scenario: Scenario | None = getattr(args, "scenario_spec", None)

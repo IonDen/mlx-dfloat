@@ -18,7 +18,7 @@ from scripts.encode_prompt import parse_args as encode_parse_args
 from mlx_dfloat.bench.preflight import Preflight
 from mlx_dfloat.bench.results import Summary
 from mlx_dfloat.bench.scenario import scenario_from_mapping, scenario_hash
-from mlx_dfloat.errors import DFloatIntegrationError
+from mlx_dfloat.errors import DFloatFormatError, DFloatIntegrationError
 
 REPO = Path(__file__).resolve().parents[1]
 COMMITTED = REPO / "bench/scenarios/flux1-schnell-1024.toml"
@@ -89,6 +89,17 @@ def test_out_dir_is_the_scenario_name_and_a_tier_gets_its_own_dir(tmp_path):
     s = scenario_from_mapping(SPEC)
     assert bf1.out_dir_for(s, tmp_path, tier_gb=None) == tmp_path / "flux-test"
     assert bf1.out_dir_for(s, tmp_path, tier_gb=24) == tmp_path / "flux-test-tier24"
+
+
+def test_out_dir_refuses_a_directory_that_resolves_outside_the_results_root(tmp_path):
+    # Bug caught: a scenario dir that is a symlink to elsewhere accepted, so the bench writes its
+    # records (and moves embeddings aside) outside the results root it was given.
+    root = tmp_path / "res"
+    root.mkdir()
+    (tmp_path / "elsewhere").mkdir()
+    (root / "flux-test").symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(DFloatFormatError, match="outside"):
+        bf1.out_dir_for(scenario_from_mapping(SPEC), root, tier_gb=None)
 
 
 def test_embeds_key_names_prompt_model_and_base_revision():
@@ -393,8 +404,10 @@ STEP_S = {"df11": [1.1, 1.1], "control": [1.0, 1.0], "q8": [2.2, 2.2]}
 class Rig:
     """Fakes for main's injectables; every call is recorded."""
 
-    def __init__(self, tmp_path, monkeypatch, *, codes=None, preflight=GOOD_PREFLIGHT):
+    def __init__(self, tmp_path, monkeypatch, *, codes=None, preflight=GOOD_PREFLIGHT, samples=()):
         monkeypatch.setattr(bfs, "host_memory", lambda: HOST)
+        self.samples = list(samples)  # returned first, one per call, then `preflight` for good
+        self.sampled = 0
         self.snaps = tmp_path / "hub"
         self.children = []
         self.encodes = []
@@ -403,7 +416,8 @@ class Rig:
         self.preflight = preflight
 
     def sample(self):
-        return self.preflight
+        self.sampled += 1
+        return self.samples.pop(0) if self.samples else self.preflight
 
     def resolve(self, repo_id, revision, *, allow_patterns):
         self.resolved.append((repo_id, revision, list(allow_patterns)))
@@ -552,20 +566,62 @@ def test_main_stops_on_an_encoder_failure(tmp_path, monkeypatch, capsys):
 
 def test_main_refuses_on_a_failed_preflight_and_runs_nothing(tmp_path, monkeypatch, capsys):
     # Bug caught: the gate result ignored (children launched while another heavy job holds the GPU),
-    # or the preflight record not written, or a home path in it.
-    home = str(Path.home())
+    # or the refused launch writing into the out dir (a committed preflight.json overwritten by a
+    # run that never started).
     busy = GOOD_PREFLIGHT.__class__(
-        **{**GOOD_PREFLIGHT.as_dict(), "busy_processes": (f"{home}/v/bin/python -m mflux",)}
+        **{**GOOD_PREFLIGHT.as_dict(), "busy_processes": ("python (pid 7)",)}
     )
     rig = Rig(tmp_path, monkeypatch, preflight=busy)
     code = rig.main([str(_scenario_file(tmp_path)), "--results-root", str(tmp_path / "res")])
     assert code == 2
     assert rig.children == []
     assert rig.resolved == []
-    record = (tmp_path / "res" / "flux-test" / "preflight.json").read_text()
-    assert json.loads(record)["failed_gates"] == ["busy"]
-    assert home + "/" not in record
-    assert "busy" in capsys.readouterr().err
+    assert not (tmp_path / "res" / "flux-test").exists()
+    err = capsys.readouterr().err
+    assert "busy" in err
+    assert "python (pid 7)" in err
+
+
+def test_main_stops_before_a_child_when_the_gate_fails_mid_run_and_a_rerun_resumes(
+    tmp_path, monkeypatch, capsys
+):
+    # Bug caught: the gate sampled only at launch, so a run that started on a charged battery keeps
+    # timing children after the adapter fell behind; or the stop not recorded (a partial set would
+    # read as complete); or a rerun redoing the children that finished.
+    on_battery = GOOD_PREFLIGHT.__class__(**{**GOOD_PREFLIGHT.as_dict(), "ac_power": False})
+    # launch, then before children 1 and 2 the gate passes; before child 3 it fails
+    rig = Rig(
+        tmp_path,
+        monkeypatch,
+        samples=[GOOD_PREFLIGHT, GOOD_PREFLIGHT, GOOD_PREFLIGHT, on_battery],
+    )
+    argv = [str(_scenario_file(tmp_path)), "--results-root", str(tmp_path)]
+    assert rig.main(argv) == 2
+    assert rig.children == [(1, "df11"), (1, "control")]
+    rep = _report(tmp_path / "flux-test")
+    assert rep["stopped"] == {
+        "round": 1,
+        "condition": "q8",
+        "reason": "gate",
+        "failed_gates": ["ac_power"],
+        "exit_code": None,
+        "abort": None,
+    }
+    assert rep["missing"] == ["round 1: q8", "round 2: df11", "round 2: control", "round 2: q8"]
+    assert "ac_power" in capsys.readouterr().err
+    assert rig.main(argv) == 0
+    assert rig.children[2:] == [(1, "q8"), (2, "df11"), (2, "control"), (2, "q8")]
+    assert _report(tmp_path / "flux-test")["stopped"] is None
+
+
+def test_main_with_skip_preflight_samples_the_gate_once(tmp_path, monkeypatch):
+    # Bug caught: --skip-preflight still stopping mid-run on a gate the user chose to skip.
+    on_battery = GOOD_PREFLIGHT.__class__(**{**GOOD_PREFLIGHT.as_dict(), "ac_power": False})
+    rig = Rig(tmp_path, monkeypatch, preflight=on_battery)
+    argv = [str(_scenario_file(tmp_path)), "--results-root", str(tmp_path), "--skip-preflight"]
+    assert rig.main(argv) == 0
+    assert len(rig.children) == 6
+    assert rig.sampled == 1
 
 
 def test_main_skip_preflight_runs_and_records_the_failed_gates(tmp_path, monkeypatch):
@@ -591,6 +647,7 @@ def test_main_stops_at_a_watchdog_abort_and_names_the_artifact(tmp_path, monkeyp
     assert rep["stopped"]["round"] == 1
     assert rep["stopped"]["condition"] == "control"
     assert rep["stopped"]["exit_code"] == 70
+    assert rep["stopped"]["reason"] == "child_exit"
     assert rep["stopped"]["abort"].endswith("flux-test/abort.json")
     assert rep["missing"] == [
         "round 1: control",
@@ -617,14 +674,19 @@ def test_main_a_child_exiting_zero_without_a_result_is_not_complete(tmp_path, mo
 
 
 def test_main_refuses_a_resume_conflict_before_any_child(tmp_path, monkeypatch, capsys):
-    # Bug caught: the conflict found only after children ran (or never), mixing two recipes' runs.
+    # Bug caught: the conflict found only after children ran (or never), mixing two recipes' runs;
+    # or the refused launch rewriting the committed preflight.json with today's machine sample.
     rig = Rig(tmp_path, monkeypatch)
     out = tmp_path / "flux-test"
     out.mkdir()
     _child_json(out / "round1-df11.json", key={"model": "dev"}, round_no=1, mode="df11")
+    committed = '{"preflight": {"battery_percent": 100}, "failed_gates": []}\n'
+    (out / "preflight.json").write_text(committed)
     assert rig.main([str(_scenario_file(tmp_path)), "--results-root", str(tmp_path)]) == 2
     assert rig.children == []
     assert "round1-df11.json" in capsys.readouterr().err
+    assert (out / "preflight.json").read_text() == committed
+    assert sorted(p.name for p in out.iterdir()) == ["preflight.json", "round1-df11.json"]
 
 
 def test_main_refuses_a_resume_conflict_before_the_encoder_runs(tmp_path, monkeypatch, capsys):

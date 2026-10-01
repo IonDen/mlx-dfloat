@@ -2,14 +2,20 @@
 
 Every probe is one macOS command whose text a pure parser reads; ``check`` is a pure function of
 the parsed sample. An unreadable probe parses to None, and ``check`` reports it as a failed gate:
-the gate refuses rather than guesses.
+the gate refuses rather than guesses. ``pmset -g therm`` prints no ``CPU_Speed_Limit`` line when
+macOS has recorded no limit; that reads as None and passes the speed-limit check.
+
+The busy gate lists heavy processes by pid and executable name only, never their arguments.
+Command lines containing a substring from ``MLX_DFLOAT_PREFLIGHT_EXCLUDE`` (comma-separated, empty
+by default) are not counted as busy.
 """
 
 import dataclasses
+import os
 import re
 import shutil
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from mlx_dfloat.bench.capped import GIB
@@ -35,7 +41,12 @@ HEAVY_PATTERNS: tuple[str, ...] = (
     "verify_image",
     "mlx-dfloat",
 )
-EXCLUDE_PATTERNS: tuple[str, ...] = ("ClaudeCode.app", "claude/versions")
+EXCLUDE_ENV = "MLX_DFLOAT_PREFLIGHT_EXCLUDE"
+
+
+def preflight_exclude(environ: Mapping[str, str] = os.environ) -> tuple[str, ...]:
+    """The substrings ``MLX_DFLOAT_PREFLIGHT_EXCLUDE`` names (comma-separated); empty when unset."""
+    return tuple(part.strip() for part in environ.get(EXCLUDE_ENV, "").split(",") if part.strip())
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
@@ -106,9 +117,13 @@ def parse_ps(
     *,
     patterns: Sequence[str],
     min_rss_bytes: int = GIB,
-    exclude: Sequence[str] = EXCLUDE_PATTERNS,
+    exclude: Sequence[str] = (),
 ) -> tuple[str, ...]:
-    """``ps -Ao pid=,rss=,command=`` (rss in KiB): the matching command lines at or above ``min_rss_bytes``."""
+    """``ps -Ao pid=,rss=,command=`` (rss in KiB): the matching processes at or above ``min_rss_bytes``.
+
+    Each is listed as ``"<executable name> (pid <pid>)"``; its arguments are never recorded. A
+    command line containing any ``exclude`` substring is skipped.
+    """
     wanted = re.compile("|".join(re.escape(p) for p in patterns), re.IGNORECASE)
     out: list[str] = []
     for line in text.splitlines():
@@ -119,7 +134,7 @@ def parse_ps(
         if any(x in command for x in exclude) or not wanted.search(command):
             continue
         if rss_bytes >= min_rss_bytes:
-            out.append(command)
+            out.append(f"{Path(command.split()[0]).name} (pid {m.group(1)})")
     return tuple(out)
 
 
@@ -193,5 +208,9 @@ def sample(disk_path: Path = Path("/"), *, run: Callable[..., str] = _run) -> Pr
         lid_open=parse_clamshell(run("ioreg", "-r", "-k", "AppleClamshellState", "-d", "4")),
         free_disk_bytes=free,
         memory_free_percent=parse_memory_pressure(run("memory_pressure")),
-        busy_processes=parse_ps(ps_text, patterns=HEAVY_PATTERNS) if ps_text else None,
+        busy_processes=(
+            parse_ps(ps_text, patterns=HEAVY_PATTERNS, exclude=preflight_exclude())
+            if ps_text
+            else None
+        ),
     )
