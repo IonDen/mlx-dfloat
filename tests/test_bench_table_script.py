@@ -3,9 +3,11 @@
 import json
 from pathlib import Path
 
+import pytest
 from scripts import bench_table as bt
 
 from mlx_dfloat.bench.capped import GIB
+from mlx_dfloat.errors import DFloatFormatError
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -88,23 +90,38 @@ def _child(mode, rnd, step):
     }
 
 
-def _scenario(root: Path, name: str, *, reproducer="uv run x", cache=2_500_000_000, skipped=None):
+def _scenario(
+    root: Path,
+    name: str,
+    *,
+    reproducer="uv run x",
+    cache=2_500_000_000,
+    skipped=None,
+    missing=(),
+    stopped=None,
+    label="MEASURED",
+    prov=None,
+):
     d = root / name
     d.mkdir(parents=True)
     (d / "report.json").write_text(
         json.dumps(
             {
                 "scenario": {"name": name, "cache_limit_bytes": cache},
-                "provenance": PROV,
+                "provenance": prov or PROV,
                 "reproducer": reproducer,
                 "skipped_preflight": skipped is not None,
                 "failed_gates": list(skipped or []),
+                "missing": list(missing),
+                "stopped": stopped,
             }
         )
     )
     # df11 1.2 vs control 1.0 -> per-block overhead +20.0 % by hand.
-    (d / "round1-df11.json").write_text(json.dumps(_child("df11", 1, [1.2, 1.2, 1.2])))
-    (d / "round1-control.json").write_text(json.dumps(_child("control", 1, [1.0, 1.0, 1.0])))
+    for mode, step in (("df11", [1.2, 1.2, 1.2]), ("control", [1.0, 1.0, 1.0])):
+        child = {**_child(mode, 1, step), "label": label}
+        (d / f"round1-{mode}.json").write_text(json.dumps(child))
+    return d
 
 
 def _full_root(tmp_path: Path) -> Path:
@@ -143,7 +160,7 @@ def test_collect_sorts_and_takes_provenance_from_the_first_scenario(tmp_path):
     assert c.reproducers == {"flux1-dev-1024": "uv run dev", "flux1-schnell-1024": "uv run schnell"}
     assert c.preflight_skipped == {"flux1-schnell-1024": ("busy",)}
     assert c.date == "2026-09-30"
-    assert c.cache_limit_bytes == 1_400_000_000
+    assert c.cache_limits == {"flux1-dev-1024": 1_400_000_000, "flux1-schnell-1024": 2_500_000_000}
     assert c.provenance is not None
     assert c.proof is not None
     assert c.proof.pass_size == 512
@@ -181,16 +198,78 @@ def test_collect_skips_a_proof_dir_with_only_one_file(tmp_path):
 
 
 def test_render_readme_splices_all_three_blocks(tmp_path):
-    out = bt.render_readme(README, bt.collect(_full_root(tmp_path)), date="2026-09-30")
-    # By hand: 1.2 / 1.0 - 1 = +20.0 %; cache 1_400_000_000 B -> "1.4 GB"; caption date passed in.
+    root = _full_root(tmp_path)
+    (root / "flux1-dev-1024" / "report.json").write_text(
+        (root / "flux1-dev-1024" / "report.json")
+        .read_text()
+        .replace('"cache_limit_bytes": 1400000000', '"cache_limit_bytes": 2500000000')
+    )
+    out = bt.render_readme(README, bt.collect(root), date="2026-09-30")
+    # By hand: 1.2 / 1.0 - 1 = +20.0 %; cache 2_500_000_000 B -> "2.5 GB"; caption date passed in.
     assert "| 32 GB |" in out
     assert "per-block evaluation: +20.0 %" in out
-    assert "under a 1.4 GB MLX buffer-cache limit" in out
+    assert out.count("under a 2.5 GB MLX buffer-cache limit") == 1
     assert "Harness proof: under one 18.00 GiB cap" in out
     assert (
-        "Apple M1 Max, 32 GB, macOS 27.0, mlx 0.32.2, mflux 0.20.0, git abc1234, 2026-09-30" in out
+        out.count(
+            "Apple M1 Max, 32 GB, macOS 27.0, mlx 0.32.2, mflux 0.20.0, git abc1234, 2026-09-30"
+        )
+        == 1
     )
     assert NONE not in out
+
+
+def test_scenarios_with_different_cache_limits_each_get_their_own_note(tmp_path):
+    # Bug caught: one cache-limit note (the first scenario's 1.4 GB) printed for every scenario,
+    # so the schnell numbers read as measured under a limit they did not run under.
+    out = bt.render_readme(README, bt.collect(_full_root(tmp_path)), date="2026-09-30")
+    assert "FLUX.1-dev, 1024²: DF11 and the mflux q8 step both run under a 1.4 GB" in out
+    assert "FLUX.1-schnell, 1024²: DF11 and the mflux q8 step both run under a 2.5 GB" in out
+
+
+def test_scenarios_measured_at_different_commits_each_get_their_own_caption(tmp_path):
+    # Bug caught: the first scenario's caption (its git and date) printed for a scenario measured
+    # at another commit.
+    root = tmp_path / "results"
+    _scenario(root, "flux1-dev-1024")
+    _scenario(root, "flux1-schnell-1024", prov={**PROV, "git": "fedcba9876", "date": "2026-10-02"})
+    out = bt.render_readme(README, bt.collect(root), date="unused")
+    assert (
+        "FLUX.1-dev, 1024²: Apple M1 Max, 32 GB, macOS 27.0, mlx 0.32.2, mflux 0.20.0, git abc1234, 2026-09-30"
+        in out
+    )
+    assert (
+        "FLUX.1-schnell, 1024²: Apple M1 Max, 32 GB, macOS 27.0, mlx 0.32.2, mflux 0.20.0, git fedcba9, 2026-10-02"
+        in out
+    )
+
+
+def test_collect_refuses_a_scenario_with_missing_runs(tmp_path):
+    # Bug caught: an interrupted scenario pooled from its completed rounds and rendered as if whole.
+    root = tmp_path / "results"
+    _scenario(root, "flux1-dev-1024", missing=["round 3: q8"])
+    with pytest.raises(DFloatFormatError, match=r"flux1-dev-1024.*round 3: q8"):
+        bt.collect(root)
+
+
+def test_collect_refuses_a_stopped_scenario(tmp_path):
+    # Bug caught: a scenario stopped by a child's watchdog abort rendered from what it had.
+    root = tmp_path / "results"
+    stopped = {"round": 1, "condition": "control", "exit_code": 70, "abort": "x/abort.json"}
+    _scenario(root, "flux1-dev-1024", stopped=stopped)
+    with pytest.raises(DFloatFormatError, match=r"flux1-dev-1024.*stopped"):
+        bt.collect(root)
+
+
+def test_collect_skips_a_capped_scenario_with_a_note(tmp_path):
+    # Bug caught: a --tier run's CAPPED children rendered as an unlabelled overhead line, next to
+    # the host's MEASURED ones.
+    root = tmp_path / "results"
+    _scenario(root, "flux1-dev-1024")
+    _scenario(root, "flux1-dev-1024-tier24", label="CAPPED")
+    c = bt.collect(root)
+    assert list(c.summaries) == ["flux1-dev-1024"]
+    assert any("flux1-dev-1024-tier24" in n and "CAPPED" in n for n in c.notes)
 
 
 def test_render_readme_on_no_results_leaves_the_placeholder(tmp_path):
@@ -238,6 +317,36 @@ def test_main_exits_2_on_a_readme_without_markers_or_a_bad_result(tmp_path, caps
     (tmp_path / "tiers").mkdir()
     (tmp_path / "tiers" / "x.json").write_text("{not json")
     assert _run(tmp_path, readme, "--check") == 2
+
+
+def test_an_unexpected_error_in_a_result_file_is_exit_2(tmp_path, capsys):
+    # Bug caught: a child JSON with "round": null raising TypeError out of main (Python exits 1,
+    # the code this tool reserves for a stale README).
+    root = tmp_path / "results"
+    d = _scenario(root, "flux1-dev-1024")
+    (d / "round1-df11.json").write_text(json.dumps({**_child("df11", 1, [1.2]), "round": None}))
+    readme = tmp_path / "README.md"
+    readme.write_text(README)
+    assert _run(root, readme) == 2
+    assert "TypeError" in capsys.readouterr().err
+    assert readme.read_text() == README
+
+
+def test_a_readme_that_cannot_be_written_is_exit_2(tmp_path, capsys):
+    # Bug caught: the README write outside the guarded block, so a read-only checkout raises
+    # PermissionError out of main (exit 1, the "stale" code).
+    root = _full_root(tmp_path)
+    folder = tmp_path / "ro"
+    folder.mkdir()
+    readme = folder / "README.md"
+    readme.write_text(README)
+    folder.chmod(0o500)
+    try:
+        assert _run(root, readme) == 2
+    finally:
+        folder.chmod(0o700)
+    assert "README" in capsys.readouterr().err
+    assert readme.read_text() == README
 
 
 def test_the_committed_reports_render_each_command_and_the_dev_runs_skipped_preflight():

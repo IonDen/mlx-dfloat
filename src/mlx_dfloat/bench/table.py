@@ -174,7 +174,8 @@ def render_tier_table(rows: Sequence[TierRow]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _scenario_title(key: str) -> str:
+def scenario_title(key: str) -> str:
+    """``flux1-dev-1024`` as ``FLUX.1-dev, 1024²``; any other key unchanged."""
     m = re.fullmatch(r"flux1-(.+)-(\d+)", key)
     if m is None:
         return key
@@ -202,7 +203,7 @@ def render_overhead_block(
         cost = _NOT_MEASURED if s.eval_cost_s is None else f"{s.eval_cost_s:.2f} s/step"
         q8 = _NOT_MEASURED if s.q8_ratio is None else f"{s.q8_ratio:.2f}×"  # noqa: RUF001
         lines.append(
-            f"{_scenario_title(key)}, per-block evaluation: {per_block} (depth-2: {depth2}); "
+            f"{scenario_title(key)}, per-block evaluation: {per_block} (depth-2: {depth2}); "
             f"eval policy cost {cost}; DF11 (per-block) over mflux q8 as shipped (one eval per step): {q8}"
         )
         lines.append("")
