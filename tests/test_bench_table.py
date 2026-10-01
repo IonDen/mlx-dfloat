@@ -39,12 +39,14 @@ def _row(**over):
 
 
 def test_tier_table_renders_gib_labels_and_the_source_file():
-    # Red when: render_tier_table truncates instead of rounding GiB, or drops the source column.
+    # Red when: render_tier_table truncates instead of rounding GiB, drops the source column, or
+    # names the fit budget a watchdog ceiling or the MLX column without what it counts.
     # By hand: 16_195_141_095 / 2**30 = 15.0829 -> "15.08 GiB"; int(22.96 * GIB) / 2**30 rounds to 22.96
     # (a truncating renderer would print 22.95).
     text = render_tier_table([_row()])
     assert text.startswith(
-        "| Mac | Budget − reserve | Model | DF11 size | Peak (watched) | Peak footprint | Peak MLX | Label | Status | Limits | Result |"  # noqa: RUF001
+        "| Mac | Fit budget (budget − reserve) | Model | DF11 size | Peak (watched) | Peak footprint "  # noqa: RUF001
+        "| Peak MLX (active + cache) | Label | Status | Limits | Result |"
     )
     assert (
         "| 32 GB | 22.96 GiB | FLUX.1-schnell | 15.08 GiB | 19.94 GiB | 19.94 GiB | 17.40 GiB | MEASURED | target | host caps | `bench/results/tiers/schnell-1024.json` |"
@@ -81,7 +83,7 @@ def test_overhead_block_prints_each_scenario_with_paired_signed_percentages():
     text = render_overhead_block(
         {"flux1-dev-1024": _summary()},
         caption="M1 Max",
-        reproducer="uv run x",
+        reproducers={"flux1-dev-1024": "uv run x"},
         cache_limit_note="2.5 GB",
     )
     assert "per-block evaluation: +8.5 % (depth-2: +6.1 %)" in text
@@ -96,7 +98,7 @@ def test_overhead_block_says_so_when_a_pair_is_missing():
     text = render_overhead_block(
         {"x": _summary(overhead={}, q8_ratio=None, eval_cost_s=None)},
         caption="c",
-        reproducer="r",
+        reproducers={"x": "r"},
         cache_limit_note="n",
     )
     assert "not measured" in text
@@ -147,6 +149,7 @@ REPORT = {
     "sizes": {"compressed": 16_081_241_447, "extras": 113_899_648},
     "watched_peak_bytes": int(19.94 * GIB),
     "footprint_peak_bytes": int(19.94 * GIB),
+    "mlx_peak_bytes": int(19.19 * GIB),
     "peaks": {
         "label": "sampled at phase boundaries",
         "encode": {"mlx_peak": 1},
@@ -157,25 +160,27 @@ REPORT = {
 
 def test_tier_row_from_generate_report_reads_the_ceiling_sizes_and_peaks():
     # Bug caught: the budget column read from fit.budget_bytes (the raw recommended set, no reserve),
-    # the DF11 size excluding the extras, or the MLX peak taken from the first phase.
+    # the DF11 size excluding the extras, or the MLX peak taken from a phase's active-only
+    # mx.get_peak_memory (17.4 GiB here) instead of the watchdog's active + cache peak (19.19 GiB).
     row = tier_row_from_generate_report(REPORT, source="bench/results/tiers/schnell-1024.json")
     assert row.ceiling_bytes == int(22.96 * GIB)
     assert row.df11_bytes == 16_081_241_447 + 113_899_648
-    assert row.mlx_peak_bytes == int(17.4 * GIB)
+    assert row.mlx_peak_bytes == int(19.19 * GIB)
     assert row.status == "target"
     assert row.limits_note == "host caps"
 
 
 def test_tier_row_reads_a_report_the_generate_command_actually_wrote():
-    # Bug caught: the consumer reading a phase key the producer never writes ("mlx" for "mlx_peak"),
-    # so every real report fails with "report peaks carry no phase" (the hand-built REPORT hid it).
+    # Bug caught: the consumer reading a field the producer never writes, so every real report fails
+    # with a missing-field error (a hand-built REPORT would hide it).
     path = Path(__file__).parent / "fixtures" / "generate_report_schnell_1024.json"
     report = json.loads(path.read_text())
     row = tier_row_from_generate_report(report, source="schnell-1024.json")
     assert row.watched_peak_bytes == 21266019216
     assert row.footprint_peak_bytes == 21266019216
-    # the largest phase mlx_peak in the file is denoise's
-    assert row.mlx_peak_bytes == 18725825760
+    # the report's own mlx_peak_bytes (the watchdog's active + cache peak), not the largest
+    # phase's active-only mlx_peak (18725825760, denoise's)
+    assert row.mlx_peak_bytes == 20488964670
     assert row.ceiling_bytes == 24653119488
     assert row.label == "MEASURED"
     assert row.status == "target"
@@ -246,6 +251,13 @@ def test_tier_row_names_a_missing_field():
         tier_row_from_generate_report(bad, source="s")
 
 
+def test_tier_row_needs_the_mlx_peak_of_the_report():
+    # Red when: a report without the watchdog's MLX peak falls back to a per-phase number silently.
+    bad = {k: v for k, v in REPORT.items() if k != "mlx_peak_bytes"}
+    with pytest.raises(DFloatFormatError, match="mlx_peak_bytes"):
+        tier_row_from_generate_report(bad, source="s")
+
+
 def test_tier_row_tier_defaults_note():
     # Red when: limits_note ignores limits["applied"].
     row = tier_row_from_generate_report(
@@ -257,9 +269,30 @@ def test_tier_row_tier_defaults_note():
 def test_overhead_line_names_the_model_and_size():
     # Red when: the scenario key is printed raw instead of "FLUX.1-dev, 1024²".
     text = render_overhead_block(
-        {"flux1-dev-1024": _summary()}, caption="c", reproducer="r", cache_limit_note="n"
+        {"flux1-dev-1024": _summary()},
+        caption="c",
+        reproducers={"flux1-dev-1024": "r"},
+        cache_limit_note="n",
     )
     assert text.splitlines()[0].startswith("FLUX.1-dev, 1024², per-block evaluation: ")
+
+
+def test_overhead_block_gives_each_scenario_its_command_and_a_skipped_preflight():
+    # Bug caught: one scenario's command printed for all of them (the schnell line would cite the
+    # dev command), or a run that skipped its launch check shown like one that passed it.
+    text = render_overhead_block(
+        {"flux1-dev-1024": _summary(), "flux1-schnell-1024": _summary()},
+        caption="c",
+        reproducers={"flux1-dev-1024": "uv run dev", "flux1-schnell-1024": "uv run schnell"},
+        preflight_skipped={"flux1-dev-1024": ("not_charging",)},
+        cache_limit_note="n",
+    )
+    lines = text.splitlines()
+    dev = lines.index(next(x for x in lines if x.startswith("FLUX.1-dev")))
+    schnell = lines.index(next(x for x in lines if x.startswith("FLUX.1-schnell")))
+    assert lines[dev + 2] == "Command: `uv run dev` (preflight skipped: not_charging)"
+    assert lines[schnell + 2] == "Command: `uv run schnell`"
+    assert text.count("preflight skipped") == 1
 
 
 def test_caption_keeps_the_dirty_suffix():

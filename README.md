@@ -152,17 +152,19 @@ appears as a tier row.
 
 So far there are only 32 GB rows, and all of them are MEASURED, on one M1 Max. The table makes no claim about any
 Mac it does not list. Each row is one `mlx-dfloat generate` run at 1024² with seed 42 (4 steps for FLUX.1-schnell,
-20 for FLUX.1-dev and FLUX.1-Krea-dev), with `--tier 32` and `--report` writing the file in the last column. "Budget
-− reserve" is the ceiling the watchdog enforces: the Mac's recommended GPU working set minus a 2 GiB reserve. "Peak
-(watched)" is the number it compares with that ceiling, the larger of the process footprint the OS reports and MLX's
-active plus cached memory. A row's status is "target" when the watched peak stayed under the ceiling.
+20 for FLUX.1-dev and FLUX.1-Krea-dev), with `--tier 32` and `--report` writing the file in the last column. The
+fit budget is the Mac's recommended GPU working set minus a 2 GiB reserve, the same budget `generate` uses to decide
+whether a run fits. "Peak (watched)" is the larger of the process footprint the OS reports and MLX's active plus
+cached memory, and a row's status is "target" when it stayed under the fit budget. The fit budget is not where the
+watchdog stops a run on these rows. On the host's own tier the watchdog aborts at physical memory minus 4 GiB, 28 GiB
+on this Mac (`watchdog_ceiling_bytes` in each file). On a CAPPED row the two are the same number.
 
 <!-- bench:tier-table -->
-| Mac | Budget − reserve | Model | DF11 size | Peak (watched) | Peak footprint | Peak MLX | Label | Status | Limits | Result |
+| Mac | Fit budget (budget − reserve) | Model | DF11 size | Peak (watched) | Peak footprint | Peak MLX (active + cache) | Label | Status | Limits | Result |
 |---|---|---|---|---|---|---|---|---|---|---|
-| 32 GB | 22.96 GiB | FLUX.1-dev | 15.21 GiB | 19.96 GiB | 19.96 GiB | 17.37 GiB | MEASURED | target | host caps | `bench/results/tiers/dev-1024.json` |
-| 32 GB | 22.96 GiB | FLUX.1-Krea-dev | 15.21 GiB | 20.04 GiB | 20.04 GiB | 17.37 GiB | MEASURED | target | host caps | `bench/results/tiers/krea-dev-1024.json` |
-| 32 GB | 22.96 GiB | FLUX.1-schnell | 15.19 GiB | 19.78 GiB | 19.78 GiB | 17.44 GiB | MEASURED | target | host caps | `bench/results/tiers/schnell-1024.json` |
+| 32 GB | 22.96 GiB | FLUX.1-dev | 15.21 GiB | 19.96 GiB | 19.96 GiB | 19.19 GiB | MEASURED | target | host caps | `bench/results/tiers/dev-1024.json` |
+| 32 GB | 22.96 GiB | FLUX.1-Krea-dev | 15.21 GiB | 20.04 GiB | 20.04 GiB | 19.19 GiB | MEASURED | target | host caps | `bench/results/tiers/krea-dev-1024.json` |
+| 32 GB | 22.96 GiB | FLUX.1-schnell | 15.19 GiB | 19.78 GiB | 19.78 GiB | 19.03 GiB | MEASURED | target | host caps | `bench/results/tiers/schnell-1024.json` |
 <!-- /bench:tier-table -->
 
 The overhead block times one 1024² denoise step, five timed steps after two warm-up steps in each of three rounds,
@@ -176,14 +178,16 @@ per-block control was the faster of the two. The q8 ratio is DF11 with per-block
 shipped, one eval per step, both under the scenario's 2.5 GB cache limit. A q8 step changes the weights and the
 output; a DF11 step does not.
 
-On FLUX.1-dev a step costs 3.52 % more with per-block evaluation (19.24 s
-against the control's 18.59 s) and 4.61 % more with the depth-2 run-ahead. On FLUX.1-schnell the two figures are
-4.05 % (19.28 s against 18.53 s) and 4.24 %. Evaluating one block behind did not help on either model. Evaluating
-after every block cost 0.41 s per step on schnell and nothing measurable on dev, where the per-block control came
-out 0.07 s faster, less than either condition moved between rounds. Both sides of the overhead comparison pay that
-cost, so it is not part of the decode overhead. A DF11 step takes 1.26 times as long as mflux's q8 step on dev
-(15.26 s) and 1.35 times on schnell (14.25 s). Treat both ratios as rough: the q8 step's median moved by about 2 s
-from one round to the next in both scenarios, while the DF11 step's moved by 0.5 s at most.
+On FLUX.1-dev a step costs 3.52 % more with per-block evaluation (19.24 s against the control's 18.59 s) and 4.61 %
+more with the depth-2 run-ahead. On FLUX.1-schnell the two figures are 4.05 % (19.28 s against 18.53 s) and 4.24 %.
+Round 1 of the schnell run saw GPU load from outside the bench; the same pooled medians over rounds 2 and 3 alone give
++4.2 % for per-block evaluation. Evaluating one block behind did not help on either model. Evaluating after every
+block cost 0.41 s per step on schnell and nothing measurable on dev, where the per-block control came out 0.07 s
+faster, less than either condition moved between rounds. Both sides of the overhead comparison pay that cost, so it is
+not part of the decode overhead. A DF11 step takes 1.26 times as long as mflux's q8 step on dev (15.26 s) and 1.35
+times on schnell (14.25 s). Treat both ratios as rough: the q8 step's median moved by about 2 s from one round to the
+next in both scenarios, while the DF11 step's moved by 0.5 s at most. The q8 step also peaked lower, at 14.8–14.9 GiB
+against DF11's 19.7–20.0 GiB. What DF11 keeps and q8 gives up is the exact BF16 output.
 
 The control was validated once with `scripts/bench_control_validation.py`, at the earlier 1.4 GB cache limit and on
 a reduced-depth transformer (4 double and 8 single blocks instead of 19 and 38): it agreed within 0.13 % with a run
@@ -192,9 +196,11 @@ whose BF16 weights were all resident.
 <!-- bench:overhead -->
 FLUX.1-dev, 1024², per-block evaluation: +3.5 % (depth-2: +4.6 %); eval policy cost -0.07 s/step; DF11 (per-block) over mflux q8 as shipped (one eval per step): 1.26×
 
+Command: `uv run --group bench python -m scripts.bench_flux1 bench/scenarios/flux1-dev-1024.toml` (preflight skipped: not_charging)
+
 FLUX.1-schnell, 1024², per-block evaluation: +4.0 % (depth-2: +4.2 %); eval policy cost 0.41 s/step; DF11 (per-block) over mflux q8 as shipped (one eval per step): 1.35×
 
-Reproduce: `uv run --group bench python -m scripts.bench_flux1 bench/scenarios/flux1-dev-1024.toml`
+Command: `uv run --group bench python -m scripts.bench_flux1 bench/scenarios/flux1-schnell-1024.toml`
 
 Apple M1 Max, 32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0, git d164fc5, 2026-10-01
 
@@ -214,19 +220,22 @@ Harness proof: under one 19.25 GiB cap, a 512² run passed with a watched peak o
 The overhead numbers come from one command per scenario, run from a checkout:
 
 ```
-uv run --group bench python -m scripts.bench_flux1 bench/scenarios/flux1-schnell-1024.toml
+uv run --group bench python -m scripts.bench_flux1 bench/scenarios/flux1-schnell-1024.toml --results-root <a fresh directory>
 ```
+
+`bench/results/` holds the published run. Without `--results-root` the command works in that directory, and it
+refuses the committed files as soon as the code differs from the version that wrote them.
 
 `bench/scenarios/` holds one scenario for FLUX.1-schnell and one for FLUX.1-dev. A scenario pins the DFloat11 and
 base snapshot revisions, the prompt, the seed, the size, the step counts, the rounds, the cache limit and the
 conditions. The command reads both checkpoints from the local Hugging Face cache and never downloads; when a pinned
 snapshot is missing, it exits 2 and prints the `hf download` command that fetches it. Each condition and round runs
-as its own process with its own memory watchdog, and writes its own JSON under `bench/results/<scenario>/`. An
+as its own process with its own memory watchdog, and writes its own JSON under `<results root>/<scenario>/`. An
 interrupted run picks up where it stopped, and results from a different scenario or different code are refused
 rather than mixed in.
 
 Before anything runs, a launch check samples the machine and refuses to start (exit 2, naming what failed) when the
-Mac is on battery, below 40 % battery, or on a charger that is not charging a battery below full; when macOS is
+Mac is on battery, below 40 % battery, or on a charger that is not charging a battery below half; when macOS is
 limiting CPU speed or the lid is closed; when less than 20 GiB of disk or less than 20 % of memory is free; or when
 another heavy process (a bench, a test run, mflux or mlx-lm) holds 1 GiB or more. Timings taken in those states are
 not comparable. The sample is saved as `preflight.json` next to the results. `--skip-preflight` runs anyway, and
