@@ -10,7 +10,7 @@ def scrub_home(value: Any, home: str = str(Path.home())) -> Any:
     """``value`` with every occurrence of ``home`` as a whole path component written as ``~``.
 
     Walks dicts, lists and tuples (tuples come back as lists, as JSON writes them); a sibling
-    directory that merely shares the prefix (``/Users/ab2`` for ``/Users/ab``) is left alone.
+    directory that merely shares the prefix (``/home/ab2`` for ``/home/ab``) is left alone.
     """
     home = home.rstrip("/")
     if not home:

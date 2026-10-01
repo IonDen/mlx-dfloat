@@ -97,20 +97,25 @@ All notable changes to this project are documented here. The format follows
   step counts, the rounds, the MLX cache limit and the conditions. The loader refuses unknown or malformed fields,
   and every result file carries the scenario's hash. `scripts/bench_flux1.py` runs a scenario end to end. It first
   checks the machine (power, charging, battery, CPU speed limit, lid, disk, free memory, other heavy processes) and
-  stops unless `--skip-preflight` is given. It then reads the pinned snapshots from the local cache only, encodes
-  the prompt once, and runs every condition and round as its own process, interleaved, resuming from the files
-  already written and refusing ones from another scenario or another version of the code. The step bench gains a
+  stops unless `--skip-preflight` is given, and it checks again before each condition's process: a failed check
+  stops the run there, `report.json` records which checks failed, and the same command resumes later. It reads the
+  pinned snapshots from the local cache only, encodes the prompt once, and runs every condition and round as its own
+  process, interleaved, resuming from the files already written and refusing ones from another scenario or another
+  version of the code. The step bench gains a
   `q8` condition: mflux's own transformer quantised to 8 bits at load from the pinned base, with one evaluation per
-  step as mflux ships it.
+  step, under the scenario's cache limit like the other conditions (mflux's own generate sets none). Its record
+  carries the bits, group size and mode read from a built block.
 - The numbers from that benchmark, measured on an M1 Max (32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0) at 1024²
   under a 2.5 GB cache limit, five timed steps after two warm-up steps in each of three rounds. On FLUX.1-dev a step
   costs 3.52 % more with per-block evaluation (19.24 s against 18.59 s) and 4.61 % more with a one-block run-ahead;
   on FLUX.1-schnell, 4.05 % (19.28 s against 18.53 s) and 4.24 %. The run-ahead did not help on either model.
   Evaluating after every block, measured on the control alone, cost 0.41 s per step on schnell and nothing
   measurable on dev (the per-block control was 0.07 s faster); both sides of the overhead comparison pay it. A DF11
-  step with per-block evaluation takes 1.26 times as long as mflux's q8 step as shipped on dev (15.26 s) and 1.35
+  step with per-block evaluation takes 1.26 times as long as the q8 step on dev (15.26 s) and 1.35
   times on schnell (14.25 s). These ratios are rough, because the q8 step's median moved by about 2 s between rounds
-  in both scenarios while the DF11 step's moved by 0.5 s at most. The q8 step also peaked lower, at 14.8–14.9 GiB
+  in both scenarios while the DF11 step's moved by 0.7 s at most. The dev depth-2 figure pools rounds that read
+  −1.6 %, +5.9 % and +6.5 % one at a time (each round's DF11 median over its control's), because round 1's depth-2
+  control ran slow; rounds 2 and 3 alone give +6.2 %. The q8 step also peaked lower, at 14.8–14.9 GiB
   against DF11's 19.7–20.0 GiB; what DF11 keeps and q8 gives up is the exact BF16 output. The dev run used
   `--skip-preflight`: the only failed gate was "not charging", because macOS held the battery at 80 % for optimised
   charging, and its `report.json` records both. The check now lets a battery at 50 % or more run on a charger that
@@ -128,7 +133,9 @@ All notable changes to this project are documented here. The format follows
 - The measured 32 GB rows for FLUX.1-schnell, FLUX.1-dev and FLUX.1-Krea-dev at 1024² (`bench/results/tiers/`):
   watched peaks of 19.78, 19.96 and 20.04 GiB, all under the M1 Max's 22.96 GiB fit budget.
 - A harness proof (`bench/results/harness-proof/`): under one 19.25 GiB watchdog ceiling, a 512² FLUX.1-schnell run
-  finished at 18.25 GiB, and a 1024² run was stopped by the watchdog at 19.32 GiB with exit 70.
+  finished at 18.25 GiB, and a 1024² run was stopped by the watchdog at 19.32 GiB with exit 70. The watchdog's abort
+  file now names the model, size, seed and steps of the run it stopped, and the proof reads the stopped run's size
+  from it.
 - `scripts/bench_table.py` writes the README's measured-numbers blocks from `bench/results/`, and a test fails when the
   README and the result files disagree.
 

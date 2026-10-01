@@ -89,6 +89,10 @@ def test_overhead_block_prints_each_scenario_with_paired_signed_percentages():
     assert "per-block evaluation: +8.5 % (depth-2: +6.1 %)" in text
     assert "eval policy cost 0.40 s/step" in text
     assert "1.90×" in text  # noqa: RUF001
+    # Bug caught: the q8 condition described as mflux "as shipped" (mflux's own generate sets no
+    # cache limit; the bench ran q8 under the scenario's, like every other condition).
+    assert "over the mflux q8 step (one eval per step, same cache limit): 1.90×" in text  # noqa: RUF001
+    assert "as shipped" not in text
     assert "uv run x" in text
     assert "M1 Max" in text
     assert "2.5 GB" in text
@@ -101,7 +105,8 @@ def test_overhead_block_says_so_when_a_pair_is_missing():
         reproducers={"x": "r"},
         cache_limit_note="n",
     )
-    assert "not measured" in text
+    # per-block, depth-2, the eval policy cost and the q8 ratio: each says so on its own
+    assert text.count("not measured") == 4
 
 
 def test_splice_replaces_only_the_marked_block():
@@ -309,11 +314,12 @@ def test_tier_row_needs_the_mlx_peak_of_the_report():
 
 
 def test_tier_row_tier_defaults_note():
-    # Red when: limits_note ignores limits["applied"].
+    # Red when: limits_note ignores limits["applied"], or reads as limits of the tier's own choosing
+    # rather than MLX's defaults for a Mac of that size.
     row = tier_row_from_generate_report(
         {**REPORT, "limits": {**REPORT["limits"], "applied": "tier-defaults"}}, source="s"
     )
-    assert row.limits_note == "tier defaults"
+    assert row.limits_note == "MLX defaults for the tier"
 
 
 def test_overhead_line_names_the_model_and_size():

@@ -41,7 +41,8 @@ def _r(condition, rnd, step_s, *, launches=0, h=H, fp=10, mp=8):
 # 1.2/1.2/1.2. Round 3: df11 only. Pooled df11 over rounds {1,2} (6 reps): 1.35; pooled control:
 # 1.0,1.0,1.0,1.2,1.2,1.2 -> 1.1. per-block overhead = 1.35/1.1 - 1 = 0.22727. depth2 over round 1:
 # 1.1/1.0 - 1 = 0.1. eval cost over round 1 only: 1.0 - 0.9 = 0.1 (pooling every control round
-# would give 1.1 - 0.9 = 0.2). q8 ratio over round 1: 1.2 / 0.6 = 2.0. Round 2's df11 has fp=30.
+# would give 1.1 - 0.9 = 0.2). q8 ratio over round 1: 1.2 / 0.6 = 2.0. Round 2's df11 has fp=30
+# and mp=20.
 FIX = [
     _r("df11", 1, [1.2, 1.3, 1.1], launches=57),
     _r("control", 1, [1.0, 1.0, 1.0]),
@@ -49,7 +50,7 @@ FIX = [
     _r("control-depth2", 1, [1.0, 1.0, 1.0]),
     _r("control-noeval", 1, [0.9, 0.9, 0.9]),
     _r("q8", 1, [0.6, 0.6, 0.6]),
-    _r("df11", 2, [1.5, 1.4, 1.6], launches=57, fp=30),
+    _r("df11", 2, [1.5, 1.4, 1.6], launches=57, fp=30, mp=20),
     _r("control", 2, [1.2, 1.2, 1.2]),
     _r("df11", 3, [9.0, 9.0, 9.0], launches=57),
 ]
@@ -71,6 +72,9 @@ def test_summary_pools_pairs_over_their_shared_rounds_only():
     assert s.conditions["df11"]["median"] == pytest.approx(1.35)
     assert s.conditions["df11"]["step_watched_peak"] == 30
     assert s.conditions["df11"]["footprint_peak"] == 31
+    # the active-only MLX peak (mlx_peak_memory_bytes) pools as the max over the paired rounds:
+    # round 2's mp + 1 = 21, not round 1's 9 and not a sum
+    assert s.conditions["df11"]["mlx_peak"] == 21
     assert s.rounds_seen == 3
 
 
