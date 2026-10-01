@@ -26,6 +26,10 @@ CONDITIONS: tuple[str, ...] = (
 )
 MODELS: tuple[str, ...] = ("schnell", "dev")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
+# The name is a directory under the results root: a plain lowercase name, never a path.
+_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+RESERVED_NAMES: tuple[str, ...] = ("tiers", "harness-proof")  # the table's own input directories
+MAX_CACHE_LIMIT = 2**63 - 1  # mx.set_cache_limit takes a signed 64-bit size
 _STR_FIELDS = (
     "name",
     "model",
@@ -90,7 +94,8 @@ def scenario_from_mapping(data: Mapping[str, object], *, source: str = "<mapping
 
     Raises:
         DFloatFormatError: An unknown key, a missing field, a wrong type, a value out of range, a
-            revision that is not a full SHA, a duplicate, unknown or empty condition list.
+            revision that is not a full SHA, a duplicate, unknown or empty condition list, or a
+            name that is not a plain directory name (or is reserved).
     """
     unknown = sorted(set(data) - set(_REQUIRED))
     if unknown:
@@ -100,6 +105,16 @@ def scenario_from_mapping(data: Mapping[str, object], *, source: str = "<mapping
             raise _fail(source, field, "missing")
     strings = {f: _str(data, f, source) for f in _STR_FIELDS}
     ints = {f: _int(data, f, source) for f in _INT_FIELDS}
+    name = strings["name"]
+    if not _NAME.fullmatch(name) or ".." in name:
+        raise _fail(
+            source,
+            "name",
+            f"{name!r} must be 1-64 characters of a-z, 0-9, '.', '_' or '-', start with a letter "
+            "or digit, and hold no '..'",
+        )
+    if name in RESERVED_NAMES:
+        raise _fail(source, "name", f"{name!r} is reserved for the results root's own directories")
     if strings["model"] not in MODELS:
         raise _fail(source, "model", f"choose from {MODELS}")
     for field in ("df11_revision", "base_revision"):
@@ -108,6 +123,8 @@ def scenario_from_mapping(data: Mapping[str, object], *, source: str = "<mapping
     for field in ("steps", "warmup", "rounds", "cache_limit_bytes"):
         if ints[field] < 1:
             raise _fail(source, field, "must be >= 1")
+    if ints["cache_limit_bytes"] > MAX_CACHE_LIMIT:
+        raise _fail(source, "cache_limit_bytes", "must be below 2**63 (MLX takes a signed size)")
     if ints["size"] < 16 or ints["size"] % 16:
         raise _fail(source, "size", "must be a positive multiple of 16")
     wall = _float(data, "wall_budget_s", source)
@@ -164,7 +181,9 @@ def scenario_hash(scenario: Scenario) -> str:
 
 __all__ = [
     "CONDITIONS",
+    "MAX_CACHE_LIMIT",
     "MODELS",
+    "RESERVED_NAMES",
     "Scenario",
     "load_scenario",
     "scenario_from_mapping",

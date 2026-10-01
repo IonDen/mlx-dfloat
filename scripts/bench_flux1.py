@@ -2,22 +2,28 @@
 
 Given a scenario TOML (``mlx_dfloat.bench.scenario``), this orchestrator:
 
-1. samples the launch gate (``mlx_dfloat.bench.preflight``) and writes ``preflight.json``; a failed
-   gate stops the run with exit 2 unless ``--skip-preflight`` is given, which the report records;
+1. samples the launch gate (``mlx_dfloat.bench.preflight``); a failed gate stops the run with exit 2
+   before anything is written, unless ``--skip-preflight`` is given, which the report records. The
+   sample goes to ``preflight.json`` only once the out dir passed the first resume check (step 4),
+   so a refused launch never rewrites an existing record;
 2. resolves the pinned DF11 snapshot and the pinned base snapshot from the local Hugging Face cache
    only (``scripts._q8_rig.pinned_snapshot``, never a download: a missing snapshot is exit 2 with
    the ``hf download`` command that fetches it). The base resolves its encoders and tokenizers,
    plus ``transformer/*`` when ``q8`` is one of the conditions;
 3. makes sure ``embeds.safetensors`` in the out dir holds the scenario's prompt encoded for its
    model by its pinned base (``scripts.encode_prompt`` as a subprocess when the file is missing or
-   its metadata differs; a mismatched file is moved to ``embeds.previous.safetensors`` first);
+   its metadata differs; a mismatched file is moved to ``embeds.previous.safetensors`` first,
+   replacing any earlier one there);
 4. runs the step bench (``scripts.bench_flux_step --scenario``) once per condition and round, as
    serial subprocesses interleaved per round in the scenario's order. Before any child starts, the
    existing ``round{r}-{condition}.json`` files are checked against this run's key (the key each
    child writes: the scenario hash, the resolved tier, the checkpoint and embeddings, the source
    hash, the mlx version); a file with another key stops the run with exit 2 naming it, and a
-   complete file is skipped, so an interrupted run resumes. A child's non-zero exit stops the run
-   (exit 2); for a watchdog abort (70 memory, 71 wall) the report names the child's ``abort.json``;
+   complete file is skipped, so an interrupted run resumes. Before each child the gate is sampled
+   again (unless ``--skip-preflight``): a failed gate stops the run before that child, with exit 2
+   and ``stopped.reason = "gate"`` naming the failed gates, and a rerun resumes from there. A
+   child's non-zero exit stops the run (exit 2, ``stopped.reason = "child_exit"``); for a watchdog
+   abort (70 memory, 71 wall) the report names the child's ``abort.json``;
 5. pools the complete children (``mlx_dfloat.bench.results``) and writes ``report.json``: the
    scenario and its hash, the summary, the missing runs, the preflight sample and failed gates,
    provenance, where the run stopped, the command that reproduces it, the tier and its limits.
@@ -96,9 +102,20 @@ Resolve = Callable[..., Path]
 
 
 def out_dir_for(scenario: Scenario, results_root: Path, *, tier_gb: int | None) -> Path:
-    """``results_root / name``, or ``results_root / f"{name}-tier{tier_gb}"`` for a ``--tier`` run."""
+    """``results_root / name``, or ``results_root / f"{name}-tier{tier_gb}"`` for a ``--tier`` run.
+
+    Raises:
+        DFloatFormatError: The directory resolves outside ``results_root`` (a symlink).
+    """
     name = scenario.name if tier_gb is None else f"{scenario.name}-tier{tier_gb}"
-    return Path(results_root) / name
+    out = Path(results_root) / name
+    root = Path(results_root).resolve()
+    if not out.resolve().is_relative_to(root):
+        raise DFloatFormatError(
+            f"{bfs.redact_home(str(out))} resolves outside the results root "
+            f"{bfs.redact_home(str(root))}"
+        )
+    return out
 
 
 def embeds_path(out_dir: Path) -> Path:
@@ -333,7 +350,7 @@ def _embeddings(
             meta = None  # an unreadable file is re-encoded like a mismatched one
         if meta is not None and embeds_match(meta, key):
             return path, meta
-        path.replace(out_dir / EMBEDS_PREVIOUS)  # kept, never deleted
+        path.replace(out_dir / EMBEDS_PREVIOUS)  # replaces an earlier previous file, if any
     print(f"encoding the prompt into {bfs.redact_home(str(path))}", flush=True)
     code = encode(encode_argv(scenario, base_root=base, out=path))
     if code != 0:
@@ -351,9 +368,33 @@ def _stopped(out_dir: Path, round_no: int, condition: str, code: int) -> dict[st
     return {
         "round": round_no,
         "condition": condition,
+        "reason": "child_exit",
         "exit_code": code,
         "abort": None if abort is None else bfs.redact_home(str(abort)),
     }
+
+
+def _gate_stopped(round_no: int, condition: str, failed: Sequence[str]) -> dict[str, Any]:
+    return {
+        "round": round_no,
+        "condition": condition,
+        "reason": "gate",
+        "failed_gates": list(failed),
+        "exit_code": None,
+        "abort": None,
+    }
+
+
+def _write_preflight(
+    out_dir: Path, gate: Mapping[str, Any], failed: Sequence[str], skipped: bool
+) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    write_json_atomic(
+        out_dir / "preflight.json",
+        scrub_home(
+            {"preflight": dict(gate), "failed_gates": list(failed), "skipped_preflight": skipped}
+        ),
+    )
 
 
 def _print_summary(payload: Mapping[str, Any], report_path: Path) -> None:
@@ -381,7 +422,9 @@ def _run(
     run_child: RunArgv,
     resolve: Resolve,
     encode: RunArgv,
+    regate: Callable[[], list[str]] | None,
 ) -> int:
+    """The run after the launch gate. ``regate`` re-samples the gate before each child (None: never)."""
     host = bfs.host_memory()
     tier_gb = host_tier_gb(host["host_ram_bytes"]) if args.tier is None else args.tier
     limits = bfs.limits_for_process(args.tier, **host)
@@ -405,6 +448,8 @@ def _run(
         key=child_key(scenario, embeds_meta={}, **key_inputs),
         ignore=("embeds_meta",),
     )
+    # The out dir is accepted: only now is the launch sample recorded in it.
+    _write_preflight(out_dir, gate, failed, bool(args.skip_preflight))
     embeds, meta = _embeddings(scenario, out_dir, base, encode)
     key = child_key(scenario, embeds_meta=meta, **key_inputs)
     todo = plan_children(scenario, out_dir, key=key)
@@ -412,6 +457,15 @@ def _run(
     print(f"{total - len(todo)} run(s) already complete, {len(todo)} to run")
     stopped: dict[str, Any] | None = None
     for round_no, condition, path in todo:
+        failed_now = [] if regate is None else regate()
+        if failed_now:
+            stopped = _gate_stopped(round_no, condition, failed_now)
+            print(
+                f"error: the gate failed before round {round_no} {condition}: "
+                f"{', '.join(failed_now)}; stopping (a rerun resumes here)",
+                file=sys.stderr,
+            )
+            break
         argv = child_argv(
             args.scenario,
             condition=condition,
@@ -470,34 +524,28 @@ def main(
     args = parse_args(argv)
     try:
         scenario = load_scenario(args.scenario)
+        out_dir = out_dir_for(scenario, args.results_root, tier_gb=args.tier)
     except DFloatFormatError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERROR
-    out_dir = out_dir_for(scenario, args.results_root, tier_gb=args.tier)
     # The gate is sampled first, before any MLX device query, snapshot lookup, encoder or child:
     # this process's command line matches the busy patterns ("bench_"), but its RSS is far under
     # the 1 GiB threshold here, so only another heavy job can trip the busy gate.
     gate_sample = sample()
     failed = list(check(gate_sample))
     gate = gate_sample.as_dict()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    write_json_atomic(
-        out_dir / "preflight.json",
-        scrub_home(
-            {
-                "preflight": gate,
-                "failed_gates": failed,
-                "skipped_preflight": bool(args.skip_preflight),
-            }
-        ),
-    )
     if failed and not args.skip_preflight:
         print(
-            f"error: the launch gate failed: {', '.join(failed)} (see preflight.json; "
-            "--skip-preflight runs anyway and records it)",
+            f"error: the launch gate failed: {', '.join(failed)}; nothing was written "
+            "(--skip-preflight runs anyway and records it)\n"
+            f"  sample: {scrub_home(gate)}",
             file=sys.stderr,
         )
         return EXIT_ERROR
+
+    def regate() -> list[str]:
+        return list(check(sample()))
+
     try:
         return _run(
             args,
@@ -508,6 +556,7 @@ def main(
             run_child=run_child,
             resolve=resolve,
             encode=encode,
+            regate=None if args.skip_preflight else regate,
         )
     except (bfs.BenchError, DFloatError) as exc:  # an expected refusal: the message says it all
         print(f"error: {exc}", file=sys.stderr)

@@ -535,13 +535,16 @@ class _FakeTransformer:
 
 
 class _FakeWatchdog:
-    def __init__(self, peak_footprint=0, peak_watched=0):
+    def __init__(self, peak_footprint=0, peak_watched=0, peak_mlx=None, mlx_after_reset=None):
         self.peak_footprint = peak_footprint
         self.peak_watched = peak_watched
+        self.peak_mlx = peak_mlx
+        self._mlx_after_reset = mlx_after_reset  # what the sampler reads during the timed steps
 
     def reset_peak(self):
         self.peak_footprint = 0
         self.peak_watched = 0
+        self.peak_mlx = self._mlx_after_reset
 
 
 def _time(
@@ -627,6 +630,16 @@ def test_time_steps_records_the_timed_steps_own_peaks_apart_from_the_lifetime_pe
     assert out["step_mlx_peak_bytes"] < 256 * 1024**2
 
 
+def test_time_steps_records_the_watchdogs_mlx_peak_of_the_timed_steps():
+    # Bug caught: the step window's MLX active + cache peak (the watchdog's own counter) left out,
+    # or read before the reset (the load-time value would stand in for the timed steps').
+    provider = _FakeProvider()
+    transformer = _FakeTransformer(provider, [0] * 5)
+    watchdog = _FakeWatchdog(peak_mlx=10**13, mlx_after_reset=7 * 10**9)
+    out = _time(transformer, provider, per_step=0, watchdog=watchdog)
+    assert out["step_watched_mlx_peak_bytes"] == 7 * 10**9
+
+
 def test_time_steps_records_the_watched_peak_of_the_timed_steps_and_of_the_lifetime():
     # Bug caught: the watched peak (the number the watchdog enforces, the one the tier rows use)
     # left out of the result, read without the reset (the load spike lands in the step peak), or
@@ -641,21 +654,58 @@ def test_time_steps_records_the_watched_peak_of_the_timed_steps_and_of_the_lifet
 # --- the parity condition helpers ----------------------------------------------------------------
 
 
+GIB = 1024**3
+_HOST = {"memory": 22 * GIB, "cache": 2_500_000_000, "wired": 20 * GIB}
+
+
+@pytest.mark.parametrize(
+    ("effective", "want"),
+    [
+        (_HOST, True),
+        ({**_HOST, "memory": 30 * GIB}, False),  # the memory cap did not stick
+        ({**_HOST, "wired": 0}, False),  # the wired cap did not stick
+        ({**_HOST, "cache": 32 * GIB}, False),  # the scenario's cache limit was overwritten
+    ],
+)
+def test_limits_in_force_compares_every_read_back_limit_with_the_request(effective, want):
+    # Bug caught: a condition that checks only what was asked for (it would pass with a cap MLX did
+    # not take), or one of the three limits left out of the compare.
+    assert limits_in_force(effective, _HOST) is want
+
+
+def test_limits_in_force_fails_without_a_request():
+    # Bug caught: a host whose caps failed to install (no request to compare) passing.
+    assert limits_in_force(_HOST, None) is False
+
+
 @pytest.mark.parametrize(
     ("caps", "want"),
     [
-        ((20, 22), True),
-        ((0, 22), False),  # the wired cap failed to install
-        ((20, 0), False),  # the memory cap failed to install
-        ((0, 0), False),
-        ((20,), False),  # one cap missing
+        ((20, 22), {"memory": 22 * GIB, "wired": 20 * GIB, "cache": 7}),
+        ((0, 22), None),  # the wired cap failed to install
+        ((20, 0), None),  # the memory cap failed to install
+        ((20,), None),  # one cap missing
     ],
 )
-def test_limits_in_force_needs_both_caps(caps, want):
-    # Bug caught: checking caps[0] alone (a failed memory cap passes). The MLX cache limit is not
-    # part of the condition: mlx 0.32.2 has no getter, so a read-back would compare the requested
-    # value with itself.
-    assert limits_in_force(caps) is want
+def test_requested_limits_on_the_host_are_the_installed_caps(caps, want):
+    # Bug caught: caps[0] read as the memory cap (they are wired, memory), or a failed cap
+    # producing a request that a read-back could still match.
+    from scripts.bench_flux_step import limits_for_process, requested_limits
+
+    host = limits_for_process(None, host_ram_bytes=32 * GIB, host_recommended_bytes=HOST_REC)
+    assert requested_limits(host, caps, 7) == want
+
+
+def test_requested_limits_on_a_smaller_tier_are_the_tiers_own():
+    # Bug caught: a CAPPED run compared against the host caps, so the tier's limits are never checked.
+    from scripts.bench_flux_step import limits_for_process, requested_limits
+
+    tier = limits_for_process(24, host_ram_bytes=32 * GIB, host_recommended_bytes=HOST_REC)
+    assert requested_limits(tier, [0, 0], 7) == {
+        "memory": tier.memory_limit_bytes,
+        "wired": 0,
+        "cache": 7,
+    }
 
 
 def _fake_rig(rng, *, n_double=2, n_single=2):
@@ -1510,18 +1560,27 @@ def fake_limits(monkeypatch):
     import scripts.bench_flux_step as bfs
 
     calls = []
+    state = {"memory": 0, "wired": 0}
 
     def install():
         calls.append("install_memory_caps")
+        state.update(memory=22 * GIB, wired=20 * GIB)
         return (20, 22)
 
     def apply(limits):
         calls.append(("apply_limits", limits.tier_gb))
+        state.update(memory=limits.memory_limit_bytes, wired=limits.wired_limit_bytes)
         mx.set_cache_limit(limits.cache_limit_bytes)
         return {}
 
+    def read_back():
+        cache = int(mx.set_cache_limit(0))
+        mx.set_cache_limit(cache)
+        return {**state, "cache": cache}
+
     monkeypatch.setattr(bfs, "install_memory_caps", install)
     monkeypatch.setattr(bfs, "apply_limits", apply)
+    monkeypatch.setattr(bfs, "current_limits", read_back)
     monkeypatch.setattr(bfs, "default_ceiling", lambda: 30 * GIB + 7)
     monkeypatch.setattr(
         bfs,
@@ -1573,6 +1632,62 @@ def test_run_one_records_the_limits_effective_values_and_label(
     assert seen["limits_recorded"] is True
 
 
+def test_run_one_records_limits_that_did_not_stick_as_not_recorded(
+    tmp_path, restore_cache_limit, fake_limits, monkeypatch
+):
+    # Bug caught: limits_recorded hardcoded True (the tier path did), so a run whose read-back
+    # differs from what was installed still passes the parity condition.
+    import scripts.bench_flux_step as bfs
+    from scripts.bench_flux_step import limits_for_process, run_one
+
+    monkeypatch.setattr(bfs, "current_limits", lambda: {"memory": 1, "wired": 0, "cache": 1})
+    args = parse_args(_scenario_run_args(tmp_path))
+    seen = {}
+    run_one(args, measure=_measured(seen), key=lambda a: {}, cache_limit=2_500_000_000)
+    assert seen["limits_recorded"] is False
+    tier = limits_for_process(24, host_ram_bytes=32 * GIB, host_recommended_bytes=HOST_REC)
+    run_one(args, measure=_measured(seen), key=lambda a: {}, cache_limit=2_500_000_000, limits=tier)
+    assert seen["limits_recorded"] is False
+
+
+def test_run_one_a_watchdog_that_cannot_start_is_exit_2_with_a_json_error(
+    tmp_path, restore_cache_limit, fake_limits, monkeypatch
+):
+    # Bug caught: a setup failure (psutil missing) raising out of run_one, so the child dies with a
+    # traceback (exit 1) and no result file; the orchestrator could not tell why.
+    import scripts.bench_flux_step as bfs
+    from scripts.bench_flux_step import run_one
+
+    from mlx_dfloat.errors import DFloatDependencyError
+
+    def no_psutil(*a, **k):
+        raise DFloatDependencyError("the watchdog needs psutil")
+
+    monkeypatch.setattr(bfs, "Watchdog", no_psutil)
+    seen = {}
+    args = parse_args(_scenario_run_args(tmp_path))
+    assert run_one(args, measure=_measured(seen), key=lambda a: {}) == 2
+    written = json.loads((tmp_path / "r.json").read_text())
+    assert written["exit_code"] == 2
+    assert "psutil" in written["error"]
+    assert written["mode"] == "df11"
+    assert seen == {}
+
+
+def test_run_one_an_out_dir_that_cannot_be_made_is_exit_2(
+    tmp_path, restore_cache_limit, fake_limits, capsys
+):
+    # Bug caught: the mkdir failure raising out of run_one (exit 1, no message naming the cause).
+    from scripts.bench_flux_step import run_one
+
+    blocked = tmp_path / "blocked"
+    blocked.write_text("a file, not a directory")
+    args = parse_args(_scenario_run_args(tmp_path))
+    args.out = blocked / "r.json"
+    assert run_one(args, measure=_measured({}), key=lambda a: {}) == 2
+    assert "blocked" in capsys.readouterr().err
+
+
 def test_run_one_refuses_a_df11_dir_off_the_scenario_pin(
     tmp_path, restore_cache_limit, fake_limits
 ):
@@ -1587,8 +1702,23 @@ def test_run_one_refuses_a_df11_dir_off_the_scenario_pin(
     assert seen == {}  # nothing measured
 
 
+def _q8_block(bits=8, group_size=64, mode="affine"):
+    """A real block holding one Linear quantized the way nn.quantize does it."""
+    import mlx.nn as nn
+
+    block = nn.Module()
+    block.norm = nn.LayerNorm(128)
+    block.proj = nn.QuantizedLinear.from_linear(
+        nn.Linear(128, 128), group_size=group_size, bits=bits, mode=mode
+    )
+    return block
+
+
 class _Q8Transformer:
     """mflux's plain transformer as the q8 mode sees it: callable, no seam (no attach, no verify_step)."""
+
+    def __init__(self, block=None):
+        self.transformer_blocks = [block if block is not None else _q8_block()]
 
     def __call__(self, *, t, config, hidden_states, prompt_embeds, pooled_prompt_embeds):
         return hidden_states * 0.5
@@ -1644,6 +1774,7 @@ def test_run_mode_q8_times_the_quantized_transformer_from_the_pinned_base(tmp_pa
         "base_root": f"~/hub/{BASE_REVISION}",
         "bits": 8,
         "group_size": 64,
+        "mode": "affine",
         "eval_policy": "none",
         "cache_limit_bytes": 2500000000,
     }
@@ -1652,6 +1783,41 @@ def test_run_mode_q8_times_the_quantized_transformer_from_the_pinned_base(tmp_pa
     assert out["launches_per_step"] == [0] * 7  # 2 warm-up + 5 timed, none of them launching
     assert out["verify_s"] == [0.0] * 5
     assert out["latent_dtype"] == "mlx.core.float32"
+
+
+@pytest.mark.parametrize(
+    ("bits", "group_size", "mode"),
+    [(4, 64, "affine"), (8, 32, "affine"), (8, 32, "mxfp8")],
+)
+def test_q8_quantization_refuses_a_block_built_other_than_8_bit_64_affine(bits, group_size, mode):
+    # Bug caught: the record writing the constants it asked for while mflux built something else
+    # (another bit width, group size or mode), so the q8 row would name a quantization that never ran.
+    from scripts._q8_rig import q8_quantization
+
+    from mlx_dfloat.errors import DFloatIntegrationError
+
+    with pytest.raises(DFloatIntegrationError, match="8-bit"):
+        q8_quantization(_Q8Transformer(_q8_block(bits, group_size, mode)))
+
+
+def test_q8_quantization_reads_the_built_block():
+    # Bug caught: the values read from the module constants instead of the built Linear.
+    from scripts._q8_rig import q8_quantization
+
+    assert q8_quantization(_Q8Transformer()) == {"bits": 8, "group_size": 64, "mode": "affine"}
+
+
+def test_q8_quantization_refuses_a_block_with_no_quantized_linear():
+    # Bug caught: an unquantized transformer (the applier skipped quantization) timed as q8.
+    import mlx.nn as nn
+    from scripts._q8_rig import q8_quantization
+
+    from mlx_dfloat.errors import DFloatIntegrationError
+
+    block = nn.Module()
+    block.proj = nn.Linear(8, 8)
+    with pytest.raises(DFloatIntegrationError, match="no quantized"):
+        q8_quantization(_Q8Transformer(block))
 
 
 def test_run_mode_q8_refuses_trace_before_building(tmp_path, monkeypatch):
