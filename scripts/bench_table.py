@@ -6,8 +6,10 @@
 Reads ``bench/results/tiers/*.json`` (``mlx-dfloat generate --report`` files), every scenario
 directory that holds a ``report.json`` and its child results, and the ``harness-proof/`` pair.
 The numbers in the README are never typed by hand: the test suite fails when they differ from
-this render. Exit codes: 0 fresh (or written), 1 stale under ``--check``, 2 a malformed README
-or result file.
+this render. Exit codes: 0 fresh (or written), 1 stale under ``--check``, 2 any error (a
+malformed README or result file, an incomplete scenario, a README that cannot be written).
+A scenario directory whose runs are not MEASURED (a ``--tier`` run) is skipped with a note on
+stderr.
 """
 
 import argparse
@@ -29,6 +31,7 @@ from mlx_dfloat.bench.table import (  # noqa: E402
     render_overhead_block,
     render_proof_paragraph,
     render_tier_table,
+    scenario_title,
     splice,
     tier_row_from_generate_report,
 )
@@ -49,7 +52,9 @@ class Collected:
     provenance: dict[str, Any] | None
     reproducers: dict[str, str]
     preflight_skipped: dict[str, tuple[str, ...]]
-    cache_limit_bytes: int | None
+    provenances: dict[str, dict[str, Any]]
+    cache_limits: dict[str, int | None]
+    notes: tuple[str, ...]
     date: str
 
 
@@ -74,11 +79,30 @@ def _collect_proof(root: Path) -> ProofRecord | None:
     )
 
 
+def _refuse_incomplete(name: str, report: dict[str, Any]) -> None:
+    for field in ("missing", "stopped"):
+        if field not in report:
+            raise DFloatFormatError(f"{name}/report.json has no {field!r} field")
+    if report["missing"]:
+        raise DFloatFormatError(
+            f"{name}: the scenario is incomplete (missing {', '.join(map(str, report['missing']))}); "
+            "resume it before rendering"
+        )
+    if report["stopped"] is not None:
+        raise DFloatFormatError(
+            f"{name}: the scenario stopped at {report['stopped']}; resume it before rendering"
+        )
+
+
 def collect(results_root: Path) -> Collected:
     """Read the result files under ``results_root``.
 
+    A scenario directory whose children are not all ``MEASURED`` (a ``--tier`` run's
+    ``<name>-tier<GB>``) is skipped, and ``notes`` says so.
+
     Raises:
-        DFloatFormatError: A result file is unreadable or malformed.
+        DFloatFormatError: A result file is unreadable or malformed, or a scenario's report
+            records missing runs or a stop.
     """
     root = Path(results_root)
     rows = tuple(
@@ -88,7 +112,9 @@ def collect(results_root: Path) -> Collected:
     summaries: dict[str, Summary] = {}
     reproducers: dict[str, str] = {}
     skipped: dict[str, tuple[str, ...]] = {}
-    first: dict[str, Any] | None = None
+    provenances: dict[str, dict[str, Any]] = {}
+    cache_limits: dict[str, int | None] = {}
+    notes: list[str] = []
     dirs = sorted(d for d in root.iterdir() if d.is_dir()) if root.is_dir() else []
     for d in dirs:
         if d.name in _SKIP_DIRS or not (d / "report.json").is_file():
@@ -97,13 +123,22 @@ def collect(results_root: Path) -> Collected:
         scenario = report.get("scenario")
         if not isinstance(scenario, dict) or "name" not in scenario:
             continue
-        summaries[d.name] = summarise(load_results(d))
+        results = load_results(d)
+        labels = sorted({r.label for r in results})
+        if labels != ["MEASURED"]:
+            notes.append(
+                f"skipped {_RESULTS_PREFIX}/{d.name}: its runs are labelled "
+                f"{', '.join(labels) or 'nothing'}, not MEASURED"
+            )
+            continue
+        _refuse_incomplete(d.name, report)
+        summaries[d.name] = summarise(results)
         reproducers[d.name] = str(report.get("reproducer", ""))
         if report.get("skipped_preflight"):
             skipped[d.name] = tuple(str(g) for g in report.get("failed_gates", []))
-        first = first or report
-    provenance = dict(first["provenance"]) if first else None
-    scenario = first["scenario"] if first else {}
+        provenances[d.name] = dict(report["provenance"])
+        cache_limits[d.name] = scenario.get("cache_limit_bytes")
+    provenance = next(iter(provenances.values()), None)
     return Collected(
         tier_rows=rows,
         summaries=summaries,
@@ -111,7 +146,9 @@ def collect(results_root: Path) -> Collected:
         provenance=provenance,
         reproducers=reproducers,
         preflight_skipped=skipped,
-        cache_limit_bytes=scenario.get("cache_limit_bytes"),
+        provenances=provenances,
+        cache_limits=cache_limits,
+        notes=tuple(notes),
         date="" if provenance is None else str(provenance.get("date", "")),
     )
 
@@ -125,14 +162,29 @@ def _cache_note(limit: int | None) -> str:
     )
 
 
+def _shared_or_per_scenario(values: dict[str, str]) -> str:
+    """One line when every scenario has the same text, else one titled line per scenario."""
+    if len(set(values.values())) == 1:
+        return next(iter(values.values()))
+    return "\n\n".join(f"{scenario_title(k)}: {v}" for k, v in values.items())
+
+
 def _fragments(collected: Collected, *, date: str) -> dict[str, str]:
     tier = render_tier_table(collected.tier_rows) if collected.tier_rows else NO_RESULTS
     if collected.summaries and collected.provenance is not None:
+        own = {k: caption(p, date=str(p.get("date", ""))) for k, p in collected.provenances.items()}
+        captions = (
+            caption(collected.provenance, date=date)
+            if len(set(own.values())) == 1
+            else _shared_or_per_scenario(own)
+        )
         overhead = render_overhead_block(
             collected.summaries,
-            caption=caption(collected.provenance, date=date),
+            caption=captions,
             reproducers=collected.reproducers,
-            cache_limit_note=_cache_note(collected.cache_limit_bytes),
+            cache_limit_note=_shared_or_per_scenario(
+                {k: _cache_note(v) for k, v in collected.cache_limits.items()}
+            ),
             preflight_skipped=collected.preflight_skipped,
         )
     else:
@@ -177,17 +229,22 @@ def main(argv: list[str] | None = None) -> int:
     try:
         readme = args.readme.read_text()
         collected = collect(args.results_root)
+        for note in collected.notes:
+            print(f"bench_table: {note}", file=sys.stderr)
         rendered = render_readme(readme, collected, date=collected.date)
         stale = _stale_blocks(readme, collected)
+        if args.check:
+            if stale:
+                print(f"stale README blocks: {', '.join(stale)}")
+                return 1
+            return 0
+        _write_atomic(args.readme, rendered)
     except (DFloatFormatError, OSError) as exc:
         print(f"bench_table: {exc}", file=sys.stderr)
         return 2
-    if args.check:
-        if stale:
-            print(f"stale README blocks: {', '.join(stale)}")
-            return 1
-        return 0
-    _write_atomic(args.readme, rendered)
+    except Exception as exc:  # anything else is a tool error (2), never 1 (stale)
+        print(f"bench_table: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 
