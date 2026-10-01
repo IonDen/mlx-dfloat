@@ -1456,6 +1456,18 @@ def test_embeds_record_and_the_key_redact_the_home_path_in_the_metadata():
     assert key["embeds_meta"] == {"root": "~/.cache/hf/snap", "prompt": "a lighthouse"}
 
 
+def test_an_embeddings_path_inside_the_repository_is_keyed_and_recorded_repo_relative():
+    # Bug caught: the embeddings path keyed by where this checkout lives ("~/<checkout>/bench/...");
+    # a clone anywhere else then reads every committed child as a conflict on `embeds`, and the
+    # committed files carry the author's directory layout.
+    from scripts.bench_flux_step import _REPO, embeds_record
+
+    path = _REPO / "bench" / "results" / "flux1-x-1024" / "embeds.safetensors"
+    want = "bench/results/flux1-x-1024/embeds.safetensors"
+    assert run_key(**{**KEY_KWARGS, "embeds": path})["embeds"] == want
+    assert embeds_record(path, {})["path"] == want
+
+
 def test_limits_for_process_gives_the_host_record_without_a_tier_and_capped_with_one():
     # Worked by hand: 32 GiB host, recommended 24 GiB. Host tier 32: MEASURED, reserve 2 GiB (above
     # 24 GB), ceiling 22 GiB. Tier 24: recommended 24 * 2/3 = 16 GiB, reserve 1.5 GiB, ceiling

@@ -354,6 +354,37 @@ def test_reproducer_names_the_repo_relative_scenario_and_the_tier(scenario_file,
     )
 
 
+@pytest.mark.parametrize(
+    ("root", "want"),
+    [
+        (Path("/fresh/results"), " --results-root /fresh/results"),
+        (Path.home() / "fresh", " --results-root '~/fresh'"),
+        (REPO / "bench" / "results", " --results-root bench/results"),
+        (None, ""),
+    ],
+)
+def test_reproducer_records_the_results_root_only_when_one_was_given(root, want):
+    # Bug caught: the reproducer dropping --results-root (the recorded command would rerun into the
+    # committed bench/results instead of where the run went), adding one nobody passed, or writing
+    # the home directory.
+    assert bf1.reproducer(COMMITTED, tier=None, results_root=root) == (
+        "uv run --group bench python -m scripts.bench_flux1 "
+        f"bench/scenarios/flux1-schnell-1024.toml{want}"
+    )
+
+
+def test_parse_args_tells_a_given_results_root_from_the_default(tmp_path):
+    # Bug caught: the default root reported as given (every reproducer would carry
+    # --results-root bench/results), or a given one lost before the reproducer sees it.
+    given = bf1.parse_args([str(COMMITTED), "--results-root", str(tmp_path)])
+    default = bf1.parse_args([str(COMMITTED)])
+    assert (given.results_root, given.results_root_given) == (tmp_path.resolve(), True)
+    assert (default.results_root, default.results_root_given) == (
+        bf1.DEFAULT_RESULTS_ROOT.resolve(),
+        False,
+    )
+
+
 # --- main with fakes ------------------------------------------------------------------------------
 
 STEP_S = {"df11": [1.1, 1.1], "control": [1.0, 1.0], "q8": [2.2, 2.2]}
@@ -459,6 +490,7 @@ def test_main_happy_path_runs_every_child_and_writes_the_report(tmp_path, monkey
     rep = _report(out)
     assert rep["reproducer"] == (
         "uv run --group bench python -m scripts.bench_flux1 bench/scenarios/flux1-schnell-1024.toml"
+        f" --results-root {bfs.redact_home(str((tmp_path / 'res').resolve()))}"
     )
     # df11 1.1 s against control 1.0 s: +10 %; df11 1.1 s against q8 2.2 s: 0.5.
     assert rep["summary"]["overhead"]["per-block"] == pytest.approx(0.1)
@@ -595,6 +627,19 @@ def test_main_refuses_a_resume_conflict_before_any_child(tmp_path, monkeypatch, 
     assert "round1-df11.json" in capsys.readouterr().err
 
 
+def test_main_refuses_a_resume_conflict_before_the_encoder_runs(tmp_path, monkeypatch, capsys):
+    # Bug caught: the conflict check placed after the embeddings step, so a run that is going to
+    # refuse first spends about a minute and ~11 GiB on the T5+CLIP encode it then throws away.
+    rig = Rig(tmp_path, monkeypatch)
+    out = tmp_path / "flux-test"
+    out.mkdir()
+    _child_json(out / "round2-q8.json", key={"model": "dev"}, round_no=2, mode="q8")
+    assert rig.main([str(_scenario_file(tmp_path)), "--results-root", str(tmp_path)]) == 2
+    assert rig.encodes == []
+    assert rig.children == []
+    assert "round2-q8.json" in capsys.readouterr().err
+
+
 def test_main_a_missing_snapshot_is_exit_2_with_the_download_hint(tmp_path, monkeypatch, capsys):
     # Bug caught: a missing snapshot downloaded behind the user's back, or an uncaught error
     # (exit 1, the bit-mismatch code).
@@ -622,7 +667,7 @@ def test_main_tier_run_uses_its_own_dir_the_tier_and_its_limits(tmp_path, monkey
     assert rep["limits"]["is_host"] is False
     child = json.loads((tmp_path / "flux-test-tier24" / "round1-df11.json").read_text())
     assert child["key"]["tier_gb"] == 24
-    assert rep["reproducer"].endswith(" --tier 24")
+    assert " --tier 24 --results-root " in rep["reproducer"]
 
 
 def test_main_a_tier_above_the_host_is_exit_2(tmp_path, monkeypatch):

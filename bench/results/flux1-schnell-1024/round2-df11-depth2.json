@@ -63,7 +63,7 @@
  ],
  "output_dtype": "mlx.core.float32",
  "embeds": {
-  "path": "~/Documents/Work/mac/mlx-dfloat/bench/results/flux1-schnell-1024/embeds.safetensors",
+  "path": "bench/results/flux1-schnell-1024/embeds.safetensors",
   "metadata": {
    "token_length": "256",
    "synthetic": "false",
@@ -124,7 +124,7 @@
   "warmup": 2,
   "seed": 42,
   "df11": "~/.cache/huggingface/hub/models--DFloat11--FLUX.1-schnell-DF11/snapshots/51a428b928197e0531cb93d6e438941e2d0b247e",
-  "embeds": "~/Documents/Work/mac/mlx-dfloat/bench/results/flux1-schnell-1024/embeds.safetensors",
+  "embeds": "bench/results/flux1-schnell-1024/embeds.safetensors",
   "embeds_meta": {
    "token_length": "256",
    "synthetic": "false",
