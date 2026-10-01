@@ -147,8 +147,8 @@ The blocks below are generated from the files under `bench/results/` by `scripts
 when the README and those files disagree. Every row carries one of three labels. MEASURED means the run used the
 host's own memory limits on a Mac with that much memory. CAPPED means a larger Mac ran under a smaller Mac's MLX
 memory limits and watchdog ceiling, which shows how much memory the run needs but not how that smaller Mac performs.
-A CAPPED row uses MLX's default limits for a Mac of that size, not the caps `generate` installs on its own host, so
-its peak is not held down by caps that a real Mac of that size would not have.
+A CAPPED row uses MLX's default limits for a Mac of that size, which are looser than the caps `generate` would install
+there, so its peak is not understated.
 PROOF marks a run under a deliberately low watchdog ceiling, made only to show that the watchdog works; it never
 appears as a tier row.
 
