@@ -7,6 +7,8 @@ from scripts import bench_table as bt
 
 from mlx_dfloat.bench.capped import GIB
 
+REPO = Path(__file__).resolve().parents[1]
+
 H = "a" * 64
 NONE = "No result files yet."
 
@@ -27,6 +29,7 @@ TIER = {
     "sizes": {"compressed": 10 * GIB, "extras": 0},
     "watched_peak_bytes": 20 * GIB,
     "footprint_peak_bytes": 20 * GIB,
+    "mlx_peak_bytes": 18 * GIB,
     "peaks": {"denoise": {"mlx_peak": 17 * GIB}},
 }
 PASS = {
@@ -73,7 +76,7 @@ def _child(mode, rnd, step):
     }
 
 
-def _scenario(root: Path, name: str, *, reproducer="uv run x", cache=2_500_000_000):
+def _scenario(root: Path, name: str, *, reproducer="uv run x", cache=2_500_000_000, skipped=None):
     d = root / name
     d.mkdir(parents=True)
     (d / "report.json").write_text(
@@ -82,6 +85,8 @@ def _scenario(root: Path, name: str, *, reproducer="uv run x", cache=2_500_000_0
                 "scenario": {"name": name, "cache_limit_bytes": cache},
                 "provenance": PROV,
                 "reproducer": reproducer,
+                "skipped_preflight": skipped is not None,
+                "failed_gates": list(skipped or []),
             }
         )
     )
@@ -98,31 +103,33 @@ def _full_root(tmp_path: Path) -> Path:
     (root / "harness-proof").mkdir()
     (root / "harness-proof" / "pass-512.json").write_text(json.dumps(PASS))
     (root / "harness-proof" / "abort.json").write_text(json.dumps(ABORT))
-    _scenario(root, "flux1-schnell-1024", reproducer="uv run schnell")
+    _scenario(root, "flux1-schnell-1024", reproducer="uv run schnell", skipped=["busy"])
     _scenario(root, "flux1-dev-1024", reproducer="uv run dev", cache=1_400_000_000)
     return root
 
 
 def test_collect_on_an_empty_root_finds_nothing(tmp_path):
     c = bt.collect(tmp_path)
-    assert (c.tier_rows, c.summaries, c.proof, c.provenance, c.reproducer, c.date) == (
+    assert (c.tier_rows, c.summaries, c.proof, c.provenance, c.reproducers, c.date) == (
         (),
         {},
         None,
         None,
-        None,
+        {},
         "",
     )
 
 
 def test_collect_sorts_and_takes_provenance_from_the_first_scenario(tmp_path):
     # Bug caught: sorting by mtime or listing order (tiers b before a; the dev scenario must
-    # supply the reproducer and cache limit because "flux1-dev-1024" < "flux1-schnell-1024").
+    # supply the caption and cache limit because "flux1-dev-1024" < "flux1-schnell-1024"); or a
+    # scenario's command or skipped preflight read from another scenario's report.
     c = bt.collect(_full_root(tmp_path))
     assert [r.model for r in c.tier_rows] == ["dev", "schnell"]
     assert c.tier_rows[0].source == "bench/results/tiers/a.json"
     assert list(c.summaries) == ["flux1-dev-1024", "flux1-schnell-1024"]
-    assert c.reproducer == "uv run dev"
+    assert c.reproducers == {"flux1-dev-1024": "uv run dev", "flux1-schnell-1024": "uv run schnell"}
+    assert c.preflight_skipped == {"flux1-schnell-1024": ("busy",)}
     assert c.date == "2026-09-30"
     assert c.cache_limit_bytes == 1_400_000_000
     assert c.provenance is not None
@@ -205,3 +212,15 @@ def test_main_exits_2_on_a_readme_without_markers_or_a_bad_result(tmp_path, caps
     (tmp_path / "tiers").mkdir()
     (tmp_path / "tiers" / "x.json").write_text("{not json")
     assert _run(tmp_path, readme, "--check") == 2
+
+
+def test_the_committed_reports_render_each_command_and_the_dev_runs_skipped_preflight():
+    # Against the real committed reports. Bug caught: the dev run's --skip-preflight (it ran while
+    # macOS held the battery at 80 % without charging) missing from the README block, or the
+    # schnell command missing from it.
+    collected = bt.collect(REPO / "bench" / "results")
+    assert collected.preflight_skipped == {"flux1-dev-1024": ("not_charging",)}
+    block = bt.render_readme(README, collected, date=collected.date)
+    for name in ("flux1-dev-1024", "flux1-schnell-1024"):
+        assert f"bench/scenarios/{name}.toml`" in block
+    assert "flux1-dev-1024.toml` (preflight skipped: not_charging)" in block

@@ -20,8 +20,10 @@ the activations. The ceiling sits between them:
     512² headroom:  19.25 - 18.67 = 0.58 GiB under C
     1024² overshoot: 19.78 - 19.25 = 0.53 GiB over C
 
-Both margins are more than three times the run-to-run spread seen for schnell at 1024² (19.94, 19.81 and
-19.78 GiB in three runs).
+Runs of the same recipe do not land on the same peak. Schnell at 1024² measured 19.94, 19.81 and 19.78 GiB in three
+runs, and the two 512² runs differ by 0.42 GiB (18.67 GiB in the plain run above, 18.25 GiB in the pass run below),
+close to the 0.53–0.58 GiB margins. Both runs still came out as predicted: the 512² run passed and the 1024² run
+was stopped.
 
 ## The runs
 
@@ -40,9 +42,9 @@ against the 19.25 GiB ceiling):
       --seed 42 --steps 4 --height 1024 --width 1024 --memory-ceiling 20669530112 --no-fit-check \
       --output /tmp/proof-abort/abort.png
 
-`--no-fit-check` turns off the up-front fit estimate, which would otherwise refuse the 1024² run before it starts,
-so the watchdog is what stops it. The watchdog wrote `abort.json` next to the output path; it is copied here
-unchanged.
+`--no-fit-check` is not needed here: `--memory-ceiling` leaves the fit budget at the host's 22.96 GiB, and the 1024²
+estimate fits under it. It is passed so that nothing but the watchdog can stop the run. The watchdog wrote
+`abort.json` next to the output path; it is copied here unchanged.
 
 ## Setup
 

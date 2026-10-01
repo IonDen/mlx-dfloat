@@ -57,6 +57,10 @@ def _need(mapping: Mapping[str, Any], key: str, where: str) -> Any:
 def tier_row_from_generate_report(report: Mapping[str, Any], *, source: str) -> TierRow:
     """Build a tier-table row from an ``mlx-dfloat generate --report`` JSON.
 
+    ``ceiling_bytes`` is the tier's fit budget (``limits.tier.ceiling_bytes``: the recommended
+    working set minus the reserve), which the status is judged against. On the host tier the
+    watchdog's own abort line is higher (RAM minus 4 GiB); on a CAPPED tier the two are the same.
+
     Raises:
         DFloatFormatError: A field is missing, or the report is a harness proof.
     """
@@ -66,16 +70,8 @@ def tier_row_from_generate_report(report: Mapping[str, Any], *, source: str) -> 
     limits = _need(report, "limits", "report")
     tier = _need(limits, "tier", "limits")
     sizes = _need(report, "sizes", "report")
-    peaks = _need(report, "peaks", "report")
     ceiling = int(_need(tier, "ceiling_bytes", "limits.tier"))
     watched = int(_need(report, "watched_peak_bytes", "report"))
-    phases = [
-        v["mlx_peak"]
-        for k, v in peaks.items()
-        if k != "label" and isinstance(v, Mapping) and "mlx_peak" in v
-    ]
-    if not phases:
-        raise DFloatFormatError("report peaks carry no phase with an 'mlx_peak' number")
     return TierRow(
         mac_gb=int(_need(tier, "tier_gb", "limits.tier")),
         ceiling_bytes=ceiling,
@@ -83,7 +79,8 @@ def tier_row_from_generate_report(report: Mapping[str, Any], *, source: str) -> 
         df11_bytes=int(_need(sizes, "compressed", "sizes")) + int(_need(sizes, "extras", "sizes")),
         watched_peak_bytes=watched,
         footprint_peak_bytes=int(_need(report, "footprint_peak_bytes", "report")),
-        mlx_peak_bytes=int(max(phases)),
+        # The watchdog's MLX peak (active + cache), not a phase's active-only mx.get_peak_memory.
+        mlx_peak_bytes=int(_need(report, "mlx_peak_bytes", "report")),
         label=str(label),
         status="target" if watched <= ceiling else "over",
         limits_note="host caps"
@@ -137,8 +134,8 @@ def _pct(x: float | None) -> str:
 
 
 _TIER_HEADER = (
-    "| Mac | Budget − reserve | Model | DF11 size | Peak (watched) | Peak footprint | Peak MLX "  # noqa: RUF001
-    "| Label | Status | Limits | Result |"
+    "| Mac | Fit budget (budget − reserve) | Model | DF11 size | Peak (watched) | Peak footprint "  # noqa: RUF001
+    "| Peak MLX (active + cache) | Label | Status | Limits | Result |"
 )
 
 
@@ -162,9 +159,19 @@ def _scenario_title(key: str) -> str:
 
 
 def render_overhead_block(
-    summaries: Mapping[str, Summary], *, caption: str, reproducer: str, cache_limit_note: str
+    summaries: Mapping[str, Summary],
+    *,
+    caption: str,
+    reproducers: Mapping[str, str],
+    cache_limit_note: str,
+    preflight_skipped: Mapping[str, Sequence[str]] | None = None,
 ) -> str:
-    """Render one overhead line per scenario, then the reproducer, caption and cache-limit note."""
+    """Render each scenario's overhead line and recorded command, then the caption and cache note.
+
+    ``preflight_skipped`` maps a scenario whose run skipped the launch check to the gates that
+    failed; its command line says so.
+    """
+    skipped = preflight_skipped or {}
     lines = []
     for key, s in summaries.items():
         per_block = _pct(s.overhead.get("per-block"))
@@ -176,7 +183,11 @@ def render_overhead_block(
             f"eval policy cost {cost}; DF11 (per-block) over mflux q8 as shipped (one eval per step): {q8}"
         )
         lines.append("")
-    lines += [f"Reproduce: `{reproducer}`", "", caption, "", cache_limit_note]
+        command = f"Command: `{reproducers.get(key, '')}`"
+        if key in skipped:
+            command += f" (preflight skipped: {', '.join(skipped[key]) or 'no gate failed'})"
+        lines += [command, ""]
+    lines += [caption, "", cache_limit_note]
     return "\n".join(lines) + "\n"
 
 

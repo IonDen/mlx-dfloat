@@ -47,7 +47,8 @@ class Collected:
     summaries: dict[str, Summary]
     proof: ProofRecord | None
     provenance: dict[str, Any] | None
-    reproducer: str | None
+    reproducers: dict[str, str]
+    preflight_skipped: dict[str, tuple[str, ...]]
     cache_limit_bytes: int | None
     date: str
 
@@ -89,6 +90,8 @@ def collect(results_root: Path) -> Collected:
         for p in sorted((root / "tiers").glob("*.json"))
     )
     summaries: dict[str, Summary] = {}
+    reproducers: dict[str, str] = {}
+    skipped: dict[str, tuple[str, ...]] = {}
     first: dict[str, Any] | None = None
     dirs = sorted(d for d in root.iterdir() if d.is_dir()) if root.is_dir() else []
     for d in dirs:
@@ -99,6 +102,9 @@ def collect(results_root: Path) -> Collected:
         if not isinstance(scenario, dict) or "name" not in scenario:
             continue
         summaries[d.name] = summarise(load_results(d))
+        reproducers[d.name] = str(report.get("reproducer", ""))
+        if report.get("skipped_preflight"):
+            skipped[d.name] = tuple(str(g) for g in report.get("failed_gates", []))
         first = first or report
     provenance = dict(first["provenance"]) if first else None
     scenario = first["scenario"] if first else {}
@@ -107,7 +113,8 @@ def collect(results_root: Path) -> Collected:
         summaries=summaries,
         proof=_collect_proof(root),
         provenance=provenance,
-        reproducer=None if first is None else str(first.get("reproducer", "")),
+        reproducers=reproducers,
+        preflight_skipped=skipped,
         cache_limit_bytes=scenario.get("cache_limit_bytes"),
         date="" if provenance is None else str(provenance.get("date", "")),
     )
@@ -128,8 +135,9 @@ def _fragments(collected: Collected, *, date: str) -> dict[str, str]:
         overhead = render_overhead_block(
             collected.summaries,
             caption=caption(collected.provenance, date=date),
-            reproducer=collected.reproducer or "",
+            reproducers=collected.reproducers,
             cache_limit_note=_cache_note(collected.cache_limit_bytes),
+            preflight_skipped=collected.preflight_skipped,
         )
     else:
         overhead = NO_RESULTS

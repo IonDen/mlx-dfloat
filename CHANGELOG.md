@@ -110,11 +110,13 @@ All notable changes to this project are documented here. The format follows
   measurable on dev (the per-block control was 0.07 s faster); both sides of the overhead comparison pay it. A DF11
   step with per-block evaluation takes 1.26 times as long as mflux's q8 step as shipped on dev (15.26 s) and 1.35
   times on schnell (14.25 s). These ratios are rough, because the q8 step's median moved by about 2 s between rounds
-  in both scenarios while the DF11 step's moved by 0.5 s at most. The dev run used `--skip-preflight`: the only failed
-  gate was "not charging", because macOS held the battery at 80 % for optimised charging, and its `report.json`
-  records both. The results are in `bench/results/flux1-schnell-1024/` and
-  `bench/results/flux1-dev-1024/`; `uv run --group bench python -m scripts.bench_flux1 <scenario file>` reproduces
-  them.
+  in both scenarios while the DF11 step's moved by 0.5 s at most. The q8 step also peaked lower, at 14.8–14.9 GiB
+  against DF11's 19.7–20.0 GiB; what DF11 keeps and q8 gives up is the exact BF16 output. The dev run used
+  `--skip-preflight`: the only failed gate was "not charging", because macOS held the battery at 80 % for optimised
+  charging, and its `report.json` records both. The check now lets a battery at 50 % or more run on a charger that
+  is not charging it. The results are in `bench/results/flux1-schnell-1024/` and
+  `bench/results/flux1-dev-1024/`; `uv run --group bench python -m scripts.bench_flux1 <scenario file>
+  --results-root <a fresh directory>` reproduces them.
 - `mlx_dfloat.bench`, the pure side of the benchmark: the scenario loader, a smaller Mac's MLX limits and watchdog
   ceiling, the launch check, the reader and summary of per-condition results, and the README renderers. It does not
   import mflux or touch the GPU.
@@ -124,7 +126,7 @@ All notable changes to this project are documented here. The format follows
   Every report now records the limits in force, its label, the image size and the watched peak, and writes the home
   directory as `~`.
 - The measured 32 GB rows for FLUX.1-schnell, FLUX.1-dev and FLUX.1-Krea-dev at 1024² (`bench/results/tiers/`):
-  watched peaks of 19.78, 19.96 and 20.04 GiB, all under the M1 Max's 22.96 GiB ceiling.
+  watched peaks of 19.78, 19.96 and 20.04 GiB, all under the M1 Max's 22.96 GiB fit budget.
 - A harness proof (`bench/results/harness-proof/`): under one 19.25 GiB watchdog ceiling, a 512² FLUX.1-schnell run
   finished at 18.25 GiB, and a 1024² run was stopped by the watchdog at 19.32 GiB with exit 70.
 - `scripts/bench_table.py` writes the README's measured-numbers blocks from `bench/results/`, and a test fails when the
