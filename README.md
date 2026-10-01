@@ -200,11 +200,11 @@ a reduced-depth transformer (4 double and 8 single blocks instead of 19 and 38):
 whose BF16 weights were all resident.
 
 <!-- bench:overhead -->
-FLUX.1-dev, 1024², per-block evaluation: +3.5 % (depth-2: +4.6 %); eval policy cost -0.07 s/step; DF11 (per-block) over mflux q8 as shipped (one eval per step): 1.26×
+FLUX.1-dev, 1024², per-block evaluation: +3.5 % (depth-2: +4.6 %); eval policy cost -0.07 s/step; DF11 (per-block) over the mflux q8 step (one eval per step, same cache limit): 1.26×
 
 Command: `uv run --group bench python -m scripts.bench_flux1 bench/scenarios/flux1-dev-1024.toml` (preflight skipped: not_charging)
 
-FLUX.1-schnell, 1024², per-block evaluation: +4.0 % (depth-2: +4.2 %); eval policy cost 0.41 s/step; DF11 (per-block) over mflux q8 as shipped (one eval per step): 1.35×
+FLUX.1-schnell, 1024², per-block evaluation: +4.0 % (depth-2: +4.2 %); eval policy cost 0.41 s/step; DF11 (per-block) over the mflux q8 step (one eval per step, same cache limit): 1.35×
 
 Command: `uv run --group bench python -m scripts.bench_flux1 bench/scenarios/flux1-schnell-1024.toml`
 
@@ -218,7 +218,7 @@ stays under it and once at a size that does not. `bench/results/harness-proof/RE
 the arithmetic behind the ceiling.
 
 <!-- bench:harness-proof -->
-Harness proof: under one 19.25 GiB cap, a 512² run passed with a watched peak of 18.25 GiB, and a 1024² run was stopped by the watchdog (memory, counter footprint) at 19.32 GiB. Records: `bench/results/harness-proof`.
+Harness proof: under one 19.25 GiB cap, a 512² run passed with a watched peak of 18.64 GiB, and a 1024² run was stopped by the watchdog (memory, counter footprint) at 19.32 GiB. Records: `bench/results/harness-proof`.
 <!-- /bench:harness-proof -->
 
 ### Reproduce the numbers
