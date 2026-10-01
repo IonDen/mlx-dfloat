@@ -69,12 +69,8 @@ def _collect_proof(root: Path) -> ProofRecord | None:
     abort = proof_dir / "abort.json"
     if not passes or not abort.is_file():
         return None
-    artifact = _read_json(abort)
-    kwargs: dict[str, int] = {}
-    if "size" in artifact:
-        kwargs["abort_size"] = int(artifact["size"])
     return proof_from_files(
-        _read_json(passes[0]), artifact, source_dir=f"{_RESULTS_PREFIX}/harness-proof", **kwargs
+        _read_json(passes[0]), _read_json(abort), source_dir=f"{_RESULTS_PREFIX}/harness-proof"
     )
 
 

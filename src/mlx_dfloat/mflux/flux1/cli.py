@@ -237,6 +237,22 @@ def ceiling_for(
     return (default_ceiling_bytes if limits.is_host else limits.ceiling_bytes), limits, limits.label
 
 
+def _steps(args: argparse.Namespace) -> int:
+    """The denoise steps this call runs: ``--steps``, else the model's mflux default."""
+    return int(args.steps) if args.steps is not None else DEFAULT_STEPS[args.model]
+
+
+def _run_context(args: argparse.Namespace) -> dict[str, Any]:
+    """What the watchdog's abort artifact records about the run it may stop."""
+    return {
+        "model": args.model,
+        "height": args.height,
+        "width": args.width,
+        "seed": args.seed,
+        "steps": _steps(args),
+    }
+
+
 def _host_facts() -> tuple[int, int]:
     """This Mac's RAM and recommended working set, from MLX's device info (0 when not reported)."""
     info = mx.device_info()
@@ -356,7 +372,9 @@ def run(
             effective_wired_limit=effective["wired"],
             applied=applied,
         )
-        watchdog = watchdog_factory(output.parent, ceiling=ceiling, budget=args.wall_budget).start()
+        watchdog = watchdog_factory(
+            output.parent, ceiling=ceiling, budget=args.wall_budget, context=_run_context(args)
+        ).start()
     except (DFloatError, OSError) as exc:
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
         report["error"] = f"{type(exc).__name__}: {exc}"
@@ -372,7 +390,7 @@ def run(
         image = model.generate_image(
             seed=args.seed,
             prompt=args.prompt,
-            num_inference_steps=args.steps if args.steps is not None else DEFAULT_STEPS[args.model],
+            num_inference_steps=_steps(args),
             height=args.height,
             width=args.width,
             guidance=args.guidance if args.guidance is not None else DEFAULT_GUIDANCE,

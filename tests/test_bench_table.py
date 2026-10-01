@@ -197,51 +197,101 @@ def test_tier_row_marks_over_budget_and_refuses_a_proof_report():
         tier_row_from_generate_report({**REPORT, "label": "PROOF"}, source="s")
 
 
-def test_proof_record_and_paragraph():
+REPO = Path(__file__).resolve().parents[1]
+# A real pass report: what `mlx-dfloat generate --memory-ceiling ... --report` wrote.
+PASS_REPORT = json.loads((REPO / "bench/results/harness-proof/pass-512.json").read_text())
+PROOF_CAP = PASS_REPORT["memory_ceiling_bytes"]
+
+
+def _abort_artifact(tmp_path, monkeypatch, *argv, ceiling=PROOF_CAP, peak=None):
+    """An abort artifact written by the real producers: generate's run context, the watchdog's _fire."""
+    import mlx_dfloat._watchdog as wd
+    from mlx_dfloat.mflux.flux1 import cli as gen
+
+    args = gen.build_parser().parse_args(["--prompt", "p", *argv])
+    monkeypatch.setattr(wd, "_exit", lambda code: None)
+    watchdog = wd.Watchdog(tmp_path, ceiling=ceiling, budget=60.0, context=gen._run_context(args))
+    watchdog.peak_watched = peak if peak is not None else ceiling + 1
+    watchdog._fire(
+        "memory",
+        {
+            "footprint": ceiling + 1,
+            "rss": 1,
+            "mlx_active": 1,
+            "mlx_cache": 0,
+            "elapsed": 1.0,
+            "verdict_memory": ceiling + 1,
+            "verdict_counter": "footprint",
+        },
+    )
+    artifact: dict[str, object] = json.loads((tmp_path / "abort.json").read_text())
+    return artifact
+
+
+def test_proof_record_and_paragraph(tmp_path, monkeypatch):
     # Red when: proof_from_files takes the cap from the artifact's peak, or the paragraph omits the cap or either size.
-    passed = {
-        "height": 512,
-        "width": 512,
-        "watched_peak_bytes": int(17.0 * GIB),
-        "memory_ceiling_bytes": int(18.5 * GIB),
-        "label": "PROOF",
-    }
-    abort = {
-        "reason": "memory",
-        "ceiling": int(18.5 * GIB),
-        "verdict_counter": "footprint",
-        "peak_watched": int(18.6 * GIB),
-    }
-    proof = proof_from_files(passed, abort, source_dir="bench/results/harness-proof")
+    abort = _abort_artifact(tmp_path, monkeypatch, "--height", "1024", "--width", "1024")
+    proof = proof_from_files(PASS_REPORT, abort, source_dir="bench/results/harness-proof")
     assert isinstance(proof, ProofRecord)
-    assert proof.cap_bytes == int(18.5 * GIB)
+    assert proof.cap_bytes == 20_669_530_112
     assert proof.pass_size == 512
+    assert proof.abort_size == 1024
     text = render_proof_paragraph(proof)
-    for needle in ("18.50 GiB", "512", "1024", "memory"):
+    for needle in ("19.25 GiB", "512", "1024", "memory"):
         assert needle in text
 
 
-def test_proof_refuses_a_mismatched_cap_a_non_proof_label_or_a_non_square_size():
-    # Red when: proof_from_files stops comparing the pass report's cap with the artifact's ceiling.
-    passed = {
-        "height": 512,
-        "width": 512,
-        "watched_peak_bytes": 1,
-        "memory_ceiling_bytes": 100,
-        "label": "PROOF",
-    }
-    abort = {
-        "reason": "memory",
-        "ceiling": 100,
-        "verdict_counter": "footprint",
-        "peak_watched": 101,
-    }
-    with pytest.raises(DFloatFormatError, match="cap"):
-        proof_from_files(passed, {**abort, "ceiling": 99}, source_dir="d")
-    with pytest.raises(DFloatFormatError, match="PROOF"):
-        proof_from_files({**passed, "label": "MEASURED"}, abort, source_dir="d")
+def test_proof_reads_the_abort_size_from_the_artifacts_own_record(tmp_path, monkeypatch):
+    # Bug caught: the abort size defaulted (it used to print 1024 whatever the aborted run was).
+    abort = _abort_artifact(tmp_path, monkeypatch, "--height", "768", "--width", "768")
+    proof = proof_from_files(PASS_REPORT, abort, source_dir="d")
+    assert proof.abort_size == 768
+
+
+def test_proof_refuses_an_artifact_without_the_runs_size(tmp_path, monkeypatch):
+    # Bug caught: an artifact written by a watchdog that knew nothing of the run (no context)
+    # rendered with an assumed size instead of refused.
+    abort = _abort_artifact(tmp_path, monkeypatch)
+    del abort["context"]
+    with pytest.raises(DFloatFormatError, match="height"):
+        proof_from_files(PASS_REPORT, abort, source_dir="d")
+
+
+def test_proof_refuses_a_non_square_aborted_run(tmp_path, monkeypatch):
+    # Bug caught: the abort size read from the height alone, so a 1024x512 run prints as 1024².
+    abort = _abort_artifact(tmp_path, monkeypatch, "--height", "1024", "--width", "512")
     with pytest.raises(DFloatFormatError, match="square"):
-        proof_from_files({**passed, "width": 256}, abort, source_dir="d")
+        proof_from_files(PASS_REPORT, abort, source_dir="d")
+
+
+def test_proof_refuses_an_aborted_run_of_another_model(tmp_path, monkeypatch):
+    # Bug caught: a dev abort paired with a schnell pass, so the proof compares two recipes.
+    abort = _abort_artifact(tmp_path, monkeypatch, "--model", "dev")
+    with pytest.raises(DFloatFormatError, match="model"):
+        proof_from_files(PASS_REPORT, abort, source_dir="d")
+
+
+def test_proof_compares_the_seed_only_when_both_records_carry_one(tmp_path, monkeypatch):
+    # Bug caught: a seed mismatch accepted when both sides name a seed, or a pass report without a
+    # seed (generate's report has none) refused.
+    abort = _abort_artifact(tmp_path, monkeypatch, "--seed", "42")
+    assert proof_from_files(PASS_REPORT, abort, source_dir="d").abort_size == 1024
+    with pytest.raises(DFloatFormatError, match="seed"):
+        proof_from_files({**PASS_REPORT, "seed": 7}, abort, source_dir="d")
+    assert proof_from_files({**PASS_REPORT, "seed": 42}, abort, source_dir="d").pass_size == 512
+
+
+def test_proof_refuses_a_mismatched_cap_a_non_proof_label_or_a_non_square_size(
+    tmp_path, monkeypatch
+):
+    # Red when: proof_from_files stops comparing the pass report's cap with the artifact's ceiling.
+    abort = _abort_artifact(tmp_path, monkeypatch)
+    with pytest.raises(DFloatFormatError, match="cap"):
+        proof_from_files(PASS_REPORT, {**abort, "ceiling": 99}, source_dir="d")
+    with pytest.raises(DFloatFormatError, match="PROOF"):
+        proof_from_files({**PASS_REPORT, "label": "MEASURED"}, abort, source_dir="d")
+    with pytest.raises(DFloatFormatError, match="square"):
+        proof_from_files({**PASS_REPORT, "width": 256}, abort, source_dir="d")
 
 
 def test_tier_row_names_a_missing_field():

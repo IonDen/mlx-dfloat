@@ -95,13 +95,16 @@ def proof_from_files(
     abort_artifact: Mapping[str, Any],
     *,
     source_dir: str,
-    abort_size: int = 1024,
 ) -> ProofRecord:
     """Pair the passing run with the aborted run of the harness proof.
 
+    The aborted run's size comes from the artifact's own record (``context.height`` and
+    ``context.width``, which ``generate`` hands its watchdog), never from a default.
+
     Raises:
-        DFloatFormatError: The pass report is not a PROOF, is not square, or ran under a
-            different cap than the abort artifact.
+        DFloatFormatError: The pass report is not a PROOF or is not square; the artifact has no
+            run context, or its run is not square; the two ran under different caps, for different
+            models, or (when both name one) with different seeds.
     """
     if _need(pass_report, "label", "pass report") != "PROOF":
         raise DFloatFormatError("the pass report's label is not PROOF")
@@ -113,11 +116,31 @@ def proof_from_files(
         raise DFloatFormatError(
             "the proof requires the same cap: pass report and abort artifact differ"
         )
+    context = abort_artifact.get("context")
+    if not isinstance(context, Mapping):
+        raise DFloatFormatError(
+            "the abort artifact records no run context (model, height, width): it was written "
+            "by a watchdog that was not told the run's size"
+        )
+    abort_height = _need(context, "height", "abort artifact context")
+    if abort_height != _need(context, "width", "abort artifact context"):
+        raise DFloatFormatError("the aborted run is not square (height != width)")
+    model = _need(pass_report, "model", "pass report")
+    if model != _need(context, "model", "abort artifact context"):
+        raise DFloatFormatError(
+            f"the proof requires the same model: the pass report ran {model!r}, "
+            f"the aborted run {context['model']!r}"
+        )
+    if "seed" in pass_report and "seed" in context and pass_report["seed"] != context["seed"]:
+        raise DFloatFormatError(
+            f"the proof requires the same seed: the pass report ran {pass_report['seed']!r}, "
+            f"the aborted run {context['seed']!r}"
+        )
     return ProofRecord(
         cap_bytes=cap,
         pass_size=int(height),
         pass_watched_peak=int(_need(pass_report, "watched_peak_bytes", "pass report")),
-        abort_size=abort_size,
+        abort_size=int(abort_height),
         abort_reason=str(_need(abort_artifact, "reason", "abort artifact")),
         abort_counter=str(_need(abort_artifact, "verdict_counter", "abort artifact")),
         abort_peak=int(_need(abort_artifact, "peak_watched", "abort artifact")),

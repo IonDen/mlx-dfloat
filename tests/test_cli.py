@@ -40,8 +40,9 @@ class _Model:
 
 
 class _Watchdog:
-    def __init__(self, out_dir, *, ceiling, budget):
+    def __init__(self, out_dir, *, ceiling, budget, context=None):
         self.out_dir, self.ceiling, self.budget, self.stopped = out_dir, ceiling, budget, False
+        self.context = context
         # Far above any real footprint, and distinct from one another: the report must carry each
         # peak from its own counter, not the final sample and not another counter's value.
         self.peak_footprint = 10**15
@@ -226,10 +227,31 @@ def test_generate_builds_the_model_from_the_flags_writes_the_image_and_the_repor
     assert watchdogs[0].out_dir == out.parent
     assert watchdogs[0].budget == 60
     assert watchdogs[0].stopped
+    # Bug caught: the abort artifact not naming the run it stopped (the harness proof reads the
+    # aborted run's size from it) or a context with the flag's None for steps.
+    assert watchdogs[0].context == {
+        "model": "dev",
+        "height": 512,
+        "width": 768,
+        "seed": 7,
+        "steps": 3,
+    }
     assert report["footprint_peak_bytes"] == 10**15
     assert (
         report["footprint_peak_label"] == "OS phys_footprint, sampled every 0.05 s by the watchdog"
     )
+
+
+def test_the_watchdog_context_carries_the_models_default_steps(tmp_path):
+    # Bug caught: the context recording the --steps flag (None) instead of the steps that ran.
+    _, watchdogs = _run(["--prompt", "p", "--output", str(tmp_path / "o.png")], [], tmp_path)
+    assert watchdogs[0].context == {
+        "model": "schnell",
+        "height": 1024,
+        "width": 1024,
+        "seed": 42,
+        "steps": 4,
+    }
 
 
 def test_defaults_follow_mflux_per_model(tmp_path):
@@ -695,7 +717,8 @@ def test_the_watched_peak_includes_the_final_footprint_sample(tmp_path):
     class Idle(_Watchdog):
         def __init__(self, out_dir, **kw):
             super().__init__(out_dir, **kw)
-            self.peak_footprint = self.peak_watched = self.peak_mlx = 0
+            self.peak_footprint = self.peak_watched = 0
+            self.peak_mlx = None  # what a watchdog that never sampled holds
 
     args = _args("--output", str(tmp_path / "o.png"), "--report", str(tmp_path / "r.json"))
     code = gen.run(
@@ -710,7 +733,8 @@ def test_the_watched_peak_includes_the_final_footprint_sample(tmp_path):
     report = json.loads((tmp_path / "r.json").read_text())
     assert report["watched_peak_bytes"] > 0
     assert report["watched_peak_bytes"] == report["footprint_peak_bytes"]
-    assert report["mlx_peak_bytes"] == 0
+    # Bug caught: an unsampled MLX peak reported as 0 bytes instead of "not sampled".
+    assert report["mlx_peak_bytes"] is None
 
 
 def test_host_facts_reads_ram_and_the_recommended_working_set_from_the_device(monkeypatch):
