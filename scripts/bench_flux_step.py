@@ -301,10 +301,12 @@ def run_key(
     The MLX cache limit is part of the key because it changes what a step allocates.
     ``scenario_hash`` is None outside a scenario run. ``tier_gb`` is the tier the process runs
     under, resolved (the host's own tier when no ``--tier`` is given, see ``current_key``); the
-    default None is for benches without tiers (the reduced-depth control validation). Both paths
-    and the embeddings metadata values are written with the home directory as ``~``
-    (``redact_home``), so a committed result names no user; a key stored before that reads as a
-    conflict, never as a match.
+    default None is for benches without tiers (the reduced-depth control validation). The
+    embeddings path is written relative to the repository root when it lies inside it
+    (``shown_path``), so a clone elsewhere keys the committed results the same way; the checkpoint
+    path and the embeddings metadata values are written with the home directory as ``~``
+    (``redact_home``), so a committed result names no user. A key stored before either rule reads
+    as a conflict, never as a match.
     """
     return {
         "model": model,
@@ -313,7 +315,7 @@ def run_key(
         "warmup": warmup,
         "seed": seed,
         "df11": redact_home(str(Path(df11).resolve())),
-        "embeds": redact_home(str(embeds)),
+        "embeds": shown_path(embeds),
         "embeds_meta": redact_meta(embeds_meta),
         "source": source,
         "mlx": mlx,
@@ -331,14 +333,22 @@ def redact_home(text: str, home: str = str(Path.home())) -> str:
     return text
 
 
+def shown_path(path: Path, repo: Path = _REPO) -> str:
+    """``path`` relative to ``repo`` when it lies inside it, else as given through ``redact_home``."""
+    try:
+        return str(Path(path).resolve().relative_to(repo))
+    except ValueError:
+        return redact_home(str(path))
+
+
 def redact_meta(meta: Mapping[str, str]) -> dict[str, str]:
     """``meta`` with every value through ``redact_home`` (the encoder records its snapshot root)."""
     return {k: redact_home(v) for k, v in meta.items()}
 
 
 def embeds_record(path: Path, meta: Mapping[str, str]) -> dict[str, Any]:
-    """The run JSON's ``embeds`` record: the file's path and metadata, home written as ``~``."""
-    return {"path": redact_home(str(path)), "metadata": redact_meta(meta)}
+    """The run JSON's ``embeds`` record: the file's path (``shown_path``) and metadata, home as ``~``."""
+    return {"path": shown_path(path), "metadata": redact_meta(meta)}
 
 
 def conflicting_flags(

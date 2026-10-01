@@ -40,7 +40,7 @@ import shlex
 import subprocess
 import sys
 import traceback
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -127,16 +127,27 @@ def base_patterns(scenario: Scenario) -> list[str]:
 
 
 def plan_children(
-    scenario: Scenario, out_dir: Path, *, key: Mapping[str, Any]
+    scenario: Scenario,
+    out_dir: Path,
+    *,
+    key: Mapping[str, Any],
+    ignore: Collection[str] = (),
 ) -> list[tuple[int, str, Path]]:
     """The pending (round, condition, result path) runs, interleaved per round in the scenario's order.
+
+    Key fields named in ``ignore`` are left out of the conflict check (the embeddings metadata,
+    before the embeddings file exists).
 
     Raises:
         BenchError: An existing child file in ``out_dir`` was written under another key (the
             message lists every such file and its differing fields).
     """
     conditions = list(scenario.conditions)
-    conflicts = bfs.resume_conflicts(out_dir, scenario.rounds, key, modes=conditions)
+    conflicts = [
+        (r, m, kept)
+        for r, m, fields in bfs.resume_conflicts(out_dir, scenario.rounds, key, modes=conditions)
+        if (kept := [f for f in fields if f not in ignore])
+    ]
     if conflicts:
         lines = [
             f"{bfs.redact_home(str(bfs.run_path(out_dir, r, m)))}: differs in {fields}"
@@ -226,16 +237,18 @@ def encode_argv(scenario: Scenario, *, base_root: Path, out: Path) -> list[str]:
     ]
 
 
-def reproducer(scenario_file: Path, *, tier: int | None) -> str:
-    """The command that reproduces the run, with the scenario path relative to the repository."""
-    path = Path(scenario_file).resolve()
-    try:
-        shown = str(path.relative_to(_REPO))
-    except ValueError:
-        shown = bfs.redact_home(str(path))
-    words = ["uv", "run", "--group", "bench", "python", "-m", "scripts.bench_flux1", shown]
+def reproducer(scenario_file: Path, *, tier: int | None, results_root: Path | None = None) -> str:
+    """The command that reproduces the run, with its paths relative to the repository.
+
+    ``results_root`` is the ``--results-root`` the run was given, or None when it used the
+    default; the command records it only when it was given.
+    """
+    words = ["uv", "run", "--group", "bench", "python", "-m", "scripts.bench_flux1"]
+    words.append(bfs.shown_path(scenario_file))
     if tier is not None:
         words += ["--tier", str(tier)]
+    if results_root is not None:
+        words += ["--results-root", bfs.shown_path(results_root)]
     return shlex.join(words)
 
 
@@ -296,13 +309,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--results-root",
         type=Path,
-        default=DEFAULT_RESULTS_ROOT,
+        default=None,
         help="directory holding one out dir per scenario (default: bench/results)",
     )
     args = p.parse_args(argv)
     if args.tier is not None and args.tier < 1:
         p.error("--tier must be >= 1")
-    args.results_root = Path(args.results_root).resolve()
+    args.results_root_given = args.results_root is not None
+    args.results_root = Path(args.results_root or DEFAULT_RESULTS_ROOT).resolve()
     return args
 
 
@@ -375,16 +389,24 @@ def _run(
     base = resolve(
         scenario.base_repo, scenario.base_revision, allow_patterns=base_patterns(scenario)
     )
-    embeds, meta = _embeddings(scenario, out_dir, base, encode)
-    key = child_key(
+    key_inputs: dict[str, Any] = {
+        "df11": df11,
+        "embeds": embeds_path(out_dir),
+        "source": source_hash(),
+        "mlx": mx.__version__,
+        "tier_gb": tier_gb,
+    }
+    # The resume check runs twice: first on every key field but the embeddings metadata (not known
+    # until the file exists), so a conflicting run refuses before the encoder spends a minute and
+    # ~11 GiB; then on the whole key once the embeddings are in place.
+    plan_children(
         scenario,
-        df11=df11,
-        embeds=embeds,
-        embeds_meta=meta,
-        source=source_hash(),
-        mlx=mx.__version__,
-        tier_gb=tier_gb,
+        out_dir,
+        key=child_key(scenario, embeds_meta={}, **key_inputs),
+        ignore=("embeds_meta",),
     )
+    embeds, meta = _embeddings(scenario, out_dir, base, encode)
+    key = child_key(scenario, embeds_meta=meta, **key_inputs)
     todo = plan_children(scenario, out_dir, key=key)
     total = scenario.rounds * len(scenario.conditions)
     print(f"{total - len(todo)} run(s) already complete, {len(todo)} to run")
@@ -417,7 +439,11 @@ def _run(
         # The orchestrator installs no caps: it loads no model.
         provenance=provenance((0, 0)),
         stopped=stopped,
-        reproducer=reproducer(args.scenario, tier=args.tier),
+        reproducer=reproducer(
+            args.scenario,
+            tier=args.tier,
+            results_root=args.results_root if args.results_root_given else None,
+        ),
         tier_gb=tier_gb,
         limits=limits.as_dict(),
     )
