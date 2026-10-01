@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-01
+
+The first release.
+
 ### Added
 
 - Project skeleton: package layout, MLX memory caps derived from the device's working-set size, test gates for
@@ -149,3 +153,6 @@ All notable changes to this project are documented here. The format follows
   `hf download` command that completes it.
 - CI's mflux lane gets the Hub token for its test step only, so the three tokenizer tests against the gated FLUX.1
   bases run there instead of skipping.
+
+[Unreleased]: https://github.com/IonDen/mlx-dfloat/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/IonDen/mlx-dfloat/releases/tag/v0.1.0

@@ -23,7 +23,7 @@ has to measure. The numbers measured so far are under "Measured numbers" below, 
 
 ## Status
 
-Pre-alpha, and not on PyPI yet; it installs from a checkout (see "Install" below). The first two milestones decided
+Pre-alpha. Version 0.1.0 is on PyPI (see "Install" below). The first two milestones decided
 whether the project would go ahead at all. The other two make it usable and its numbers reproducible:
 
 1. A bit-exact reference decoder for published DFloat11 checkpoints. **Done.** Every compressed tensor of Qwen3-4B,
@@ -52,8 +52,17 @@ All four milestones are done.
 
 ## Install
 
-mlx-dfloat is for Macs with Apple Silicon and needs Python 3.11 or newer. It is not on PyPI yet, so install it from
-a checkout with [uv](https://docs.astral.sh/uv/):
+mlx-dfloat is for Macs with Apple Silicon and needs Python 3.11 or newer. Install it from PyPI:
+
+```
+pip install "mlx-dfloat[mflux]"
+```
+
+Without the extra you get the checkpoint reader and the decoder. The `mflux` extra installs mflux 0.20, which the
+`mlx-dfloat generate` command needs for FLUX.1 generation.
+
+The parity scripts and the benchmark live in the repository, not in the package, so run them from a checkout with
+[uv](https://docs.astral.sh/uv/):
 
 ```
 git clone https://github.com/IonDen/mlx-dfloat
@@ -61,8 +70,8 @@ cd mlx-dfloat
 uv sync --extra mflux
 ```
 
-A plain `uv sync` installs the reader, the decoder and the parity scripts. `--extra mflux` adds FLUX.1 generation
-and installs mflux 0.20. The benchmark runs with `uv run --group bench`, which installs mflux as well.
+A plain `uv sync` installs the reader, the decoder and the parity scripts, and `--extra mflux` adds generation. The
+benchmark runs with `uv run --group bench`, which installs mflux as well.
 
 Every FLUX.1 base repository on the Hugging Face Hub is gated, so log in once with `hf auth login` and accept the
 model's licence on its Hub page (details under "Generate a FLUX.1 image"). On disk, a DFloat11 FLUX.1 transformer
@@ -91,16 +100,16 @@ stopped.
 
 ### Generate a FLUX.1 image
 
-Generation needs the `mflux` extra (`uv sync --extra mflux`, see "Install"). The default repositories need no extra
-flags:
+Generation needs the `mflux` extra (`pip install "mlx-dfloat[mflux]"`, see "Install"). The default repositories need
+no extra flags:
 
 ```
-uv run mlx-dfloat generate --model schnell \
+mlx-dfloat generate --model schnell \
   --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
   --seed 42 --steps 4 --height 1024 --width 1024 --report report.json
 ```
 
-`--model` also takes `dev` and `krea-dev`. The command downloads that model's DFloat11 transformer and, from its
+From a checkout, prefix the command with `uv run`. `--model` also takes `dev` and `krea-dev`. The command downloads that model's DFloat11 transformer and, from its
 base repository, the text encoders, the VAE and the tokenizers; the base's own BF16 transformer is never fetched.
 All three base repositories are gated on the Hub, so every model needs a Hub login (`hf auth login`, once).
 FLUX.1-schnell's opens as soon as you accept its Apache-2.0 license on its Hub page. FLUX.1-dev's and
@@ -213,6 +222,11 @@ Apple M1 Max, 32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0, git d164fc5, 2026-1
 DF11 and the mflux q8 step both run under a 2.5 GB MLX buffer-cache limit (decimal GB).
 <!-- /bench:overhead -->
 
+The scenario result files name the commit their runs used as it was on its pull-request branch; the `generate`
+reports behind the tier rows and the harness proof record no commit. Merging onto `main` gave those commits new IDs
+without changing their content: `d164fc5` (the scenario and tier runs) is `c29714d` on `main`, and `9c51869` (the
+harness proof) is `3d142a7`.
+
 The harness proof runs `mlx-dfloat generate` twice under the same lowered watchdog ceiling, once at a size that
 stays under it and once at a size that does not. `bench/results/harness-proof/README.md` gives both commands and
 the arithmetic behind the ceiling.
@@ -267,7 +281,8 @@ Dynamic-Length Float* ([arXiv:2504.11651](https://arxiv.org/abs/2504.11651)).
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE). [NOTICE](NOTICE) credits the DFloat11 work, mflux and the test-only encoder
+Apache-2.0. See [LICENSE](https://github.com/IonDen/mlx-dfloat/blob/main/LICENSE).
+[NOTICE](https://github.com/IonDen/mlx-dfloat/blob/main/NOTICE) credits the DFloat11 work, mflux and the test-only encoder
 copied from the DFloat11 repository, each with its licence.
 
 [^size]: Reported in the DFloat11 paper ([arXiv:2504.11651](https://arxiv.org/abs/2504.11651)). The exponent bits of

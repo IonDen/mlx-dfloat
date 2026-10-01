@@ -49,5 +49,5 @@ estimate fits under it. It is passed so that nothing but the watchdog can stop t
 ## Setup
 
 MacBook Pro, Apple M1 Max, 32 GB, macOS 27.0.1, on AC. mlx 0.32.2, mflux 0.20.0. The ceiling was chosen from
-runs at mlx-dfloat git `d164fc5`; the two proof runs are at git `9c51869`, whose abort artifact also records the run's
-model, size, seed and step count. Recorded 2026-10-01.
+runs at mlx-dfloat git `d164fc5` (`c29714d` on `main`); the two proof runs are at git `9c51869` (`3d142a7` on
+`main`), whose abort artifact also records the run's model, size, seed and step count. Recorded 2026-10-01.
