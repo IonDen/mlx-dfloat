@@ -133,7 +133,7 @@ All notable changes to this project are documented here. The format follows
 - The measured 32 GB rows for FLUX.1-schnell, FLUX.1-dev and FLUX.1-Krea-dev at 1024² (`bench/results/tiers/`):
   watched peaks of 19.78, 19.96 and 20.04 GiB, all under the M1 Max's 22.96 GiB fit budget.
 - A harness proof (`bench/results/harness-proof/`): under one 19.25 GiB watchdog ceiling, a 512² FLUX.1-schnell run
-  finished at 18.25 GiB, and a 1024² run was stopped by the watchdog at 19.32 GiB with exit 70. The watchdog's abort
+  finished at 18.64 GiB, and a 1024² run was stopped by the watchdog at 19.32 GiB with exit 70. The watchdog's abort
   file now names the model, size, seed and steps of the run it stopped, and the proof reads the stopped run's size
   from it.
 - `scripts/bench_table.py` writes the README's measured-numbers blocks from `bench/results/`, and a test fails when the
