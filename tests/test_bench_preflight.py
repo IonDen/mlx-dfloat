@@ -157,7 +157,7 @@ def test_a_healthy_laptop_sample_passes():
     [
         ({"ac_power": False}, "ac_power"),
         ({"battery_percent": 39}, "battery"),
-        ({"battery_percent": 80, "charging": "no"}, "not_charging"),
+        ({"battery_percent": 49, "charging": "no"}, "not_charging"),
         ({"cpu_speed_limit": 99}, "cpu_speed_limit"),
         ({"lid_open": False}, "lid"),
         ({"free_disk_bytes": 20 * GIB - 1}, "free_disk"),
@@ -203,10 +203,24 @@ def test_a_desktop_sample_has_no_battery_or_lid_gates():
     assert check(desktop) == []
 
 
-def test_not_charging_needs_ac_and_a_battery_below_full():
+def test_not_charging_needs_ac_power():
     # Red if: not_charging fires on battery power (only `ac_power` should) or at 100 % on AC.
     assert check(_p(ac_power=False, battery_percent=80, charging="no")) == ["ac_power"]
     assert check(_p(battery_percent=100, charging="no")) == []
+
+
+@pytest.mark.parametrize(("percent", "fires"), [(49, True), (50, False), (80, False)])
+def test_not_charging_fires_only_below_half_charge(percent, fires):
+    # macOS Optimized Battery Charging holds a MacBook on AC at 80 % "not charging"; the operating
+    # rule is that 50 % or more may run. Red if: the floor is dropped (80 % refused, the typical
+    # laptop on AC) or made inclusive (50 % refused).
+    failed = check(_p(battery_percent=percent, charging="no"))
+    assert ("not_charging" in failed) is fires
+
+
+def test_the_not_charging_floor_is_a_parameter():
+    # Red if: the 50 % floor is hardcoded instead of read from the parameter.
+    assert "not_charging" in check(_p(battery_percent=80, charging="no"), min_not_charging=81)
 
 
 def _runner(outputs):

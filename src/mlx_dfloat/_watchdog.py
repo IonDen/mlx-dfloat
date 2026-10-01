@@ -7,8 +7,10 @@ of RSS and MLX: a buffer loaded with ``mx.load`` appears in both RSS and MLX act
 false-abort at half the real ceiling, while the maximum still catches an overrun held in MLX's
 cache pool. The abort artifact names the counter that tripped (``verdict_counter``) and records
 the peaks of the footprint, of MLX active + cache, and of the watched maximum. ``rss``,
-``mlx_active``, and ``mlx_cache`` ride along in every sample and abort artifact as diagnostics. A sampling failure (psutil, MLX, the footprint read, or the
-artifact write itself) still aborts the process instead of leaving the job running unwatched.
+``mlx_active``, and ``mlx_cache`` ride along in every sample and abort artifact as diagnostics. A
+sampling failure (psutil, MLX, the footprint read, or the artifact write itself) still aborts the
+process instead of leaving the job running unwatched; its artifact names no counter
+(``verdict_counter: "none"``, ``verdict_memory: null``).
 """
 
 import ctypes
@@ -162,16 +164,18 @@ class Watchdog:
         if self._thread.is_alive():
             self._thread.join(timeout=1)
 
-    def _sample(self) -> tuple[str | None, dict[str, float | str]]:
+    def _sample(self) -> tuple[str | None, dict[str, float | str | None]]:
         elapsed = time.monotonic() - self._start
-        sample: dict[str, float | str] = {
+        # The verdict fields stay "none" / None until a number was compared with the ceiling, so a
+        # sample error's artifact does not read as a footprint verdict.
+        sample: dict[str, float | str | None] = {
             "footprint": 0,
             "rss": 0,
             "mlx_active": 0,
             "mlx_cache": 0,
             "elapsed": elapsed,
-            "verdict_memory": 0,
-            "verdict_counter": "footprint",
+            "verdict_memory": None,
+            "verdict_counter": "none",
         }
         try:
             footprint = int(phys_footprint())
@@ -203,7 +207,7 @@ class Watchdog:
                 self._fire(reason, sample)
                 return
 
-    def _fire(self, reason: str, sample: dict[str, float | str]) -> None:
+    def _fire(self, reason: str, sample: dict[str, float | str | None]) -> None:
         with self._lock:
             if self._stop.is_set():
                 return  # the caller already stopped us and recorded its own result
@@ -222,8 +226,8 @@ class Watchdog:
                             "rss": sample["rss"],
                             "mlx_active": sample["mlx_active"],
                             "mlx_cache": sample["mlx_cache"],
-                            "verdict_memory": sample.get("verdict_memory", 0),
-                            "verdict_counter": sample.get("verdict_counter", "footprint"),
+                            "verdict_memory": sample.get("verdict_memory"),
+                            "verdict_counter": sample.get("verdict_counter", "none"),
                             "peak_watched": self.peak_watched,
                             "peak_mlx": self.peak_mlx,
                         },
