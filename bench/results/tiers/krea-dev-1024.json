@@ -1,0 +1,119 @@
+{
+ "exit_code": 0,
+ "output": "/tmp/tier-krea-dev.png",
+ "memory_caps_gb": [
+  20,
+  22
+ ],
+ "model_kwargs": {
+  "model": "krea-dev",
+  "df11_path": null,
+  "base_path": null,
+  "eval_policy": "per-block",
+  "cache_limit": null,
+  "fit_check": true
+ },
+ "height": 1024,
+ "width": 1024,
+ "memory_ceiling_bytes": null,
+ "tier_gb": 32,
+ "label": "MEASURED",
+ "watchdog_ceiling_bytes": 30064771072,
+ "limits": {
+  "tier": {
+   "tier_gb": 32,
+   "ram_bytes": 34359738368,
+   "recommended_bytes": 26800603136,
+   "memory_limit_bytes": 32641751449,
+   "cache_limit_bytes": 25460572979,
+   "wired_limit_bytes": 0,
+   "reserve_bytes": 2147483648,
+   "budget_bytes": 26800603136,
+   "ceiling_bytes": 24653119488,
+   "budget_source": "device",
+   "is_host": true,
+   "label": "MEASURED"
+  },
+  "effective": {
+   "memory_limit_bytes": 23622320128,
+   "cache_limit_bytes": 32641751449,
+   "wired_limit_bytes": 21474836480
+  },
+  "applied": "host-caps"
+ },
+ "model": "krea-dev",
+ "df11": {
+  "root": "~/.cache/huggingface/hub/models--DFloat11--FLUX.1-Krea-dev-DF11/snapshots/cee243ef011bb6c740f35dd1357f6c67b9da9d8d",
+  "repo_id": "DFloat11/FLUX.1-Krea-dev-DF11",
+  "revision": "cee243ef011bb6c740f35dd1357f6c67b9da9d8d"
+ },
+ "base": {
+  "root": "~/.cache/huggingface/hub/models--black-forest-labs--FLUX.1-Krea-dev/snapshots/8162a9c7b05a641be098422bf2fcf335615c2f28",
+  "repo_id": "black-forest-labs/FLUX.1-Krea-dev",
+  "revision": "8162a9c7b05a641be098422bf2fcf335615c2f28"
+ },
+ "eval_policy": "per-block",
+ "cache_limit_in_force": 2550828062,
+ "drop_set_before_vae": true,
+ "fit": {
+  "label": "predicted",
+  "phases": {
+   "encode": 11606740740,
+   "denoise": 21580311395,
+   "vae": 8808361940
+  },
+  "peak_phase": "denoise",
+  "peak_bytes": 21580311395,
+  "budget_bytes": 24653119488,
+  "fits": true
+ },
+ "sizes": {
+  "compressed": 16194404996,
+  "extras": 134359168,
+  "encoders": 9770792936,
+  "vae": 167666902
+ },
+ "peaks": {
+  "label": "sampled at phase boundaries",
+  "encode": {
+   "footprint_start": 379585712,
+   "mlx_peak": 10932173146,
+   "footprint_end": 10373619560,
+   "active_at_start": 135981192
+  },
+  "set_load": {
+   "footprint_start": 10373619560,
+   "mlx_peak": 16339791240,
+   "footprint_end": 16631722656,
+   "active_at_start": 144371336
+  },
+  "denoise": {
+   "footprint_start": 16631722656,
+   "mlx_peak": 18652962324,
+   "footprint_end": 19239891616,
+   "active_at_start": 16339791240
+  },
+  "vae": {
+   "footprint_start": 9599653768,
+   "mlx_peak": 10280603712,
+   "footprint_end": 1415022152,
+   "active_at_start": 146468604
+  }
+ },
+ "decode_launches": 1140,
+ "lifecycle": {
+  "encoder_loads": 0,
+  "encoder_seconds": 0.0,
+  "set_loads": 1,
+  "set_seconds": 27.393842000001314,
+  "forced_set_drops": 0
+ },
+ "versions": {
+  "mlx": "0.32.2",
+  "mflux": "0.20.0"
+ },
+ "footprint_peak_bytes": 21514171040,
+ "footprint_peak_label": "OS phys_footprint, sampled every 0.05 s by the watchdog",
+ "watched_peak_bytes": 21514171040,
+ "mlx_peak_bytes": 20601767300
+}

@@ -1,0 +1,15 @@
+{
+ "preflight": {
+  "ac_power": true,
+  "battery_percent": 100,
+  "charging": "full",
+  "charger_watts": 35,
+  "cpu_speed_limit": null,
+  "lid_open": true,
+  "free_disk_bytes": 144336568320,
+  "memory_free_percent": 76,
+  "busy_processes": []
+ },
+ "failed_gates": [],
+ "skipped_preflight": false
+}
