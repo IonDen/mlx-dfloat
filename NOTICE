@@ -2,3 +2,39 @@ mlx-dfloat
 Copyright 2026 Denis Ineshin
 
 Licensed under the Apache License, Version 2.0.
+
+mlx-dfloat is an independent reader and decoder for the DFloat11 checkpoint format. It is not a fork of DFloat11
+and is not affiliated with the DFloat11 authors.
+
+DFloat11
+--------
+The DFloat11 method and checkpoint format come from:
+
+  Tianyi Zhang, Mohsen Hariri, Shaochen Zhong, Vipin Chaudhary, Yang Sui, Xia Hu, Anshumali Shrivastava.
+  "70% Size, 100% Accuracy: Lossless LLM Compression for Efficient GPU Inference via Dynamic-Length Float
+  (DFloat11)". arXiv:2504.11651, https://arxiv.org/abs/2504.11651. The paper is distributed under the
+  Creative Commons Attribution 4.0 International licence (CC BY 4.0).
+
+The authors' implementation is https://github.com/LeanModels/DFloat11, licensed under the Apache License,
+Version 2.0. The format reader and the decoders in this package are a separate implementation of the published
+format. The only file taken from that repository is the test-only encoder described below.
+
+Test-only encoder and test data
+-------------------------------
+tests/_upstream/dfloat11_encoder.py is derived from dfloat11_utils.py of https://github.com/LeanModels/DFloat11
+at commit 457733886c, Copyright 2025 Tianyi Zhang, licensed under the Apache License, Version 2.0. It builds test
+fixtures only and is not part of the installed package. tests/_upstream/NOTICE lists the changes made to it.
+
+tests/fixtures/upstream/ holds a small slice (four compressed blocks of one matrix) of the DFloat11/Qwen3-4B-DF11
+checkpoint and the matching BF16 values from Qwen/Qwen3-4B, which is licensed under the Apache License, Version 2.0.
+
+mflux
+-----
+The optional FLUX.1 integration (the mlx-dfloat[mflux] extra) and the benchmark run on mflux,
+https://github.com/mflux-community/mflux, Copyright (c) 2026 Filip Strand, licensed under the MIT License. mflux is a
+dependency installed separately; mlx-dfloat does not include its code.
+
+Model weights
+-------------
+mlx-dfloat ships no model weights. A DFloat11 checkpoint carries the licence of the model it was compressed from;
+FLUX.1-dev and FLUX.1-Krea-dev, for example, are under Black Forest Labs' non-commercial licence.
