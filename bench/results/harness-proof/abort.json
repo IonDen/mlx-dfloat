@@ -1,0 +1,15 @@
+{
+ "reason": "memory",
+ "footprint": 20739453960,
+ "peak_footprint": 20739453960,
+ "ceiling": 20669530112,
+ "elapsed": 49.66119612499824,
+ "budget": 3600.0,
+ "rss": 7394983936,
+ "mlx_active": 18443142368,
+ "mlx_cache": 1995441502,
+ "verdict_memory": 20739453960,
+ "verdict_counter": "footprint",
+ "peak_watched": 20739453960,
+ "peak_mlx": 20438583870
+}

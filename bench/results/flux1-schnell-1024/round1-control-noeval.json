@@ -1,0 +1,171 @@
+{
+ "exit_code": 0,
+ "mode": "control-noeval",
+ "policy": "none",
+ "traced": false,
+ "round": 1,
+ "model": "schnell",
+ "size": 1024,
+ "steps": 5,
+ "warmup": 2,
+ "seed": 42,
+ "guidance": 3.5,
+ "n_double": 19,
+ "n_single": 38,
+ "step_s": [
+  18.895443333000003,
+  18.418433207996713,
+  18.36443912499817,
+  18.438482999998087,
+  18.307602834000136
+ ],
+ "warmup_s": [
+  18.532210500001383,
+  18.481105332997686
+ ],
+ "median_s": 18.418433207996713,
+ "spread": 0.03191587972556998,
+ "verify_s": [
+  3.3125004847534e-05,
+  9.083299664780498e-05,
+  0.00013433300046017393,
+  4.274999810149893e-05,
+  8.654099656268954e-05
+ ],
+ "warmup_verify_s": [
+  0.00011287500092294067,
+  4.504200478550047e-05
+ ],
+ "verify_median_s": 8.654099656268954e-05,
+ "launches_per_step": [
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0
+ ],
+ "launches_expected_per_step": 0,
+ "launches_total": 0,
+ "step_footprint_peak_bytes": 20838560584,
+ "step_mlx_peak_bytes": 19232464278,
+ "footprint_peak_bytes": 20838560584,
+ "watchdog_peak_footprint_bytes": 20838560584,
+ "step_watched_peak_bytes": 20838560584,
+ "watched_peak_bytes": 20838560584,
+ "mlx_peak_memory_bytes": 19232464278,
+ "cache_memory_bytes": 2402486692,
+ "output_shape": [
+  1,
+  4096,
+  64
+ ],
+ "output_dtype": "mlx.core.float32",
+ "embeds": {
+  "path": "~/Documents/Work/mac/mlx-dfloat/bench/results/flux1-schnell-1024/embeds.safetensors",
+  "metadata": {
+   "token_length": "256",
+   "synthetic": "false",
+   "seed": "42",
+   "prompt": "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water",
+   "model": "schnell",
+   "mlx": "0.32.2",
+   "root": "~/.cache/huggingface/hub/models--black-forest-labs--FLUX.1-schnell/snapshots/741f7c3ce8b383c54771c7003378a50191e9efe9",
+   "mflux": "0.20.0",
+   "base_revision": "741f7c3ce8b383c54771c7003378a50191e9efe9"
+  }
+ },
+ "latent_dtype": "mlx.core.float32",
+ "embeds_dtype": {
+  "prompt_embeds": "mlx.core.float32",
+  "pooled_prompt_embeds": "mlx.core.bfloat16"
+ },
+ "timings_s": {
+  "build_s": 2.0225324159982847,
+  "load_resident_s": 24.38131470799999,
+  "provider_s": 4.2780942500030505
+ },
+ "provenance": {
+  "git": "d164fc54c16337052923ec1643ea0e18fbc1e9c8",
+  "source_hash": "9a1d81ff41bc034e6cf288a5a604e73a836d4270299109b75d0bdf90078b412e",
+  "mlx": "0.32.2",
+  "mflux": "0.20.0",
+  "macos": "27.0.1",
+  "device_info": {
+   "device_name": "Apple M1 Max",
+   "max_recommended_working_set_size": 26800603136,
+   "memory_size": 34359738368,
+   "architecture": "applegpu_g13s",
+   "max_buffer_length": 20100448256,
+   "resource_limit": 499000
+  },
+  "memory_caps_gb": [
+   20,
+   22
+  ],
+  "cache_limit": 2500000000,
+  "cache_memory": 2518663588,
+  "power": {
+   "ac": true,
+   "battery_pct": 96
+  },
+  "date": "2026-10-01"
+ },
+ "memory_caps_gb": [
+  20,
+  22
+ ],
+ "cache_limit_bytes": 2500000000,
+ "key": {
+  "model": "schnell",
+  "size": 1024,
+  "steps": 5,
+  "warmup": 2,
+  "seed": 42,
+  "df11": "~/.cache/huggingface/hub/models--DFloat11--FLUX.1-schnell-DF11/snapshots/51a428b928197e0531cb93d6e438941e2d0b247e",
+  "embeds": "~/Documents/Work/mac/mlx-dfloat/bench/results/flux1-schnell-1024/embeds.safetensors",
+  "embeds_meta": {
+   "token_length": "256",
+   "synthetic": "false",
+   "seed": "42",
+   "prompt": "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water",
+   "model": "schnell",
+   "mlx": "0.32.2",
+   "root": "~/.cache/huggingface/hub/models--black-forest-labs--FLUX.1-schnell/snapshots/741f7c3ce8b383c54771c7003378a50191e9efe9",
+   "mflux": "0.20.0",
+   "base_revision": "741f7c3ce8b383c54771c7003378a50191e9efe9"
+  },
+  "source": "9a1d81ff41bc034e6cf288a5a604e73a836d4270299109b75d0bdf90078b412e",
+  "mlx": "0.32.2",
+  "cache_limit": 2500000000,
+  "scenario_hash": "59f60ba2c653ba0ac41181a5b1b1458460d46b92bcb24c5fc9cef2955ee76c03",
+  "tier_gb": 32
+ },
+ "limits": {
+  "tier": {
+   "tier_gb": 32,
+   "ram_bytes": 34359738368,
+   "recommended_bytes": 26800603136,
+   "memory_limit_bytes": 32641751449,
+   "cache_limit_bytes": 25460572979,
+   "wired_limit_bytes": 0,
+   "reserve_bytes": 2147483648,
+   "budget_bytes": 26800603136,
+   "ceiling_bytes": 24653119488,
+   "budget_source": "device",
+   "is_host": true,
+   "label": "MEASURED"
+  },
+  "effective": {
+   "memory_limit_bytes": 23622320128,
+   "cache_limit_bytes": 2500000000,
+   "wired_limit_bytes": 21474836480
+  },
+  "applied": "host-caps"
+ },
+ "label": "MEASURED",
+ "tier_gb": 32,
+ "scenario_hash": "59f60ba2c653ba0ac41181a5b1b1458460d46b92bcb24c5fc9cef2955ee76c03",
+ "watchdog_ceiling_bytes": 30064771072
+}
