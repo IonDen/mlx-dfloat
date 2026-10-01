@@ -228,7 +228,7 @@ def test_the_watchdog_tracks_the_peaks_of_all_three_numbers_and_resets_them(tmp_
     watchdog._sample()
     assert (watchdog.peak_footprint, watchdog.peak_mlx, watchdog.peak_watched) == (6, 5, 6)
     watchdog.reset_peak()
-    assert (watchdog.peak_footprint, watchdog.peak_mlx, watchdog.peak_watched) == (0, 0, 0)
+    assert (watchdog.peak_footprint, watchdog.peak_mlx, watchdog.peak_watched) == (0, None, 0)
 
 
 def test_footprint_over_the_ceiling_aborts_with_70(monkeypatch, tmp_path):
@@ -335,3 +335,85 @@ def test_a_missing_psutil_refuses_the_watchdog_up_front(tmp_path, monkeypatch):
     with pytest.raises(DFloatDependencyError, match="psutil"):
         wd.default_ceiling()
     assert not (tmp_path / "abort.json").exists()
+
+
+_SAMPLE = {
+    "footprint": 1,
+    "rss": 1,
+    "mlx_active": 0,
+    "mlx_cache": 0,
+    "elapsed": 0.0,
+    "verdict_memory": 1,
+    "verdict_counter": "footprint",
+}
+
+
+def test_the_abort_artifact_carries_the_run_context_verbatim(tmp_path, monkeypatch):
+    # Bug caught: the context dropped or reshaped on the way to abort.json, so the harness proof
+    # cannot read the aborted run's size from its own record (the table used to assume 1024).
+    context = {"model": "schnell", "height": 1024, "width": 768, "seed": 42, "steps": 4}
+    monkeypatch.setattr(wd, "_exit", lambda code: None)
+    Watchdog(tmp_path, ceiling=0, budget=1e9, context=context)._fire("memory", dict(_SAMPLE))
+    artifact = json.loads((tmp_path / "abort.json").read_text())
+    assert artifact["context"] == {
+        "model": "schnell",
+        "height": 1024,
+        "width": 768,
+        "seed": 42,
+        "steps": 4,
+    }
+
+
+def test_the_abort_artifact_has_no_context_by_default(tmp_path, monkeypatch):
+    # Bug caught: an empty or invented context written for callers that passed none (the verify
+    # scripts), which a reader would take as a record of the run.
+    monkeypatch.setattr(wd, "_exit", lambda code: None)
+    Watchdog(tmp_path, ceiling=0, budget=1e9)._fire("memory", dict(_SAMPLE))
+    assert "context" not in json.loads((tmp_path / "abort.json").read_text())
+
+
+def test_an_unsampled_watchdog_has_no_mlx_peak(tmp_path, monkeypatch):
+    # Bug caught: an MLX peak of 0 for a watchdog that never sampled (a real run would report a
+    # 0-byte MLX peak as a number instead of "not sampled"); the first sample error leaves it None.
+    watchdog = Watchdog(tmp_path, ceiling=10**15, budget=1e9)
+    assert watchdog.peak_mlx is None
+    monkeypatch.setattr(wd, "phys_footprint", lambda: (_ for _ in ()).throw(OSError("rusage")))
+    reason, sample = watchdog._sample()
+    assert reason == "sample_error"
+    assert watchdog.peak_mlx is None
+    monkeypatch.setattr(wd, "_exit", lambda code: None)
+    watchdog._fire(reason, sample)
+    assert json.loads((tmp_path / "abort.json").read_text())["peak_mlx"] is None
+
+
+def _blocked_while_locked(watchdog, action):
+    """Run ``action`` on another thread while the test holds the watchdog's lock.
+
+    Returns whether it finished while the lock was held, and whether it finished after release.
+    """
+    done = threading.Event()
+    with watchdog._lock:
+        worker = threading.Thread(target=lambda: (action(), done.set()))
+        worker.start()
+        finished_while_locked = done.wait(timeout=0.2)
+    finished_after = done.wait(timeout=5)
+    worker.join(timeout=5)
+    return finished_while_locked, finished_after
+
+
+def test_reset_peak_takes_the_lock(tmp_path):
+    # Bug caught: reset_peak writing the peaks without the lock, so a reset can interleave with the
+    # sampler's read-max-write and a timed window inherits the warm-up's peak.
+    watchdog = Watchdog(tmp_path, ceiling=10**15, budget=1e9)
+    watchdog.peak_footprint = 9
+    assert _blocked_while_locked(watchdog, watchdog.reset_peak) == (False, True)
+    assert watchdog.peak_footprint == 0
+
+
+def test_the_sampler_updates_the_peaks_under_the_lock(tmp_path, monkeypatch):
+    # Bug caught: _sample updating the peaks without the lock (the race reset_peak's lock guards).
+    monkeypatch.setattr(wd, "phys_footprint", lambda: 7)
+    _stub_memory(monkeypatch, rss=0, mlx_active=3, mlx_cache=2)
+    watchdog = Watchdog(tmp_path, ceiling=10**15, budget=1e9)
+    assert _blocked_while_locked(watchdog, watchdog._sample) == (False, True)
+    assert (watchdog.peak_footprint, watchdog.peak_mlx, watchdog.peak_watched) == (7, 5, 7)

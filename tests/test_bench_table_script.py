@@ -34,16 +34,28 @@ TIER = {
 }
 PASS = {
     "label": "PROOF",
+    "model": "schnell",
     "height": 512,
     "width": 512,
     "memory_ceiling_bytes": 18 * GIB,
     "watched_peak_bytes": 17 * GIB,
 }
+# Every key the watchdog's _fire writes, with the context generate hands it.
 ABORT = {
     "reason": "memory",
+    "footprint": 19 * GIB,
+    "peak_footprint": 19 * GIB,
     "ceiling": 18 * GIB,
+    "elapsed": 50.0,
+    "budget": 3600.0,
+    "rss": 7 * GIB,
+    "mlx_active": 17 * GIB,
+    "mlx_cache": 1 * GIB,
+    "verdict_memory": 19 * GIB,
     "verdict_counter": "footprint",
     "peak_watched": 19 * GIB,
+    "peak_mlx": 18 * GIB,
+    "context": {"model": "schnell", "height": 1024, "width": 1024, "seed": 42, "steps": 4},
 }
 PROV = {
     "date": "2026-09-30",
@@ -138,13 +150,27 @@ def test_collect_sorts_and_takes_provenance_from_the_first_scenario(tmp_path):
     assert c.proof.abort_size == 1024
 
 
-def test_collect_reads_the_abort_size_when_the_artifact_carries_it(tmp_path):
-    # Bug caught: ignoring the artifact's own size and always printing the default 1024.
+def test_collect_reads_the_abort_size_from_the_artifacts_context(tmp_path):
+    # Bug caught: ignoring the artifact's own record and printing a default size.
     root = _full_root(tmp_path)
-    (root / "harness-proof" / "abort.json").write_text(json.dumps({**ABORT, "size": 768}))
+    context = {**ABORT["context"], "height": 768, "width": 768}
+    (root / "harness-proof" / "abort.json").write_text(json.dumps({**ABORT, "context": context}))
     proof = bt.collect(root).proof
     assert proof is not None
     assert proof.abort_size == 768
+
+
+def test_an_abort_artifact_without_its_runs_size_is_exit_2(tmp_path, capsys):
+    # Bug caught: an artifact from a watchdog that was not told the run's size rendered with an
+    # assumed size (the old 1024 default) instead of refused.
+    root = _full_root(tmp_path)
+    bare = {k: v for k, v in ABORT.items() if k != "context"}
+    (root / "harness-proof" / "abort.json").write_text(json.dumps(bare))
+    readme = tmp_path / "README.md"
+    readme.write_text(README)
+    assert _run(root, readme) == 2
+    assert "run context" in capsys.readouterr().err
+    assert readme.read_text() == README
 
 
 def test_collect_skips_a_proof_dir_with_only_one_file(tmp_path):

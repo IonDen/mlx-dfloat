@@ -10,7 +10,10 @@ the peaks of the footprint, of MLX active + cache, and of the watched maximum. `
 ``mlx_active``, and ``mlx_cache`` ride along in every sample and abort artifact as diagnostics. A
 sampling failure (psutil, MLX, the footprint read, or the artifact write itself) still aborts the
 process instead of leaving the job running unwatched; its artifact names no counter
-(``verdict_counter: "none"``, ``verdict_memory: null``).
+(``verdict_counter: "none"``, ``verdict_memory: null``). A caller may pass a ``context`` mapping
+(``generate`` passes its model, size, seed and steps); it is written verbatim under ``"context"``
+in the abort artifact, so the artifact names the run it stopped. Without one there is no
+``"context"`` key. ``peak_mlx`` is None until a sample has read MLX's counters.
 """
 
 import ctypes
@@ -19,6 +22,7 @@ import os
 import sys
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -123,9 +127,18 @@ class Watchdog:
     """Background sampler that aborts the process with an honest artifact."""
 
     def __init__(
-        self, out_dir: Path, *, ceiling: int, budget: float, interval: float = 0.05
+        self,
+        out_dir: Path,
+        *,
+        ceiling: int,
+        budget: float,
+        interval: float = 0.05,
+        context: Mapping[str, Any] | None = None,
     ) -> None:
-        """Configure the ceiling (bytes), wall budget (seconds) and poll interval.
+        """Configure the ceiling (bytes), wall budget (seconds), poll interval and run context.
+
+        ``context`` (JSON-serialisable) is written verbatim under ``"context"`` in the abort
+        artifact; None writes no ``"context"`` key.
 
         Raises:
             DFloatDependencyError: ``psutil`` (the RSS diagnostic) is not installed; refused here,
@@ -133,10 +146,12 @@ class Watchdog:
         """
         self._psutil = _psutil()
         self.out_dir, self.ceiling, self.budget, self.interval = out_dir, ceiling, budget, interval
-        # Peaks seen so far: the OS footprint, MLX active + cache, and the watched maximum the
-        # ceiling is enforced on.
+        self.context = None if context is None else dict(context)
+        # Peaks seen so far: the OS footprint, MLX active + cache (None until a sample read MLX's
+        # counters), and the watched maximum the ceiling is enforced on. Read and written under
+        # ``_lock``, so a reset cannot interleave with a sample's update.
         self.peak_footprint = 0
-        self.peak_mlx = 0
+        self.peak_mlx: int | None = None
         self.peak_watched = 0
         self._stop = threading.Event()
         # Held while an abort is written: stop() waits for it, so no abort can land after the
@@ -153,9 +168,10 @@ class Watchdog:
 
     def reset_peak(self) -> None:
         """Start all three peaks over, so a later window's peak is not hidden by an earlier spike."""
-        self.peak_footprint = 0
-        self.peak_mlx = 0
-        self.peak_watched = 0
+        with self._lock:
+            self.peak_footprint = 0
+            self.peak_mlx = None
+            self.peak_watched = 0
 
     def stop(self) -> None:
         """Stop sampling. After this returns the watchdog never writes an abort or exits."""
@@ -190,9 +206,10 @@ class Watchdog:
             )
             sample["verdict_memory"] = memory
             sample["verdict_counter"] = counter
-            self.peak_footprint = max(self.peak_footprint, footprint)
-            self.peak_mlx = max(self.peak_mlx, active + cache)
-            self.peak_watched = max(self.peak_watched, memory)
+            with self._lock:
+                self.peak_footprint = max(self.peak_footprint, footprint)
+                self.peak_mlx = max(self.peak_mlx or 0, active + cache)
+                self.peak_watched = max(self.peak_watched, memory)
             reason = verdict(
                 memory=memory, ceiling=self.ceiling, elapsed=elapsed, budget=self.budget
             )
@@ -214,25 +231,23 @@ class Watchdog:
             code = EXIT_WALL if reason == "wall" else EXIT_MEMORY
             try:
                 self.out_dir.mkdir(parents=True, exist_ok=True)
-                (self.out_dir / "abort.json").write_text(
-                    json.dumps(
-                        {
-                            "reason": reason,
-                            "footprint": sample["footprint"],
-                            "peak_footprint": self.peak_footprint,
-                            "ceiling": self.ceiling,
-                            "elapsed": sample["elapsed"],
-                            "budget": self.budget,
-                            "rss": sample["rss"],
-                            "mlx_active": sample["mlx_active"],
-                            "mlx_cache": sample["mlx_cache"],
-                            "verdict_memory": sample.get("verdict_memory"),
-                            "verdict_counter": sample.get("verdict_counter", "none"),
-                            "peak_watched": self.peak_watched,
-                            "peak_mlx": self.peak_mlx,
-                        },
-                        indent=1,
-                    )
-                )
+                artifact: dict[str, Any] = {
+                    "reason": reason,
+                    "footprint": sample["footprint"],
+                    "peak_footprint": self.peak_footprint,
+                    "ceiling": self.ceiling,
+                    "elapsed": sample["elapsed"],
+                    "budget": self.budget,
+                    "rss": sample["rss"],
+                    "mlx_active": sample["mlx_active"],
+                    "mlx_cache": sample["mlx_cache"],
+                    "verdict_memory": sample.get("verdict_memory"),
+                    "verdict_counter": sample.get("verdict_counter", "none"),
+                    "peak_watched": self.peak_watched,
+                    "peak_mlx": self.peak_mlx,
+                }
+                if self.context is not None:
+                    artifact["context"] = self.context
+                (self.out_dir / "abort.json").write_text(json.dumps(artifact, indent=1))
             finally:
                 _exit(code)  # always exits, even if the artifact write above raised
