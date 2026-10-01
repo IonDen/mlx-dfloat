@@ -127,10 +127,16 @@ def check(
     p: Preflight,
     *,
     min_battery: int = 40,
+    min_not_charging: int = 50,
     min_free_disk_bytes: int = 20 * GIB,
     min_memory_free_percent: int = 20,
 ) -> list[str]:
-    """The failed gates, by name; empty means go. A None that a gate needs is ``unreadable:<field>``."""
+    """The failed gates, by name; empty means go. A None that a gate needs is ``unreadable:<field>``.
+
+    ``not_charging`` (on AC, battery not charging) fires only below ``min_not_charging`` percent:
+    macOS Optimized Battery Charging holds a MacBook on AC at 80 % without charging, and a battery
+    at half charge or more on AC may run.
+    """
     failed: list[str] = []
     pct = p.battery_percent
     if p.ac_power is None:
@@ -139,7 +145,7 @@ def check(
         failed.append("ac_power")
     if pct is not None and pct < min_battery:
         failed.append("battery")
-    if pct is not None and p.ac_power and p.charging == "no" and pct < 100:
+    if pct is not None and p.ac_power and p.charging == "no" and pct < min_not_charging:
         failed.append("not_charging")
     if p.cpu_speed_limit is not None and p.cpu_speed_limit < 100:
         failed.append("cpu_speed_limit")

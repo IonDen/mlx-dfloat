@@ -159,6 +159,9 @@ def test_watchdog_sample_error_still_aborts(tmp_path, monkeypatch):
     assert exit_codes[0] == 70
     artifact = json.loads((tmp_path / "abort.json").read_text())
     assert artifact["reason"] == "sample_error"
+    # Bug caught: the artifact carrying the footprint defaults (counter "footprint", memory 0), which
+    # reads as a footprint verdict when no number was ever compared with the ceiling.
+    assert (artifact["verdict_counter"], artifact["verdict_memory"]) == ("none", None)
 
 
 # Mocking `os._exit` (required so the test process itself doesn't exit) means the exception that
