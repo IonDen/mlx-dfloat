@@ -226,6 +226,12 @@ def test_provenance_takes_the_caps_instead_of_reinstalling_them(monkeypatch):
     # The probe limit is not a whole GiB, so no cap install can leave it in place by coincidence.
     import datetime
 
+    class _FrozenDate(datetime.date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 10, 1)
+
+    monkeypatch.setattr(bc.datetime, "date", _FrozenDate)
     monkeypatch.setattr(bc.subprocess, "run", _fake_run()[0])
     probe = 3 * 1024**3 + 4096
     before = mx.set_memory_limit(probe)
@@ -236,7 +242,7 @@ def test_provenance_takes_the_caps_instead_of_reinstalling_them(monkeypatch):
         mx.set_memory_limit(before)
     assert after == probe
     assert prov["memory_caps_gb"] == [0, 0]
-    assert prov["date"] == datetime.date.today().isoformat()
+    assert prov["date"] == "2026-10-01"
 
 
 def test_provenance_marks_a_dirty_tree(monkeypatch):

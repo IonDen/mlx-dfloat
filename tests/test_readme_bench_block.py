@@ -19,7 +19,7 @@ def test_hand_edit_is_caught(tmp_path):
     # Red when: render_readme stops rewriting a block, or --check stops reporting a stale one (a
     # hand-edited number would survive). The edit is to a real rendered number, the dev q8 ratio.
     readme = (REPO / "README.md").read_text()
-    edited = readme.replace("(one eval per step): 1.26×", "(one eval per step): 1.20×", 1)  # noqa: RUF001
+    edited = readme.replace("same cache limit): 1.26×", "same cache limit): 1.20×", 1)  # noqa: RUF001
     assert edited != readme
     collected = bt.collect(REPO / "bench" / "results")
     assert bt.render_readme(edited, collected, date=collected.date) == readme

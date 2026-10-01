@@ -113,9 +113,17 @@ def test_apply_installs_the_three_limits_and_returns_the_previous_ones(monkeypat
 
 
 def test_recommended_ratio_is_two_thirds_up_to_24_and_three_quarters_above():
-    # Bug caught: the boundary moved (< 24), so the 24 GB tier got 0.75 instead of 2/3.
+    # Bug caught: the boundary moved (< 24), so the 24 GB tier got 0.75 instead of 2/3; or the
+    # displayed ratio and the integer arithmetic tier_limits uses disagree.
     assert recommended_ratio(24) == 2 / 3
     assert recommended_ratio(32) == 0.75
+    big_host = {"host_ram_bytes": 64 * GIB, "host_recommended_bytes": 48 * GIB}
+    assert tier_limits(24, **big_host).recommended_bytes == 16 * GIB  # 2/3 of 24 GiB
+    assert tier_limits(32, **big_host).recommended_bytes == 24 * GIB  # 3/4 of 32 GiB
+    for tier in (16, 24, 32, 48):
+        lim = tier_limits(tier, **big_host)
+        assert lim.budget_source == "ratio"
+        assert lim.recommended_bytes == int(tier * GIB * recommended_ratio(tier))
 
 
 def test_limits_record_carries_the_tier_the_effective_values_and_the_path():

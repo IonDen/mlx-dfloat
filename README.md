@@ -147,6 +147,8 @@ The blocks below are generated from the files under `bench/results/` by `scripts
 when the README and those files disagree. Every row carries one of three labels. MEASURED means the run used the
 host's own memory limits on a Mac with that much memory. CAPPED means a larger Mac ran under a smaller Mac's MLX
 memory limits and watchdog ceiling, which shows how much memory the run needs but not how that smaller Mac performs.
+A CAPPED row uses MLX's default limits for a Mac of that size, not the caps `generate` installs on its own host, so
+its peak is not held down by caps that a real Mac of that size would not have.
 PROOF marks a run under a deliberately low watchdog ceiling, made only to show that the watchdog works; it never
 appears as a tier row.
 
@@ -174,19 +176,23 @@ evaluation, but its weights were decoded once before timing started, so the gap 
 decoding. The depth-2 pair evaluates one block behind instead, so the CPU can queue the next block, decode included,
 while the GPU runs the current one. The eval policy cost is what evaluating after every block adds by itself:
 `control` minus a control that evaluates once per step, with no decode involved. A negative value means the
-per-block control was the faster of the two. The q8 ratio is DF11 with per-block evaluation over mflux's q8 step as
-shipped, one eval per step, both under the scenario's 2.5 GB cache limit. A q8 step changes the weights and the
-output; a DF11 step does not.
+per-block control was the faster of the two. The q8 ratio is DF11 with per-block evaluation over mflux's own
+transformer quantised to 8 bits, with one eval per step. The q8 step runs under the scenario's 2.5 GB cache limit,
+like every other condition here; mflux's own generate sets no cache limit, so this is not quite mflux's q8 as you
+would run it. A q8 step changes the weights and the output; a DF11 step does not.
 
 On FLUX.1-dev a step costs 3.52 % more with per-block evaluation (19.24 s against the control's 18.59 s) and 4.61 %
 more with the depth-2 run-ahead. On FLUX.1-schnell the two figures are 4.05 % (19.28 s against 18.53 s) and 4.24 %.
 Round 1 of the schnell run saw GPU load from outside the bench; the same pooled medians over rounds 2 and 3 alone give
-+4.2 % for per-block evaluation. Evaluating one block behind did not help on either model. Evaluating after every
++4.2 % for per-block evaluation. The dev depth-2 figure pools three rounds that disagree. Taken one round at a time
+(each round's DF11 median over its own control's), they read −1.6 %, +5.9 % and +6.5 %, because round 1's depth-2
+control ran slow at 19.50 s against 18.77 s and 18.69 s later; rounds 2 and 3 alone give +6.2 %. Evaluating one
+block behind did not help on either model. Evaluating after every
 block cost 0.41 s per step on schnell and nothing measurable on dev, where the per-block control came out 0.07 s
 faster, less than either condition moved between rounds. Both sides of the overhead comparison pay that cost, so it is
 not part of the decode overhead. A DF11 step takes 1.26 times as long as mflux's q8 step on dev (15.26 s) and 1.35
 times on schnell (14.25 s). Treat both ratios as rough: the q8 step's median moved by about 2 s from one round to the
-next in both scenarios, while the DF11 step's moved by 0.5 s at most. The q8 step also peaked lower, at 14.8–14.9 GiB
+next in both scenarios, while the DF11 step's moved by 0.7 s at most. The q8 step also peaked lower, at 14.8–14.9 GiB
 against DF11's 19.7–20.0 GiB. What DF11 keeps and q8 gives up is the exact BF16 output.
 
 The control was validated once with `scripts/bench_control_validation.py`, at the earlier 1.4 GB cache limit and on
@@ -235,11 +241,17 @@ interrupted run picks up where it stopped, and results from a different scenario
 rather than mixed in.
 
 Before anything runs, a launch check samples the machine and refuses to start (exit 2, naming what failed) when the
-Mac is on battery, below 40 % battery, or on a charger that is not charging a battery below half; when macOS is
-limiting CPU speed or the lid is closed; when less than 20 GiB of disk or less than 20 % of memory is free; or when
-another heavy process (a bench, a test run, mflux or mlx-lm) holds 1 GiB or more. Timings taken in those states are
-not comparable. The sample is saved as `preflight.json` next to the results. `--skip-preflight` runs anyway, and
-the report records that it did.
+Mac is on battery, below 40 % battery, or on a charger that is not charging a battery below half; when
+`pmset -g therm` reports a CPU speed limit below 100 or the lid is closed; when less than 20 GiB of disk or less
+than 20 % of memory is free; or when another heavy process (a bench, a test run, mflux or mlx-lm) holds 1 GiB or
+more. Timings taken in those states are not comparable. When macOS has recorded no CPU speed limit, as on the Mac
+that produced these numbers, the speed-limit check passes. A refused launch writes nothing; once a run is accepted,
+the sample is saved as `preflight.json` next to the results. The check runs again before each condition's process
+starts, because a small charger can fall behind over a 40-minute run. When a check fails mid-run, the command stops
+before that process (exit 2), `report.json` records which checks failed, and running the same command again picks
+up from there. `--skip-preflight` skips every check, and the report records that it did. The busy check lists
+a process by its executable name and pid only; set `MLX_DFLOAT_PREFLIGHT_EXCLUDE` to comma-separated substrings of
+command lines that should not count as busy.
 
 `mlx-dfloat generate --tier GB` runs under a smaller Mac's MLX memory and cache limits, with that Mac's watchdog
 ceiling and fit budget, and labels its report CAPPED; `--tier` set to the host's own size keeps the host's limits

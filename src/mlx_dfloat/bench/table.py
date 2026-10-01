@@ -85,7 +85,7 @@ def tier_row_from_generate_report(report: Mapping[str, Any], *, source: str) -> 
         status="target" if watched <= ceiling else "over",
         limits_note="host caps"
         if _need(limits, "applied", "limits") == "host-caps"
-        else "tier defaults",
+        else "MLX defaults for the tier",
         source=source,
     )
 
@@ -204,7 +204,8 @@ def render_overhead_block(
         q8 = _NOT_MEASURED if s.q8_ratio is None else f"{s.q8_ratio:.2f}×"  # noqa: RUF001
         lines.append(
             f"{scenario_title(key)}, per-block evaluation: {per_block} (depth-2: {depth2}); "
-            f"eval policy cost {cost}; DF11 (per-block) over mflux q8 as shipped (one eval per step): {q8}"
+            f"eval policy cost {cost}; DF11 (per-block) over the mflux q8 step "
+            f"(one eval per step, same cache limit): {q8}"
         )
         lines.append("")
         command = f"Command: `{reproducers.get(key, '')}`"
