@@ -162,6 +162,7 @@ def test_resident_provider_hands_back_each_blocks_own_dict():
         provider.weights_for("transformer_blocks.7", shapes["transformer_blocks.0"])
 
 
+@pytest.mark.metal
 def test_df11_provider_decodes_on_the_metal_backend_by_default():
     # Bug caught: the default decode switched to the slow CPU reference (every bench and the
     # adapter would still be bit-exact, just ~1000x slower, so no parity test would notice).

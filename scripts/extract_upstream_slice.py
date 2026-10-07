@@ -6,7 +6,7 @@ elements of ``model.layers.0.self_attn.q_proj.weight`` from ``Qwen/Qwen3-4B``. P
 headers with its own code, independent of mlx_dfloat.
 
 Usage:
-    uv run python scripts/extract_upstream_slice.py --out tests/fixtures/upstream
+    uv run python scripts/extract_upstream_slice.py --out src/mlx_dfloat/_canary_data
 """
 
 import argparse

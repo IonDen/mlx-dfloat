@@ -1,13 +1,14 @@
 """Decode DF11 groups to BF16 bit patterns through an explicitly chosen backend."""
 
-from dataclasses import dataclass
-from typing import Literal
+import time
+from dataclasses import asdict, dataclass
+from typing import Any, Literal
 
 import mlx.core as mx
 import numpy as np
 
 from mlx_dfloat import reference
-from mlx_dfloat.errors import DFloatBackendError, DFloatFormatError
+from mlx_dfloat.errors import DFloatBackendError, DFloatError, DFloatFormatError
 from mlx_dfloat.format import GroupArrays, MxGroup
 
 Backend = Literal["reference", "metal"]
@@ -118,3 +119,118 @@ def check_status(status_words: mx.array, *, name: str = "<group>") -> None:
 def split_matrices(flat: mx.array, split_positions: tuple[int, ...]) -> list[mx.array]:
     """Cut a decoded group into its matrices (views, no copies)."""
     return list(mx.split(flat, list(split_positions))) if split_positions else [flat]
+
+
+SelftestPath = Literal["staged", "direct", "reference"]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SelftestCheck:
+    """One canary group decoded one way and compared with its known BF16 bits."""
+
+    group: str
+    path: SelftestPath
+    elements: int
+    ok: bool
+    detail: str | None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SelftestReport:
+    """The outcome of `selftest`: every check, and why there are none when the GPU decoder cannot run."""
+
+    ok: bool
+    reason: str | None
+    device: str
+    mlx_version: str
+    package_version: str
+    checks: tuple[SelftestCheck, ...]
+    seconds: float
+
+    def to_dict(self) -> dict[str, Any]:
+        """The report as plain JSON-serialisable data."""
+        return asdict(self)
+
+
+def _device_summary() -> str:
+    try:
+        info = mx.device_info()
+    except Exception:  # no device to describe
+        return "unknown device"
+    parts = []
+    if info.get("device_name"):
+        parts.append(str(info["device_name"]))
+    if info.get("architecture"):
+        parts.append(str(info["architecture"]))
+    memory = info.get("memory_size")
+    if isinstance(memory, int):
+        parts.append(f"{memory / 2**30:.0f} GiB")
+    return ", ".join(parts) or "unknown device"
+
+
+def selftest() -> SelftestReport:
+    """Decode the packaged canary groups on both Metal write paths and with the CPU reference.
+
+    Each group is compared with the BF16 bits known in advance, three ways: the staged and direct
+    write paths of the GPU kernel, and the CPU reference. One failing path never hides another. A
+    GPU fault is reported in the result rather than raised: `ok` is False and the failing checks
+    say what differed.
+    """
+    from mlx_dfloat import _canary, _metal_decode
+    from mlx_dfloat._version import __version__
+
+    start = time.perf_counter()
+
+    def report(
+        ok: bool, reason: str | None, checks: tuple[SelftestCheck, ...] = ()
+    ) -> SelftestReport:
+        return SelftestReport(
+            ok=ok,
+            reason=reason,
+            device=_device_summary(),
+            mlx_version=str(getattr(mx, "__version__", "unknown")),
+            package_version=__version__,
+            checks=checks,
+            seconds=time.perf_counter() - start,
+        )
+
+    if not mx.metal.is_available():
+        return report(False, "Metal is not available on this machine")
+    try:
+        _metal_decode.ensure_pipeline(force_direct=True)
+        _metal_decode.ensure_pipeline(force_direct=False)
+        canaries = _canary.canary_groups()
+    except DFloatBackendError as exc:  # no pipeline, or the packaged canary data is unreadable
+        return report(False, str(exc))
+    checks: list[SelftestCheck] = []
+    for canary in canaries:
+        for path in ("staged", "direct"):
+            failure = _metal_decode.canary_failure(canary, force_direct=path == "direct")
+            checks.append(
+                SelftestCheck(
+                    group=canary.name,
+                    path=path,
+                    elements=int(canary.expected.size),
+                    ok=failure is None,
+                    detail=failure,
+                )
+            )
+        try:
+            got = reference.decode_group(canary.arrays, name=canary.name, check_stream_end=False)
+        except DFloatError as exc:
+            reference_failure: str | None = f"the reference decode raised: {exc}"
+        else:
+            wrong = np.flatnonzero(got != canary.expected)
+            reference_failure = (
+                None if wrong.size == 0 else f"wrong bits at element {int(wrong[0])}"
+            )
+        checks.append(
+            SelftestCheck(
+                group=canary.name,
+                path="reference",
+                elements=int(canary.expected.size),
+                ok=reference_failure is None,
+                detail=reference_failure,
+            )
+        )
+    return report(all(c.ok for c in checks), None, tuple(checks))

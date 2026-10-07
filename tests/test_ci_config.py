@@ -32,6 +32,33 @@ def test_ci_runs_the_whole_suite_measuring_the_package_and_the_scripts():
     assert "continue-on-error" not in step
 
 
+def test_ci_runs_the_gpu_decoder_selftest_as_a_required_step():
+    # Bug caught: the self-check dropped from CI, or marked continue-on-error, so a runner whose GPU
+    # decodes wrong bits would still go green.
+    step = _step_named("GPU decoder self-check")
+    assert step["run"].strip() == "uv run mlx-dfloat selftest"
+    assert "continue-on-error" not in step
+    assert "if" not in step
+
+
+def test_ci_checks_that_the_built_wheel_ships_the_canary_data_as_a_required_step():
+    # Bug caught: a packaging change (an exclude, a moved directory, a data file outside the package) that drops
+    # the canary files from the wheel: every install would then refuse its GPU decoder or fail on first
+    # decode, while the checkout-based tests all pass. Also catches the step marked continue-on-error or
+    # made conditional, and a listing check that forgets one of the three files.
+    steps = _test_job_steps()
+    step = _step_named("Wheel ships the canary data")
+    assert "continue-on-error" not in step
+    assert "if" not in step
+    run = step["run"]
+    assert "uv build --wheel --out-dir dist" in run
+    assert "zipfile" in run or "unzip" in run
+    for name in ("qwen3_4b_layer0_4blocks.npz", "qwen3_4b_layer0_4blocks.json", "long_codes.npz"):
+        assert name in run
+    names = [s.get("name") for s in steps]
+    assert names.index("Wheel ships the canary data") > names.index("GPU decoder self-check")
+
+
 def test_the_metal_probe_stays_informational_and_no_separate_metal_suite_exists():
     # Bug caught: the device probe turned into a red required gate (continue-on-error dropped), or
     # the Metal tests split back out into an informational step that can go red unnoticed.

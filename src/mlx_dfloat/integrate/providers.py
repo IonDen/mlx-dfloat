@@ -8,6 +8,7 @@ from typing import Protocol, cast
 import mlx.core as mx
 import numpy as np
 
+from mlx_dfloat import _metal_decode
 from mlx_dfloat._safetensors import TensorInfo, read_array
 from mlx_dfloat.decode import DecodeResult, check_status, decode_group, split_matrices
 from mlx_dfloat.errors import DFloatFormatError, DFloatIntegrationError
@@ -135,8 +136,15 @@ class DF11Provider:
     ) -> None:
         """Hold the resident groups, each group's matrix names, and the name map that places them.
 
-        ``decode`` defaults to the Metal backend; tests inject a counting reference decode.
+        ``decode`` defaults to the Metal backend; tests inject a counting reference decode. The
+        Metal backend is checked here, against the packaged canary groups, so a broken GPU decoder
+        refuses before any model component loads.
+
+        Raises:
+            DFloatBackendError: The default Metal decode is requested and its canary check fails.
         """
+        if decode is None:
+            _metal_decode.ensure_canary(force_direct=False)
         self._resident = resident
         self._matrix_names = matrix_names
         self._name_map = name_map

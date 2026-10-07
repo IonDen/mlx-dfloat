@@ -7,7 +7,9 @@ import numpy as np
 from mlx_dfloat.format import GroupArrays
 from mlx_dfloat.reference import decode_group, max_code_length
 
-FIXTURE = Path(__file__).parent / "fixtures" / "upstream" / "qwen3_4b_layer0_4blocks"
+FIXTURE = (
+    Path(__file__).parents[1] / "src" / "mlx_dfloat" / "_canary_data" / "qwen3_4b_layer0_4blocks"
+)
 PROVENANCE = json.loads(FIXTURE.with_suffix(".json").read_text())
 
 

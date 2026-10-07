@@ -26,6 +26,17 @@ jobs:
         run: uv run python scripts/ci_metal_probe.py
       - name: Test (required)
         run: uv run pytest --cov=mlx_dfloat --cov=scripts --cov-report=term-missing --cov-fail-under=85
+      - name: GPU decoder self-check
+        run: uv run mlx-dfloat selftest
+      - name: Wheel ships the canary data
+        # The self-check reads these files from the installed package, so a wheel without them
+        # would refuse its GPU decoder on every machine while the checkout-based tests pass.
+        run: |
+          uv build --wheel --out-dir dist
+          listing="$(uv run python -m zipfile -l dist/*.whl)"
+          for name in qwen3_4b_layer0_4blocks.npz qwen3_4b_layer0_4blocks.json long_codes.npz; do
+            echo "$listing" | grep -q "mlx_dfloat/_canary_data/$name" || { echo "wheel is missing $name"; exit 1; }
+          done
   integration:
     # The mflux lane: installs the optional extra from the lock (torch and transformers come with
     # mflux, pinned there too) and runs only the tests that need it.

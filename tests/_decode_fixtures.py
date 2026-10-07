@@ -9,7 +9,13 @@ from tests._upstream.dfloat11_encoder import encode_weights, exponent_counter
 from mlx_dfloat import reference
 from mlx_dfloat.format import GroupArrays
 
-_SLICE_FIXTURE = Path(__file__).parent / "fixtures" / "upstream" / "qwen3_4b_layer0_4blocks.npz"
+_SLICE_FIXTURE = (
+    Path(__file__).parents[1]
+    / "src"
+    / "mlx_dfloat"
+    / "_canary_data"
+    / "qwen3_4b_layer0_4blocks.npz"
+)
 
 
 def encoder_group(bits, *splits):
@@ -57,7 +63,7 @@ def short_form_group():
 def slice_group():
     """The committed Qwen3-4B layer-0 slice: 16,392 bytes truncated mid-block (5 blocks, 4 launched
     thread-groups, real 27-bit codes and 5 LUT rows). Loads
-    tests/fixtures/upstream/qwen3_4b_layer0_4blocks.npz exactly as tests/test_upstream_slice.py does."""
+    src/mlx_dfloat/_canary_data/qwen3_4b_layer0_4blocks.npz exactly as tests/test_upstream_slice.py does."""
     data = np.load(_SLICE_FIXTURE)
     arrays = GroupArrays(
         encoded_exponent=data["encoded_exponent"],
@@ -84,6 +90,45 @@ def fibonacci_group():
     rng = np.random.default_rng(3)
     exps = rng.choice([*rare, max(counter, key=counter.get)], size=6000).astype(np.uint16)
     bits = (exps << 7) | (rng.integers(0, 65536, size=6000, dtype=np.uint16) & 0x807F)
+    encoded, other, positions, gaps, split = encode_weights([bits], codec, 8, 512)
+    arrays = GroupArrays(
+        encoded_exponent=encoded,
+        sign_mantissa=other,
+        luts=luts,
+        gaps=gaps,
+        output_positions=positions,
+        split_positions=split,
+    )
+    return arrays, bits
+
+
+def long_code_canary_group():
+    """The packaged long-code canary: 32-bit codes across a four-level LUT chain, spread over more than seven
+    launched blocks, then one block too dense for the staged path (over 16,192 elements), then a short tail.
+
+    Same Fibonacci codebook idea as `fibonacci_group`: 8,000 draws from the six longest codes (about 30 bits
+    each, so over seven 4,096-byte blocks), a 50,000-element run of the most frequent exponent (a 1-bit code, so
+    one block holds 32,768 of them), and 500 more rare draws that leave the last block partial. Seeded RNG;
+    `src/mlx_dfloat/_canary_data/long_codes.npz` is this group's arrays plus its input bits as `expected_bf16`.
+    """
+    counter = {}
+    a, b = 1, 1
+    for exp in range(100, 140):
+        counter[exp] = a
+        a, b = b, a + b
+    codec, table, luts = codec_for(counter)
+    lengths = {k: v[0] for k, v in table.items() if isinstance(k, int)}
+    rare = sorted(lengths, key=lengths.get, reverse=True)[:6]
+    frequent = max(counter, key=counter.get)
+    rng = np.random.default_rng(11)
+    exps = np.concatenate(
+        [
+            rng.choice(rare, size=8000),
+            np.full(50000, frequent),
+            rng.choice(rare, size=500),
+        ]
+    ).astype(np.uint16)
+    bits = (exps << 7) | (rng.integers(0, 65536, size=exps.size, dtype=np.uint16) & 0x807F)
     encoded, other, positions, gaps, split = encode_weights([bits], codec, 8, 512)
     arrays = GroupArrays(
         encoded_exponent=encoded,

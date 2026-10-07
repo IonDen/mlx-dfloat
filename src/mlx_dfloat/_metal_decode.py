@@ -7,7 +7,9 @@ import mlx.core as mx
 import numpy as np
 import numpy.typing as npt
 
-from mlx_dfloat.decode import DecodeResult
+from mlx_dfloat._canary import CanaryGroup, canary_groups
+from mlx_dfloat._version import __version__
+from mlx_dfloat.decode import DecodeResult, _device_summary
 from mlx_dfloat.errors import DFloatBackendError
 from mlx_dfloat.format import GroupArrays, MxGroup
 
@@ -33,6 +35,8 @@ THREADGROUP_BYTES_DIRECT = _metal_static_bytes(2 + _SCRATCH_BYTES)  # 198 -> 208
 _KERNEL: Any | None = None
 # (force_direct, poison_buf, unguarded_gap_read) -> warmed
 _PIPELINES: dict[tuple[bool, bool, bool], bool] = {}
+# force_direct -> the canary groups decoded correctly on this write path
+_CANARY: dict[bool, bool] = {}
 
 _SOURCE = r"""
     const uint t = thread_position_in_threadgroup.x;
@@ -365,6 +369,75 @@ def ensure_pipeline(
     _PIPELINES[key] = True
 
 
+def canary_failure(canary: CanaryGroup, *, force_direct: bool) -> str | None:
+    """Decode one canary group on one write path; None when it is right, else why not.
+
+    The output is prefilled with a value no expected word equals, so an element the kernel
+    fails to write cannot pass on recycled memory. A block runs direct when the path is forced
+    or when its interval is over `CAP` (as `decode` counts it), staged otherwise.
+    """
+    name = canary.name
+    group = canary.arrays.to_mx(name=name)
+    present = np.zeros(1 << 16, dtype=bool)
+    present[canary.expected] = True
+    fill = int(np.flatnonzero(~present)[0])
+    try:
+        out, status = _dispatch(
+            group,
+            force_direct=force_direct,
+            poison_buf=False,
+            init_value=fill,
+            unguarded_gap_read=False,
+        )
+        mx.eval(out, status)
+    except Exception as exc:  # compile error, pipeline ceiling below 512, driver refusal
+        return f"{name}: the Metal decode kernel cannot run it: {exc}"
+    bits = np.array(out)
+    words = np.array(status)
+    if not np.array_equal(bits, canary.expected):
+        wrong = np.flatnonzero(bits != canary.expected)
+        i = int(wrong[0])
+        return (
+            f"{name}: wrong bits at element {i} (got 0x{int(bits[i]):04x}, "
+            f"want 0x{int(canary.expected[i]):04x}); {wrong.size} elements differ"
+        )
+    if np.any(words & 7):
+        block = int(np.flatnonzero(words & 7)[0])
+        return f"{name}: block {block} reported an error bit (status word 0x{int(words[block]):x})"
+    want_direct = np.ones(group.n_launch, dtype=bool) if force_direct else group.intervals > CAP
+    if not np.array_equal((words & 8) != 0, want_direct):
+        path = "direct" if force_direct else "staged"
+        return f"{name}: a block took the wrong write path (want {path})"
+    return None
+
+
+def ensure_canary(*, force_direct: bool) -> None:
+    """Decode every canary group on this write path and refuse the backend unless each is bit-exact.
+
+    Cached per write path after a pass; a failure is never cached, so the next call checks again.
+
+    Raises:
+        DFloatBackendError: A pipeline cannot be warmed, the packaged canary data is unreadable,
+            or a canary group decodes to wrong bits, reports an error bit, or runs on the wrong
+            write path. The message names the group and, for wrong bits, the first wrong
+            element, then the device, the mlx and mlx-dfloat versions and what to report.
+    """
+    if _CANARY.get(force_direct):
+        return
+    ensure_pipeline(force_direct=force_direct)
+    for canary in canary_groups():
+        failure = canary_failure(canary, force_direct=force_direct)
+        if failure is not None:
+            raise DFloatBackendError(
+                f"the Metal decode kernel failed its canary: {failure}. "
+                f"Device: {_device_summary()}; mlx {getattr(mx, '__version__', 'unknown')}; mlx-dfloat {__version__}. "
+                "Run `mlx-dfloat selftest --json` and report it at "
+                "https://github.com/IonDen/mlx-dfloat/issues; "
+                "the CPU reference backend still works."
+            )
+    _CANARY[force_direct] = True
+
+
 def metal_ready() -> bool:
     """Whether both production instantiations (direct and staged) compile here and decode the warm-up groups.
 
@@ -375,6 +448,8 @@ def metal_ready() -> bool:
     try:
         ensure_pipeline(force_direct=True)
         ensure_pipeline(force_direct=False)
+        ensure_canary(force_direct=True)
+        ensure_canary(force_direct=False)
     except DFloatBackendError:
         return False
     return True
@@ -398,11 +473,13 @@ def decode(
 
     Raises:
         DFloatBackendError: The kernel instantiation cannot be warmed up here (see
-            `ensure_pipeline`).
+            `ensure_pipeline`), or fails its canary groups (see `ensure_canary`).
     """
     ensure_pipeline(
         force_direct=force_direct, poison_buf=_poison_buf, unguarded_gap_read=_unguarded_gap_read
     )
+    if _init_value is None and not _poison_buf and not _unguarded_gap_read:
+        ensure_canary(force_direct=force_direct)
     out, status = _dispatch(
         group,
         force_direct=force_direct,
