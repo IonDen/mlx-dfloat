@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 344" width="720" height="344" role="img" aria-label="How mlx-dfloat runs FLUX.1 on a Mac: the DFloat11 transformer is 15.2 GiB instead of 22.1 GiB in BF16 and stays compressed in memory; the GPU unpacks each of its 57 blocks to BF16 just before it runs and releases it after. On FLUX.1-schnell the final latents match the BF16 run bit for bit; peak about 20 GiB at 1024 by 1024 on a 32 GB M1 Max.">
+  <rect x="0" y="0" width="720" height="344" fill="#ffffff" rx="6"/>
+  <style>
+    .t  { font: 600 16px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: #0f172a; }
+    .s  { font: 400 12.5px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: #475569; }
+    .h  { font: 600 13.5px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: #0f172a; }
+    .l  { font: 400 12.5px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: #0f172a; }
+    .v  { font: 600 12.5px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: #0f172a; }
+    .w  { font: 600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: #ffffff; }
+    .ax { font: 400 11px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: #64748b; }
+    .cap{ font: 400 11.5px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: #64748b; }
+    .box{ fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1; }
+    .arr{ stroke: #64748b; stroke-width: 1.6; fill: none; }
+  </style>
+  <defs>
+    <marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <text class="t" x="24" y="30">How mlx-dfloat runs FLUX.1 on a Mac</text>
+  <text class="s" x="24" y="50">The transformer stays compressed in memory; each block is unpacked on the GPU just before it runs</text>
+
+  <!-- 1. the checkpoint -->
+  <rect class="box" x="24" y="72" width="172" height="206" rx="6"/>
+  <text class="h" x="110" y="98" text-anchor="middle">DFloat11 checkpoint</text>
+  <text class="s" x="110" y="116" text-anchor="middle">from the Hugging Face Hub</text>
+  <text class="ax" x="40" y="152">BF16 transformer</text>
+  <text class="v" x="180" y="152" text-anchor="end">22.1 GiB</text>
+  <rect x="40" y="159" width="140" height="16" fill="#64748b" rx="2"/>
+  <text class="ax" x="40" y="206">DF11 transformer</text>
+  <text class="v" x="180" y="206" text-anchor="end">15.2 GiB</text>
+  <rect x="40" y="213" width="96" height="16" fill="#0d9488" rx="2"/>
+  <text class="cap" x="110" y="258" text-anchor="middle">exponents packed, nothing lost</text>
+
+  <line class="arr" x1="198" y1="175" x2="222" y2="175" marker-end="url(#head)"/>
+
+  <!-- 2. memory and the per-block loop -->
+  <rect class="box" x="226" y="72" width="268" height="206" rx="6"/>
+  <text class="h" x="360" y="98" text-anchor="middle">The Mac's unified memory</text>
+  <rect x="234" y="110" width="252" height="28" fill="#0d9488" rx="3"/>
+  <text class="w" x="360" y="129" text-anchor="middle">transformer, still compressed: 15.2 GiB</text>
+  <text class="s" x="242" y="164">for each of its 57 blocks, in order:</text>
+  <text class="v" x="244" y="190">1</text>
+  <text class="l" x="260" y="190">the GPU unpacks that block to BF16</text>
+  <text class="v" x="244" y="214">2</text>
+  <text class="l" x="260" y="214">the block runs on those weights</text>
+  <text class="v" x="244" y="238">3</text>
+  <text class="l" x="260" y="238">the unpacked copy is released</text>
+  <path class="arr" d="M 470 236 C 486 236, 486 186, 472 186" marker-end="url(#head)"/>
+  <text class="ax" x="360" y="266" text-anchor="middle">at most a block or two unpacked at a time</text>
+
+  <line class="arr" x1="496" y1="175" x2="520" y2="175" marker-end="url(#head)"/>
+
+  <!-- 3. the result -->
+  <rect class="box" x="524" y="72" width="172" height="206" rx="6"/>
+  <text class="h" x="610" y="98" text-anchor="middle">The image</text>
+  <text class="l" x="610" y="128" text-anchor="middle">final latents match the</text>
+  <text class="l" x="610" y="146" text-anchor="middle">BF16 run bit for bit</text>
+  <text class="cap" x="610" y="164" text-anchor="middle">(checked on FLUX.1-schnell)</text>
+  <text class="v" x="610" y="204" text-anchor="middle">peak about 20 GiB</text>
+  <text class="l" x="610" y="222" text-anchor="middle">at 1024 × 1024, under the</text>
+  <text class="l" x="610" y="240" text-anchor="middle">22.96 GiB budget of a</text>
+  <text class="l" x="610" y="258" text-anchor="middle">32 GB M1 Max</text>
+
+  <text class="cap" x="24" y="306">Sizes in GiB. Checkpoints: FLUX.1-schnell on the Hugging Face Hub (the DF11 repository, the BF16 transformer shards).</text>
+  <text class="cap" x="24" y="324">Memory: bench/results/tiers/ (FLUX.1-schnell, dev and Krea-dev at 1024², one M1 Max 32 GB, mlx 0.32.2, mflux 0.20.0).</text>
+</svg>
