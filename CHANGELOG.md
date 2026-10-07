@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `mlx-dfloat selftest` and `mlx_dfloat.decode.selftest()` decode two packaged groups, one cut from a real Qwen3-4B
+  checkpoint and one with 32-bit codes, on both Metal write paths and with the CPU reference, and compare them with
+  known bits. The same check now runs the first time a process decodes on Metal, once for each write path, and when the
+  decode backend is set up; if it fails, the Metal backend refuses to decode and `available_backends()` stops listing
+  it.
+
 ### Changed
 
 - The README starts with what the library is for, a figure of a FLUX.1 run, a comparison with mflux's BF16 and

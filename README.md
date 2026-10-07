@@ -109,6 +109,24 @@ checkpoint that is already on disk, `scripts/verify_checkpoint.py` (run the same
 directories) checks every tensor and writes one result file per group, so an interrupted run resumes where it
 stopped.
 
+### Check the GPU decoder on your Mac
+
+```
+mlx-dfloat selftest
+```
+
+From a checkout, prefix it with `uv run`. The command decodes two groups that ship inside the package: one cut from a
+real Qwen3-4B checkpoint, and one built to use the longest bit codes the format allows, spread over more than seven
+blocks. Each is decoded two ways on the GPU (the staged and direct write paths) and once by the CPU reference, and every
+result is compared with bits known in advance. It exits 0 when every check passes, 1 when a check fails, and 2 when the
+GPU decoder cannot run at all, for example because there is no Metal device. `--json` prints the same report as JSON.
+
+The same check runs automatically the first time a process decodes on the GPU, once for each write path, and when the
+FLUX.1 model or the `generate` command sets up its decoder, so a broken GPU decoder refuses before any model loads. On
+an M1 Max the check itself took about 13 ms, measured after the kernel pipelines were compiled; the one-time compile
+took about 0.4 s with a cold shader cache and 0.03 s with a warm one. It does not check whether a real model fits in
+your memory or how fast it runs; the numbers below cover that.
+
 ### Generate a FLUX.1 image
 
 Generation needs the `mflux` extra (`pip install "mlx-dfloat[mflux]"`, see "Install"). The default repositories need
