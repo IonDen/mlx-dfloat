@@ -1,6 +1,12 @@
 # mlx-dfloat
 
+[![PyPI version](https://img.shields.io/pypi/v/mlx-dfloat.svg)](https://pypi.org/project/mlx-dfloat/)
+[![Python versions](https://img.shields.io/pypi/pyversions/mlx-dfloat.svg)](https://pypi.org/project/mlx-dfloat/)
+[![License: Apache-2.0](https://img.shields.io/pypi/l/mlx-dfloat.svg)](https://github.com/IonDen/mlx-dfloat/blob/main/LICENSE)
+
 Run [DFloat11](https://github.com/LeanModels/DFloat11) checkpoints on a Mac with [MLX](https://github.com/ml-explore/mlx).
+The weights stay about 30 % smaller than BF16 in memory, and the GPU decodes each block back to exactly the same bits
+just before it runs. Today that means FLUX.1 image generation on a 32 GB Mac.
 
 DFloat11 is lossless compression for BF16 model weights. Each weight is 16 bits. DFloat11 stores the 8 exponent bits
 as a short variable-length code, the same idea a zip file uses, and keeps the other 8 bits (the sign and the
@@ -16,39 +22,44 @@ one BF16 weight, 16 bits:    s   eeeeeeee   mmmmmmm
                              sign + fraction: kept as one raw byte              (stored as is)
 ```
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/IonDen/mlx-dfloat/main/docs/images/how-it-works.svg" alt="Diagram: the DFloat11 FLUX.1 transformer stays compressed in a Mac's memory, and the GPU unpacks each of its 57 blocks to BF16 just before it runs." width="720">
+</p>
+
 Why that matters on a Mac: unified memory is the limit. The BF16 FLUX.1-dev transformer is about 24 GB,[^flux] more
-than the GPU on a 32 GB machine can comfortably hold. At 70% it should come in under that line, and unlike 4-bit or
-8-bit quantisation it changes nothing in the output. Whether it really fits on a given Mac is something this project
-has to measure. The numbers measured so far are under "Measured numbers" below, and they cover a 32 GB Mac only.
+than the GPU on a 32 GB machine can comfortably hold. At 70% it comes in under that line, and unlike 4-bit or 8-bit
+quantisation it changes nothing in the weights. On a 32 GB M1 Max a 1024² generation peaked at about 20 GiB for each
+of the three FLUX.1 models; no other Mac has been measured. The numbers are under "Measured numbers" below.
+
+## Does this help me?
+
+| Your situation | What to use |
+|---|---|
+| A 32 GB Mac, FLUX.1-schnell, FLUX.1-dev or FLUX.1-Krea-dev, and you want the BF16 weights unchanged | mlx-dfloat. Measured peak about 20 GiB at 1024² for all three. The final latents were checked bit for bit against BF16 on FLUX.1-schnell, not yet on the other two. Unpacking makes a denoising step 3.5 % slower on dev and 4.0 % slower on schnell than a control that runs the same graph on weights decoded in advance (Krea-dev's step was not timed). |
+| Less memory or a faster step, and a different image is fine | mflux's own quantised transformer. Its 8-bit mode, the only one measured here, ran a step roughly 1.3 times faster and peaked about 5 GiB lower, under the same 2.5 GB cache limit; mflux's own generate sets no cache limit, so this is not quite its default setup (see "Measured numbers" for why the ratio is rough). It changes the weights and the output; by how much was not measured. |
+| A Mac with room for the BF16 transformer next to everything else | Plain mflux in BF16. There is nothing to decode. |
+| A Mac with less than 32 GB | Not measured yet. The tables below make no claim for it. |
+| Another model: an LLM, Qwen-Image, FLUX.2, Krea-2 | Not wired up yet. The reader and the decoder handle every published version of the DFloat11 format, but generation covers FLUX.1 only. |
 
 ## Status
 
-Pre-alpha. Version 0.1.0 is on PyPI (see "Install" below). The first two milestones decided
-whether the project would go ahead at all. The other two make it usable and its numbers reproducible:
+Pre-alpha: version 0.1.0 is on PyPI. What works today:
 
-1. A bit-exact reference decoder for published DFloat11 checkpoints. **Done.** Every compressed tensor of Qwen3-4B,
-   and sampled blocks of FLUX.1-schnell, FLUX.1-Krea-dev, Qwen-Image-Edit and Qwen-Image-Edit-2509, decode to
-   exactly the BF16 originals. That covers all four published versions of the checkpoint format.
-2. A Metal decode kernel fast enough to run inside an image-generation step. **Done.** The kernel decodes the
-   published checkpoints bit-exactly at 50 GB/s on an M1 Max. Decoding every block just in time makes a 1024²
-   denoise step 5.0 % slower on FLUX.1-dev, 6.1 % slower on FLUX.1-schnell with a one-block evaluation run-ahead,
-   and 8.5 % slower on FLUX.1-schnell with per-block evaluation, all well under the project's ~25 % threshold.
-   That is measured against a control which,
-   on a reduced-depth transformer, agrees within 0.13 % with a run whose BF16 weights are all resident, through
-   the same per-block path. Those runs used a 1.4 GB MLX buffer-cache limit. The benchmark in milestone 4 uses
-   2.5 GB, and the overhead there is lower on both models. The recipe and numbers are in the changelog.
-3. FLUX.1 image generation through mflux, straight from the compressed checkpoint to a saved image. **Done.**
-   FLUX.1-schnell, FLUX.1-dev and FLUX.1-Krea-dev each generate a 1024² image on a 32 GB M1 Max within the
-   machine's measured memory budget, and FLUX.1-schnell's output matches, bit for bit, the same transformer
-   streaming its BF16 weights block by block instead of the compressed ones. The command and the measured numbers
-   are under "Try it" below.
-4. A reproducible benchmark and the measured 32 GB rows. **Done.** One command runs a scenario file that pins
-   the checkpoints, the prompt, the seed, the size and the cache limit, and writes one result file per condition
-   and round, and the tables under "Measured numbers" are generated from those files. A 32 GB M1 Max has measured
-   rows for all three FLUX.1 models. A two-run proof shows the memory watchdog stopping a run that crosses its
-   ceiling and leaving one under it alone.
+- All four published versions of the DFloat11 checkpoint format decode to exactly the BF16 originals: every
+  compressed tensor of Qwen3-4B, and sampled blocks of FLUX.1-schnell, FLUX.1-Krea-dev, Qwen-Image-Edit and
+  Qwen-Image-Edit-2509.
+- A Metal kernel decodes to the same bits as the CPU reference decoder, at about 50 GB/s on an M1 Max on its default
+  path, timed on Qwen3-4B and FLUX.1-schnell groups with
+  `uv run python -m scripts.bench_decode_kernel --df11 <checkpoint dir> --groups <group names> --out decode.json`.
+- FLUX.1-schnell, FLUX.1-dev and FLUX.1-Krea-dev make 1024² images through mflux, from the command line or from
+  Python. For FLUX.1-schnell, the final latents match the same transformer run block by block from its BF16 weights
+  bit for bit, and the saved images match pixel for pixel.
+- One command per scenario reruns the step benchmark under "Measured numbers"; each tier row is one
+  `mlx-dfloat generate` run.
+- `mlx-dfloat generate`, the parity scripts and the benchmark run under a memory watchdog that stops them when they
+  cross its ceiling.
 
-All four milestones are done.
+Earlier step-time numbers, measured with a smaller MLX cache limit, are in the 0.1.0 entry of the changelog.
 
 ## Install
 
@@ -120,6 +131,27 @@ non-commercial license whichever base supplies the encoders; you accept it on th
 Hub pages. Once everything is cached, set `HF_HUB_OFFLINE=1` to skip the Hub round trip that would otherwise check
 for a newer revision on every run.
 
+The same from Python:
+
+```python
+from mlx_dfloat.mflux import DFloatFlux1
+
+model = DFloatFlux1("schnell")  # or "dev", "krea-dev"
+image = model.generate_image(
+    seed=42,
+    prompt="A stone lighthouse on a rocky shore at dawn",
+    num_inference_steps=4,
+    height=1024,
+    width=1024,
+)
+image.save("lighthouse.png")
+```
+
+FLUX.1-dev and FLUX.1-Krea-dev want more steps; the measured runs below used 20 steps and `guidance=3.5`.
+`base_path=` takes the `--base` value, and `fit_check=False` replaces `--no-fit-check` (see below). From Python
+nothing installs memory caps or a memory watchdog; `mlx-dfloat generate` does both, so prefer the command on a Mac
+near its memory limit.
+
 Measured on an M1 Max (32 GB, macOS 27.0, mlx 0.32.2, mflux 0.20.0, 2026-09-28/29) at 1024², one image per model:
 FLUX.1-schnell (4 steps) peaked at 19.94 GiB and took 1 minute 54 seconds including imports; FLUX.1-dev (20 steps,
 guidance 3.5) peaked at 20.10 GiB in 7 minutes 6 seconds; FLUX.1-Krea-dev (20 steps, guidance 3.5) peaked at 20.09
@@ -181,8 +213,9 @@ on this Mac (`watchdog_ceiling_bytes` in each file). On a CAPPED row the two are
 The overhead block times one 1024² denoise step, five timed steps after two warm-up steps in each of three rounds,
 with every condition in its own process. `df11` decodes each transformer block's weights from the compressed set
 just before the block runs and evaluates after every block. `control` runs the same graph with the same per-block
-evaluation, but its weights were decoded once before timing started, so the gap between the two is the cost of
-decoding. The depth-2 pair evaluates one block behind instead, so the CPU can queue the next block, decode included,
+evaluation, but hands every block the weights of one double and one single block, decoded once before timing
+started, so the gap between the two is the cost of decoding just in time. At the earlier 1.4 GB cache limit most of
+that gap was allocating a fresh buffer for each block's decoded weights; at 2.5 GB the share was not measured. The depth-2 pair evaluates one block behind instead, so the CPU can queue the next block, decode included,
 while the GPU runs the current one. The eval policy cost is what evaluating after every block adds by itself:
 `control` minus a control that evaluates once per step, with no decode involved. A negative value means the
 per-block control was the faster of the two. The q8 ratio is DF11 with per-block evaluation over mflux's own

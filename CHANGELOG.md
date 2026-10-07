@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The README starts with what the library is for, a figure of a FLUX.1 run, a comparison with mflux's BF16 and
+  8-bit paths, and a Python example.
+- The package summary and keywords name the FLUX.1 use case; `mlx-lm` is no longer a keyword, since no mlx-lm path
+  exists yet.
+
 ## [0.1.0] - 2026-10-01
 
 The first release.
