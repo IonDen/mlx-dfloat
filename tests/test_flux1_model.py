@@ -142,6 +142,36 @@ def test_constructor_refusals_come_before_any_resolution(monkeypatch, kwargs):
         DFloatFlux1("schnell", **kwargs)
 
 
+@pytest.mark.metal
+def test_a_failed_gpu_canary_refuses_the_model_before_any_resolution_or_load(monkeypatch):
+    # Bug caught: the canary first running when the decode provider is built, which the model does only after the
+    # encoders loaded, the prompt was encoded and the compressed set was read (minutes in on a broken GPU).
+    import mlx.core as mx
+    import numpy as np
+
+    from mlx_dfloat import _metal_decode
+    from mlx_dfloat.errors import DFloatBackendError
+    from mlx_dfloat.mflux.flux1.model import DFloatFlux1
+
+    real = _metal_decode._dispatch
+
+    def faulty(group, **kwargs):
+        out, status = real(group, **kwargs)
+        if group.name.startswith("canary-"):
+            bits = np.array(out)
+            bits[0] ^= 1
+            out = mx.array(bits)
+        return out, status
+
+    monkeypatch.setattr(_metal_decode, "_dispatch", faulty)
+    monkeypatch.setattr(_metal_decode, "_CANARY", {})
+    monkeypatch.setattr(
+        base_init, "resolve", lambda *a, **k: pytest.fail("resolved before the canary")
+    )
+    with pytest.raises(DFloatBackendError, match="canary"):
+        DFloatFlux1("schnell")
+
+
 def test_an_unknown_model_and_the_none_policy_are_refused(monkeypatch, tmp_path):
     # Bug caught: mflux's from_name accepting "dev-fill" (another class upstream) and this path
     # building a FLUX.1 model for it; or policy "none" (every decode resident) accepted, whether

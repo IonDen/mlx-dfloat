@@ -17,6 +17,7 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_flatten
 
+from mlx_dfloat import _metal_decode
 from mlx_dfloat._watchdog import phys_footprint
 from mlx_dfloat.errors import DFloatFormatError, DFloatResourceError, DFloatUnsupportedError
 from mlx_dfloat.format import DF11Checkpoint, MxGroup, open_checkpoint
@@ -141,6 +142,8 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
             DFloatUnsupportedError: ``quantize``, ``lora_paths``, ``lora_scales`` or ``bake_lora=False``
                 (accepted only to refuse), an eval policy other than ``"per-block"`` / ``"depth2"``,
                 or an unknown ``model``.
+            DFloatBackendError: The GPU decoder fails its check on the packaged canary groups (raised before
+                anything is resolved or loaded), or Metal is unavailable.
             DFloatFormatError: The checkpoint is not a FLUX.1 DF11 checkpoint, or the base lacks the
                 encoders or is a quantized save.
             DFloatAccessError: A gated repository this account may not read.
@@ -162,6 +165,9 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
         _check_eval_policy(eval_policy)
         if model not in MODELS:
             raise DFloatUnsupportedError(f"model {model!r}: this path runs {sorted(MODELS)}")
+        # The GPU decoder proves itself on the packaged canary groups before anything is resolved, downloaded or
+        # loaded, so a broken decoder refuses here and not minutes later at the first block.
+        _metal_decode.ensure_canary(force_direct=False)
         from mflux.models.common.config.model_config import ModelConfig
 
         model_config = ModelConfig.from_name(model_name=model, base_model=None)

@@ -33,12 +33,18 @@ def main() -> int:
         ready = _metal_decode.metal_ready()
         print(f"metal_ready={ready}")
         if not ready:
-            # metal_ready() swallows the reason; warm both instantiations again to print it.
-            try:
-                _metal_decode.ensure_pipeline(force_direct=True)
-                _metal_decode.ensure_pipeline(force_direct=False)
-            except DFloatBackendError as exc:
-                print(f"DFloatBackendError: {exc}")
+            # metal_ready() swallows the reason; warm both instantiations and run the canary
+            # groups on both write paths again to print it.
+            for check in (
+                lambda: _metal_decode.ensure_pipeline(force_direct=True),
+                lambda: _metal_decode.ensure_pipeline(force_direct=False),
+                lambda: _metal_decode.ensure_canary(force_direct=True),
+                lambda: _metal_decode.ensure_canary(force_direct=False),
+            ):
+                try:
+                    check()
+                except DFloatBackendError as exc:
+                    print(f"DFloatBackendError: {exc}")
     except Exception:
         traceback.print_exc()
     return 0
