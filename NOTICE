@@ -21,12 +21,15 @@ format. The only file taken from that repository is the test-only encoder descri
 
 Test-only encoder and test data
 -------------------------------
-tests/_upstream/dfloat11_encoder.py is derived from dfloat11_utils.py of https://github.com/LeanModels/DFloat11
-at commit 457733886c, Copyright 2025 Tianyi Zhang, licensed under the Apache License, Version 2.0. It builds test
-fixtures only and is not part of the installed package. tests/_upstream/NOTICE lists the changes made to it.
+tests/_upstream/dfloat11_encoder.py is derived from dfloat11_utils.py of https://github.com/LeanModels/DFloat11 at
+commit 457733886c, Copyright 2025 Tianyi Zhang, licensed under the Apache License, Version 2.0. It builds test fixtures,
+and one group it built ships in the package (long_codes.npz); the encoder code itself is not installed.
+tests/_upstream/NOTICE lists the changes made to it.
 
-tests/fixtures/upstream/ holds a small slice (four compressed blocks of one matrix) of the DFloat11/Qwen3-4B-DF11
-checkpoint and the matching BF16 values from Qwen/Qwen3-4B, which is licensed under the Apache License, Version 2.0.
+src/mlx_dfloat/_canary_data/ holds a small slice (four compressed blocks of one matrix) of the DFloat11/Qwen3-4B-DF11
+checkpoint and the matching BF16 values from Qwen/Qwen3-4B, which is licensed under the Apache License, Version 2.0. The
+slice and long_codes.npz (the group built by the encoder above) are installed with the package as check data for the GPU
+decoder.
 
 mflux
 -----
