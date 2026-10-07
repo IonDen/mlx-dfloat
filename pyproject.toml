@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mlx-dfloat"
-description = "Run DFloat11 losslessly compressed BF16 models on Apple Silicon with MLX: bit-identical output at roughly 70% of BF16 memory, as the DFloat11 authors report"
+description = "Run DFloat11 losslessly compressed BF16 checkpoints on Apple Silicon with MLX and a Metal decode kernel; today that runs FLUX.1 on a 32 GB Mac with weights about 30% smaller"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -12,7 +12,8 @@ license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Denis Ineshin", email = "denis.ineshin@gmail.com" }]
 keywords = [
   "dfloat11", "df11", "lossless-compression", "bfloat16", "huffman",
-  "model-compression", "mlx", "apple-silicon", "metal", "mflux", "mlx-lm",
+  "model-compression", "weight-compression", "mlx", "apple-silicon", "metal", "macos",
+  "mflux", "flux", "flux.1", "diffusion", "image-generation",
 ]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
@@ -48,6 +49,7 @@ Homepage = "https://github.com/IonDen/mlx-dfloat"
 Source = "https://github.com/IonDen/mlx-dfloat"
 Issues = "https://github.com/IonDen/mlx-dfloat/issues"
 Changelog = "https://github.com/IonDen/mlx-dfloat/blob/main/CHANGELOG.md"
+"Upstream DFloat11" = "https://github.com/LeanModels/DFloat11"
 
 [dependency-groups]
 test = [
