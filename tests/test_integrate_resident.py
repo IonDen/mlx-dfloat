@@ -133,3 +133,56 @@ def test_a_group_that_is_not_resident_and_a_size_that_does_not_fit_are_refused()
             names,
             decode=REFERENCE,
         )
+
+
+def _two_groups(module, names):
+    """Two one-matrix groups landing on proj.inner and cap_embedder.1 (renamed and plain)."""
+    rng = np.random.default_rng(9)
+    a, b = random_bf16(rng, SHAPE), random_bf16(rng, SHAPE)
+    groups = {
+        "proj": encoder_group(a.reshape(-1)).to_mx(name="proj"),
+        "cap_embedder": encoder_group(b.reshape(-1)).to_mx(name="cap_embedder"),
+    }
+    matrices = {"proj": ("proj.inner.weight",), "cap_embedder": (MATRIX,)}
+    shapes = install_nonblock_placeholders(module, ["proj.inner.weight", MATRIX], names)
+    return groups, matrices, shapes, {"proj.inner.weight": a, MATRIX: b}
+
+
+@pytest.mark.parametrize(("together", "evals"), [(False, [2, 2]), (True, [4])])
+def test_the_nonblock_groups_evaluate_per_group_or_in_one_eval(monkeypatch, together, evals):
+    # Bug caught: the per-call path (Krea 2 decodes its seven groups at every transformer call) paying one eval per
+    # group, or the default changed for the families that decode once at set load (it stays one eval per group:
+    # status word + matrix each). The bits are the same either way.
+    from mlx_dfloat.integrate import resident
+
+    seen = []
+    real = resident._eval
+    monkeypatch.setattr(resident, "_eval", lambda *a: (seen.append(len(a)), real(*a)))
+    names = StaticNameMap(TABLE)
+    module = _module()
+    groups, matrices, shapes, sources = _two_groups(module, names)
+    weights = decode_nonblock(
+        groups, matrices, shapes, names, decode=REFERENCE, eval_together=together
+    )
+    assert seen == evals  # one status word and one matrix per group, per eval
+    for param, source in sources.items():
+        assert np.array_equal(np.array(weights[param].view(mx.uint16)), source), param
+
+
+def test_a_decode_error_in_one_eval_still_names_its_group():
+    # Bug caught: the one-eval path checking the status words before they are evaluated, or naming the first group
+    # for an error in the second.
+    names = StaticNameMap(TABLE)
+    groups, matrices, shapes, _sources = _two_groups(_module(), names)
+
+    def flag_cap(g):
+        ok = REFERENCE(g)
+        if g.name != "cap_embedder":
+            return ok
+        status = mx.full(ok.status.shape, STATUS_BROKEN_CHAIN, dtype=mx.uint32)
+        return DecodeResult(
+            bits=ok.bits, status=status, backend=ok.backend, direct_blocks=0, threadgroup_bytes=0
+        )
+
+    with pytest.raises(DFloatFormatError, match="cap_embedder"):
+        decode_nonblock(groups, matrices, shapes, names, decode=flag_cap, eval_together=True)

@@ -484,3 +484,23 @@ def test_detach_clears_a_df11_providers_pending_status_words():
     assert provider.pending != []  # verify_step was never called
     tf.detach()
     assert provider.pending == []
+
+
+def test_a_seam_that_passes_no_inputs_hands_each_hook_call_its_own_empty_arguments():
+    # Bug caught: one shared default argument object for every call of run_block, so a before_block hook that adds a
+    # key to the kwargs it is given (the FLUX.1 seam passes none) leaks it into every later block's call, and into the
+    # next step's.
+    seen = []
+
+    class Hooked(ResidentProvider):
+        def before_block(self, block_name, args, kwargs):
+            seen.append((block_name, args, dict(kwargs)))
+            kwargs["touched"] = block_name
+
+    rec = Recorder()
+    tf = FakeSeamTransformer(rec, n_double=2, n_single=1)
+    shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
+    tf.attach(Hooked(resident_dicts(shapes)), shapes, eval_policy="per-block")
+    mx.eval(tf(*inputs()))
+    mx.eval(tf(*inputs()))
+    assert [(args, kwargs) for _name, args, kwargs in seen] == [((), {})] * 6
