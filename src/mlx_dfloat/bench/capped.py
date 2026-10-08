@@ -1,30 +1,46 @@
-"""Capped mode: emulate a smaller Mac's MLX limits on this one.
+"""Capped mode: run under a smaller Mac's MLX limits on this one.
 
-A real Mac's MLX defaults are ``memory_limit = cache_limit = min(1.5 x recommended working set,
-0.95 x RAM)``; capped mode installs that memory limit for the tier, so MLX throttles no earlier than
-it would on the real machine. MLX starts reclaiming its buffer cache at ``min(memory_limit, 0.95 x
-recommended)`` (verified 2026-09-29 on mlx 0.32.2), so that is the cache limit installed as the
-stand-in for the real reclaim point; the worker then installs its own, smaller cache limit and
-records the effective value. The watchdog ceiling is the tier's budget (its recommended working
-set) minus a reserve; crossing it aborts the run, because ``set_memory_limit`` only throttles and
-never fails an allocation. The wired limit is 0 (not part of the emulation). The recommended
-working set comes from device data when a datapoint exists, else from the 2/3 (16 and 24 GB) and
-3/4 (above 24 GB) ratios, and for the host tier from the host's own value; the host tier keeps the
-host caps (``is_host``), so MEASURED rows run under the limits a plain ``generate`` uses.
+A CAPPED tier installs the wired and memory caps ``mlx-dfloat`` itself installs on a Mac of that
+size (``install_memory_caps`` on a device whose recommended working set is the tier's; see
+``_memory_caps.caps_for_recommended_bytes``), so the run sees the limits a user of that Mac runs
+under. The wired cap matters: without it MLX allocated noticeably more for the same FLUX.2 Klein
+VAE decode (``mx.get_peak_memory``), with bit-identical output, whatever the memory limit (mlx
+0.32.2). When that Mac would get no caps (a working set under 1 GiB), the tier keeps MLX's own
+defaults: memory limit ``min(1.5 x recommended working set, 0.95 x RAM)`` and no wired limit. MLX
+starts reclaiming its buffer cache at ``min(memory_limit, 0.95 x recommended)`` (verified
+2026-09-29 on mlx 0.32.2), so that is the cache limit installed as the stand-in for the real
+reclaim point; the worker then installs its own, smaller cache limit and records the effective
+value. Two numbers sit below the tier's recommended working set. The fit budget is what
+``generate``'s fit check uses on a real Mac of that size (``integrate.memory.budget_for``: the
+working set minus 2 GiB). The watchdog ceiling is the working set minus ``reserve_for(tier)``
+(1.5 GiB up to 24 GB, 2 GiB above); crossing it aborts the run, because ``set_memory_limit`` only
+throttles and never fails an allocation. The recommended working set comes from device data when a datapoint exists, else from
+the 2/3 (16 and 24 GB) and 3/4 (above 24 GB) ratios, and for the host tier from the host's own
+value; the host tier's record keeps MLX's defaults (wired 0) because a host-tier run installs the
+host's own caps itself (``is_host``), so MEASURED rows run under the limits a plain ``generate``
+uses.
 """
 
 import dataclasses
 
 import mlx.core as mx
 
+from mlx_dfloat._memory_caps import caps_for_recommended_bytes
 from mlx_dfloat.errors import DFloatUnsupportedError
+from mlx_dfloat.integrate.memory import budget_for
 
 GIB = 1024**3
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class TierLimits:
-    """The limits capped mode installs for one tier, and the label its rows get."""
+    """The limits capped mode installs for one tier, and the label its rows get.
+
+    ``budget_bytes`` is the tier's recommended working set (the figure both reserves come off, kept
+    under this name for the committed result files); ``reserve_bytes`` and ``ceiling_bytes`` are the
+    watchdog's reserve and abort line; ``fit_budget_bytes`` is the fit check's budget, the one a real
+    Mac of that size applies.
+    """
 
     tier_gb: int
     ram_bytes: int
@@ -35,6 +51,7 @@ class TierLimits:
     reserve_bytes: int
     budget_bytes: int
     ceiling_bytes: int
+    fit_budget_bytes: int
     budget_source: str
     is_host: bool
     label: str
@@ -45,7 +62,7 @@ class TierLimits:
 
 
 def reserve_for(tier_gb: int) -> int:
-    """1.5 GiB up to 24 GB, 2 GiB above (initial values)."""
+    """The watchdog reserve below a tier's recommended working set: 1.5 GiB up to 24 GB, 2 GiB above."""
     return int(1.5 * GIB) if tier_gb <= 24 else 2 * GIB
 
 
@@ -85,7 +102,10 @@ def tier_limits(
     else:
         # Integer arithmetic (the float ratio above is for display): 2/3 up to 24 GB, 3/4 above.
         recommended, source = (ram * 2 // 3 if tier_gb <= 24 else ram * 3 // 4), "ratio"
-    limit = min(int(1.5 * recommended), int(0.95 * ram))
+    wired, limit = (0, 0) if is_host else caps_for_recommended_bytes(recommended)
+    if limit == 0:
+        # The host tier, or a Mac on which install_memory_caps installs nothing: MLX's own defaults.
+        limit = min(int(1.5 * recommended), int(0.95 * ram))
     reserve = reserve_for(tier_gb)
     return TierLimits(
         tier_gb=tier_gb,
@@ -93,10 +113,11 @@ def tier_limits(
         recommended_bytes=recommended,
         memory_limit_bytes=limit,
         cache_limit_bytes=min(limit, int(0.95 * recommended)),
-        wired_limit_bytes=0,
+        wired_limit_bytes=wired,
         reserve_bytes=reserve,
         budget_bytes=recommended,
         ceiling_bytes=recommended - reserve,
+        fit_budget_bytes=budget_for(recommended),
         budget_source=source,
         is_host=is_host,
         label="MEASURED" if is_host else "CAPPED",

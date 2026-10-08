@@ -31,9 +31,20 @@ def largest_decoded_bytes(
     return largest
 
 
-def budget_bytes(*, reserve_bytes: int = 2 * 1024**3) -> int:
+FIT_RESERVE_BYTES = 2 * 1024**3
+"""The fit rule's reserve for the OS below the recommended working set."""
+
+
+def budget_for(recommended_bytes: int, *, reserve_bytes: int = FIT_RESERVE_BYTES) -> int:
+    """The fit rule's budget on a Mac whose recommended working set is ``recommended_bytes``."""
+    return recommended_bytes - reserve_bytes
+
+
+def budget_bytes(*, reserve_bytes: int = FIT_RESERVE_BYTES) -> int:
     """The fit rule's budget: the device's recommended working set minus a reserve for the OS."""
-    return int(mx.device_info()["max_recommended_working_set_size"]) - reserve_bytes
+    return budget_for(
+        int(mx.device_info()["max_recommended_working_set_size"]), reserve_bytes=reserve_bytes
+    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

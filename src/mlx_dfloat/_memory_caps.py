@@ -2,8 +2,10 @@
 
 Derives wired + memory caps from the device's reported working-set size and
 clamps strictly below it. Returns (0, 0) as a no-op signal on devices/CI images
-that report no working-set size. Mirrors the mlx-taef and mlx-quant-fidelity pattern.
+that report no working-set size.
 """
+
+# The same cap rule as the sibling packages mlx-taef and mlx-quant-fidelity.
 
 import mlx.core as mx
 
@@ -19,6 +21,16 @@ def _clamp_caps_gb(max_recommended_gb: int) -> tuple[int, int]:
     wired_gb = min(DESIRED_WIRED_GB, max(1, max_recommended_gb - HEADROOM_GB))
     memory_gb = min(DESIRED_MEMORY_GB, max(wired_gb + 1, max_recommended_gb))
     return (wired_gb, memory_gb)
+
+
+def caps_for_recommended_bytes(recommended_bytes: int) -> tuple[int, int]:
+    """The (wired, memory) caps in bytes ``install_memory_caps`` installs for this working set.
+
+    ``recommended_bytes`` is a device's recommended working set, floored to whole GiB first as
+    ``compute_safe_caps_gb`` does. Returns (0, 0) when no caps would be installed (under 1 GiB).
+    """
+    wired_gb, memory_gb = _clamp_caps_gb(recommended_bytes // (1024**3))
+    return (wired_gb * 1024**3, memory_gb * 1024**3)
 
 
 def compute_safe_caps_gb() -> tuple[int, int]:
@@ -71,4 +83,9 @@ def install_memory_caps() -> tuple[int, int]:
     return (wired_gb, memory_gb)
 
 
-__all__ = ["compute_safe_caps_gb", "device_string", "install_memory_caps"]
+__all__ = [
+    "caps_for_recommended_bytes",
+    "compute_safe_caps_gb",
+    "device_string",
+    "install_memory_caps",
+]

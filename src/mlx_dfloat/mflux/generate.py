@@ -1,9 +1,7 @@
 """``mlx-dfloat generate``: one image from a DFloat11 transformer, with memory caps and a watchdog.
 
-Flag names follow ``mflux-generate`` so a pasted command works; the options that path cannot
-honour are parsed only to refuse them with a reason (exit 2). ``--tier GB`` runs under a smaller
-Mac's MLX limits, with that tier's watchdog ceiling and fit budget (the host's own tier keeps the
-host caps); ``--memory-ceiling BYTES`` sets the watchdog ceiling alone, under the host caps.
+The command's ``--help`` text is ``DESCRIPTION`` below, kept free of reST markup because argparse
+prints it as is.
 """
 
 import argparse
@@ -83,12 +81,22 @@ def tier_gb(text: str) -> int:
     return value
 
 
+DESCRIPTION = (
+    "mlx-dfloat generate: one image from a DFloat11 transformer, with memory caps and a watchdog. "
+    "Flag names follow mflux-generate so a pasted command works; the options that path cannot "
+    "honour are parsed only to refuse them with a reason (exit 2). --tier GB runs under a smaller "
+    "Mac's MLX limits, with that tier's watchdog ceiling and fit budget (the host's own tier keeps "
+    "the host's own limits); --memory-ceiling BYTES sets the watchdog ceiling alone, under the "
+    "host's own limits."
+)
+
+
 def add_generate_parser(sub: Any) -> argparse.ArgumentParser:
     """Register ``generate`` on a subparsers object."""
     p: argparse.ArgumentParser = sub.add_parser(
         "generate",
         help="generate one image from a DFloat11 transformer",
-        description=__doc__,
+        description=DESCRIPTION,
     )
     _add_arguments(p)
     p.set_defaults(run=run)
@@ -97,7 +105,7 @@ def add_generate_parser(sub: Any) -> argparse.ArgumentParser:
 
 def build_parser() -> argparse.ArgumentParser:
     """A standalone parser for ``generate`` (tests parse with it)."""
-    p = argparse.ArgumentParser(prog="mlx-dfloat generate", description=__doc__)
+    p = argparse.ArgumentParser(prog="mlx-dfloat generate", description=DESCRIPTION)
     _add_arguments(p)
     return p
 
@@ -144,7 +152,12 @@ def _add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--base", default=None, help="base repository for the encoders and VAE (default per model)"
     )
-    p.add_argument("--eval-policy", choices=("per-block", "depth2"), default="per-block")
+    p.add_argument(
+        "--eval-policy",
+        choices=("per-block", "depth2"),
+        default="per-block",
+        help="per-block: evaluate after each block (default); depth2: one block behind",
+    )
     p.add_argument(
         "--cache-limit",
         type=cache_limit_bytes,
@@ -174,14 +187,14 @@ def _add_arguments(p: argparse.ArgumentParser) -> None:
         default=None,
         metavar="GB",
         help="run under a smaller Mac's MLX limits, watchdog ceiling and fit budget "
-        "(default: this host's own tier and caps)",
+        "(default: this host's own tier and limits)",
     )
     p.add_argument(
         "--memory-ceiling",
         type=memory_ceiling_bytes,
         default=None,
         metavar="BYTES",
-        help="a lower watchdog ceiling alone, under the host caps (not with --tier)",
+        help="a lower watchdog ceiling alone, under the host's own limits (not with --tier)",
     )
     family_flags = {f: r for fam in FAMILIES.values() for f, r in fam.refused_flags.items()}
     for flag, reason in {**REFUSED, **family_flags}.items():
@@ -228,7 +241,7 @@ def ceiling_for(
     if tier is not None and ceiling is not None:
         raise ValueError(
             "--tier and --memory-ceiling cannot be combined: --tier sets a tier's limits and "
-            "ceiling, --memory-ceiling the watchdog ceiling alone under the host caps"
+            "ceiling, --memory-ceiling the watchdog ceiling alone under the host's own limits"
         )
     limits = tier_limits(
         host_tier_gb(host_ram_bytes) if tier is None else tier,
@@ -260,8 +273,14 @@ def _scheduler(args: argparse.Namespace) -> str | None:
     return args.scheduler if args.scheduler is not None else entry(args.model).default_scheduler
 
 
-def _run_context(args: argparse.Namespace, *, tier_gb: int, label: str) -> dict[str, Any]:
-    """What the watchdog's abort artifact records about the run it may stop."""
+def _run_context(
+    args: argparse.Namespace, *, tier_gb: int, label: str, limits: Mapping[str, int]
+) -> dict[str, Any]:
+    """What the watchdog's abort artifact records about the run it may stop.
+
+    ``limits`` is the MLX ``memory`` / ``cache`` / ``wired`` limits read back after the install,
+    so a stopped run still says which limits it ran under.
+    """
     return {
         "model": args.model,
         "height": args.height,
@@ -270,6 +289,7 @@ def _run_context(args: argparse.Namespace, *, tier_gb: int, label: str) -> dict[
         "steps": _steps(args),
         "tier_gb": tier_gb,
         "label": label,
+        "limits": {name: int(limits[name]) for name in ("memory", "cache", "wired")},
     }
 
 
@@ -401,8 +421,8 @@ def run(
             applied = "host-caps"
         else:
             apply_limits(limits)
-            applied = "tier-defaults"
-            model_kwargs["budget_bytes"] = limits.ceiling_bytes
+            applied = "tier-caps"
+            model_kwargs["budget_bytes"] = limits.fit_budget_bytes  # a real Mac's, not the ceiling
         effective = read_limits()
         report["limits"] = limits_record(
             limits,
@@ -415,7 +435,7 @@ def run(
             output.parent,
             ceiling=ceiling,
             budget=args.wall_budget,
-            context=_run_context(args, tier_gb=limits.tier_gb, label=label),
+            context=_run_context(args, tier_gb=limits.tier_gb, label=label, limits=effective),
             live_context={"phase": lambda: _phase_of(built)},
         ).start()
     except (DFloatError, OSError) as exc:

@@ -118,3 +118,46 @@ def test_install_memory_caps_pushes_strict_byte_caps_on_healthy_device(monkeypat
     assert seen["memory"] == 22 * 1024**3
     assert seen["wired"] < max_bytes
     assert seen["memory"] < max_bytes
+
+
+def test_caps_for_recommended_bytes_floors_to_whole_gib_like_install_memory_caps():
+    # Bug caught: the helper rounding the working set up (or to nearest) instead of flooring as
+    # compute_safe_caps_gb does, so a CAPPED tier would run under looser caps than that Mac gets.
+    # By hand: 11_453_246_122 B = 10.67 GiB -> 10 -> wired min(20, 10 - 2) = 8 GiB, memory
+    # min(22, max(9, 10)) = 10 GiB. 17_179_869_183 B is one byte under 16 GiB -> 15 -> (13, 15).
+    assert _memory_caps.caps_for_recommended_bytes(11_453_246_122) == (
+        8_589_934_592,
+        10_737_418_240,
+    )
+    assert _memory_caps.caps_for_recommended_bytes(17_179_869_184) == (
+        15_032_385_536,
+        17_179_869_184,
+    )
+    assert _memory_caps.caps_for_recommended_bytes(17_179_869_183) == (
+        13_958_643_712,
+        16_106_127_360,
+    )
+
+
+def test_caps_for_recommended_bytes_below_one_gib_is_the_no_cap_signal():
+    # Bug caught: a sub-GiB working set yielding a 1 GiB wired cap, where install_memory_caps on
+    # that device installs nothing (it returns (0, 0) for a 0 GiB working set).
+    assert _memory_caps.caps_for_recommended_bytes(1_073_741_823) == (0, 0)
+    assert _memory_caps.caps_for_recommended_bytes(0) == (0, 0)
+
+
+def test_install_memory_caps_on_a_16_gb_mac_matches_the_helper(monkeypatch):
+    # Bug caught: install_memory_caps and caps_for_recommended_bytes drifting apart, so the CAPPED
+    # emulation stops matching what generate installs on a real 16 GB Mac.
+    monkeypatch.setattr(
+        _memory_caps.mx,
+        "device_info",
+        lambda: {"max_recommended_working_set_size": 11_453_246_122},
+    )
+    seen: dict[str, int] = {}
+    monkeypatch.setattr(_memory_caps.mx, "set_wired_limit", lambda b: seen.__setitem__("wired", b))
+    monkeypatch.setattr(
+        _memory_caps.mx, "set_memory_limit", lambda b: seen.__setitem__("memory", b)
+    )
+    assert _memory_caps.install_memory_caps() == (8, 10)
+    assert seen == {"wired": 8_589_934_592, "memory": 10_737_418_240}

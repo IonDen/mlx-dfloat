@@ -173,7 +173,7 @@ class Watchdog:
         return self
 
     def reset_peak(self) -> None:
-        """Start all three peaks over, so a later window's peak is not hidden by an earlier spike."""
+        """Start all three peaks over, so a later window's peak is not hidden by an earlier high point."""
         with self._lock:
             self.peak_footprint = 0
             self.peak_mlx = None

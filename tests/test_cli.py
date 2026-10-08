@@ -238,6 +238,7 @@ def test_generate_builds_the_model_from_the_flags_writes_the_image_and_the_repor
         "steps": 3,
         "tier_gb": 32,
         "label": "MEASURED",
+        "limits": {"memory": 111, "cache": 222, "wired": 333},  # what read_limits found
     }
     assert report["footprint_peak_bytes"] == 10**15
     assert (
@@ -256,6 +257,7 @@ def test_the_watchdog_context_carries_the_models_default_steps(tmp_path):
         "steps": 4,
         "tier_gb": 32,
         "label": "MEASURED",
+        "limits": {"memory": 111, "cache": 222, "wired": 333},  # what read_limits found
     }
 
 
@@ -547,6 +549,8 @@ def test_the_console_script_is_declared():
 # Worked by hand from the north star §4.3 (not from the code): a 24 GB tier's recommended working
 # set is 2/3 of 24 GiB = 16 GiB exactly; its reserve is 1.5 GiB; its ceiling 16 - 1.5 = 14.5 GiB.
 TIER_24_CEILING = 15_569_256_448  # int(14.5 * GIB)
+# The fit budget a real 24 GB Mac's generate applies, budget_bytes(): 17_179_869_184 - 2 GiB.
+TIER_24_FIT_BUDGET = 15_032_385_536
 # A 16 GB tier: 16 GiB * 2 // 3 = 11_453_246_122 bytes, minus 1.5 GiB (1_610_612_736).
 TIER_16_CEILING = 9_842_633_386
 
@@ -614,21 +618,22 @@ def test_a_non_positive_tier_or_ceiling_is_a_usage_error(extra):
 def test_tier_24_applies_the_tier_limits_not_the_host_caps_and_budgets_the_fit_check(tmp_path):
     # Bug caught: the host caps installed under a tier (the row is not the tier's), the watchdog at
     # the host ceiling, or the fit check still on the host budget (a call refused, or planned, for
-    # 32 GB while the row claims 24).
+    # 32 GB while the row claims 24); or the fit check handed the watchdog ceiling (1.5 GiB
+    # reserve), a looser budget than the 2 GiB-reserve one a real 24 GB Mac's generate applies.
     code, watchdogs, calls, report = _limits_run(["--tier", "24"], tmp_path)
     assert code == 0
     assert "install_caps" not in calls
     applied = [c[1] for c in calls if c[0] == "apply"]
     assert [lim.tier_gb for lim in applied] == [24]
     assert watchdogs[0].ceiling == TIER_24_CEILING
-    assert report["model_kwargs"]["budget_bytes"] == TIER_24_CEILING
+    assert report["model_kwargs"]["budget_bytes"] == TIER_24_FIT_BUDGET
     assert report["label"] == "CAPPED"
     assert report["tier_gb"] == 24
     assert report["watchdog_ceiling_bytes"] == TIER_24_CEILING
     assert report["memory_caps_gb"] is None
     assert report["limits"]["tier"]["tier_gb"] == 24
     assert report["limits"]["tier"]["ceiling_bytes"] == TIER_24_CEILING
-    assert report["limits"]["applied"] == "tier-defaults"
+    assert report["limits"]["applied"] == "tier-caps"
     assert report["limits"]["effective"] == {
         "memory_limit_bytes": 111,
         "cache_limit_bytes": 222,
@@ -637,7 +642,7 @@ def test_tier_24_applies_the_tier_limits_not_the_host_caps_and_budgets_the_fit_c
 
 
 def test_tier_32_on_a_32_gb_host_keeps_the_host_caps_and_is_measured(tmp_path):
-    # Bug caught (Review Focus 2): `--tier <host>` installing the stock tier defaults instead of the
+    # Bug caught (Review Focus 2): `--tier <host>` installing a smaller tier's caps instead of the
     # host caps, so MEASURED rows run under other limits than a plain generate.
     code, watchdogs, calls, report = _limits_run(["--tier", "32"], tmp_path)
     assert code == 0
@@ -875,6 +880,55 @@ def test_the_watchdog_context_names_the_tier_and_label(tmp_path):
     assert (watchdogs[0].context["tier_gb"], watchdogs[0].context["label"]) == (32, "MEASURED")
 
 
+def _stateful_limits_run(extra, tmp_path):
+    """A run whose installers write a fake MLX limit state that ``read_limits`` reads back."""
+    # Distinct from every cap below: a context read before the install would carry these.
+    state = {"memory": 1, "cache": 2, "wired": 3}
+
+    def install_caps():
+        state.update(memory=22 * GIB, wired=20 * GIB)  # the host caps leave the cache limit alone
+        return (20, 22)
+
+    def apply_limits(limits):
+        previous = dict(state)
+        state.update(
+            memory=limits.memory_limit_bytes,
+            cache=limits.cache_limit_bytes,
+            wired=limits.wired_limit_bytes,
+        )
+        return previous
+
+    _, watchdogs = _run(
+        ["--prompt", "p", "--output", str(tmp_path / "o.png"), *extra],
+        [],
+        tmp_path,
+        install_caps=install_caps,
+        apply_limits=apply_limits,
+        read_limits=lambda: dict(state),
+    )
+    return watchdogs[0].context
+
+
+def test_the_watchdog_context_carries_the_limits_in_force_after_the_install(tmp_path):
+    # Bug caught: a CAPPED abort artifact that cannot say which limits the run was stopped under
+    # (no `limits`), limits read before the install (1/2/3 here), or the tier's numbers swapped.
+    # The 16 GB tier's caps, worked from its 2/3 ratio: a 10.67 GiB recommended working set gives
+    # an 8 GiB wired cap and a 10 GiB memory limit; the cache limit is the smaller of the memory
+    # limit and 95 % of the recommended set (10.13 GiB), so 10 GiB.
+    context = _stateful_limits_run(["--tier", "16"], tmp_path)
+    assert context["limits"] == {
+        "memory": 10_737_418_240,
+        "cache": 10_737_418_240,
+        "wired": 8_589_934_592,
+    }
+    # Bug caught: the host run's context without limits, or carrying the tier path's values.
+    assert _stateful_limits_run([], tmp_path)["limits"] == {
+        "memory": 22 * GIB,
+        "cache": 2,
+        "wired": 20 * GIB,
+    }
+
+
 def test_family_refused_flags_are_refused_beyond_the_common_ones(monkeypatch):
     # Bug caught: a family's own refusal list ignored (the flag reaching the model) or applied to the other family.
     from dataclasses import replace
@@ -913,6 +967,21 @@ def test_the_help_says_one_image_not_one_flux_image():
     text = gen.build_parser().format_help()
     assert "one image" in text
     assert "FLUX.1 image" not in text
+
+
+def test_the_generate_help_reads_as_plain_text_and_explains_every_choice(capsys):
+    # Bug caught: the module docstring's RST double backticks printed literally in `--help`, the
+    # --eval-policy choices left unexplained, or the help still saying "the host caps".
+    standalone = gen.build_parser().format_help()
+    with pytest.raises(SystemExit):
+        main(["generate", "--help"])
+    texts = [standalone, capsys.readouterr().out]
+    for text in texts:
+        flat = " ".join(text.split())
+        assert "``" not in text
+        assert "host caps" not in flat
+        assert "per-block: evaluate after each block (default); depth2: one block behind" in flat
+        assert "the host's own limits" in flat
 
 
 def test_the_abort_context_reads_the_phase_open_now_build_before_the_model_exists(tmp_path):

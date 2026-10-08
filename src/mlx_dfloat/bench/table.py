@@ -17,6 +17,16 @@ from mlx_dfloat.mflux.families import MODELS
 _NOT_MEASURED = "not measured"
 _NOT_RECORDED = "not recorded"
 _STOPPED = "stopped by the watchdog"
+# A CAPPED row ran under the wired and memory caps mlx-dfloat installs on a Mac of that size.
+_TIER_CAPS_NOTE = "mlx-dfloat caps for the tier"
+# A CAPPED row ran under MLX's own defaults for a Mac of that size (no wired limit).
+_TIER_DEFAULTS_NOTE = "MLX defaults for the tier"
+# The note per ``limits.applied`` path of a generate report ("tier-defaults": runs before the tier caps).
+_APPLIED_NOTES = {
+    "host-caps": "host caps",
+    "tier-caps": _TIER_CAPS_NOTE,
+    "tier-defaults": _TIER_DEFAULTS_NOTE,
+}
 
 
 def _model_label(name: str) -> str:
@@ -65,7 +75,7 @@ def _need(mapping: Mapping[str, Any], key: str, where: str) -> Any:
 def _mlx_peak(report: Mapping[str, Any]) -> int:
     """The larger of the watchdog's sampled MLX peak (active + cache) and MLX's exact per-phase peaks.
 
-    The watchdog polls every 0.05 s and can miss a short spike; ``mx.get_peak_memory`` per phase (active only)
+    The watchdog polls every 0.05 s and can miss a short high point; ``mx.get_peak_memory`` per phase (active only)
     cannot, so whichever is larger is the better lower bound on what MLX held.
     """
     sampled = int(_need(report, "mlx_peak_bytes", "report"))
@@ -79,9 +89,11 @@ def _mlx_peak(report: Mapping[str, Any]) -> int:
 def tier_row_from_generate_report(report: Mapping[str, Any], *, source: str) -> TierRow:
     """Build a tier-table row from an ``mlx-dfloat generate --report`` JSON.
 
-    ``ceiling_bytes`` is the tier's fit budget (``limits.tier.ceiling_bytes``: the recommended
-    working set minus the reserve), which the status is judged against. On the host tier the
-    watchdog's own abort line is higher (RAM minus 4 GiB); on a CAPPED tier the two are the same.
+    ``ceiling_bytes`` is ``limits.tier.ceiling_bytes``, the recommended working set minus
+    ``reserve_for(tier)``, which the status is judged against. On the host tier (2 GiB reserve) it
+    equals the fit budget, and the watchdog's own abort line is higher (RAM minus 4 GiB); on a
+    CAPPED tier (1.5 GiB reserve at 16 and 24 GB) it is the watchdog ceiling, and the fit budget
+    (``limits.tier.fit_budget_bytes``, 2 GiB reserve) is lower.
 
     Raises:
         DFloatFormatError: A field is missing, or the report is a harness proof.
@@ -104,10 +116,38 @@ def tier_row_from_generate_report(report: Mapping[str, Any], *, source: str) -> 
         mlx_peak_bytes=_mlx_peak(report),
         label=str(label),
         status="target" if watched <= ceiling else "over",
-        limits_note="host caps"
-        if _need(limits, "applied", "limits") == "host-caps"
-        else "MLX defaults for the tier",
+        limits_note=_applied_note(_need(limits, "applied", "limits")),
         source=source,
+    )
+
+
+def _applied_note(applied: Any) -> str:
+    """The limits note for a report's ``limits.applied`` path.
+
+    Raises:
+        DFloatFormatError: The path is not one ``generate`` writes.
+    """
+    if applied not in _APPLIED_NOTES:
+        raise DFloatFormatError(f"limits.applied {applied!r} is not a known limits path")
+    return _APPLIED_NOTES[applied]
+
+
+def _abort_limits_note(label: Any, context: Mapping[str, Any]) -> str:
+    """The limits note of an abort row: the host caps off a CAPPED tier, else what ``context.limits`` shows.
+
+    On a CAPPED tier only mlx-dfloat's caps install a wired limit, so a recorded wired limit above
+    zero means those caps and zero means MLX's defaults; an artifact without ``limits`` (written
+    before the run context carried it) says so.
+    """
+    if label != "CAPPED":
+        return "host caps"
+    limits = context.get("limits")
+    if not isinstance(limits, Mapping):
+        return _NOT_RECORDED
+    return (
+        _TIER_CAPS_NOTE
+        if int(_need(limits, "wired", "context.limits")) > 0
+        else _TIER_DEFAULTS_NOTE
     )
 
 
@@ -115,7 +155,10 @@ def tier_row_from_abort_artifact(artifact: Mapping[str, Any], *, source: str) ->
     """Build a tier-table row from the abort artifact of a run the watchdog stopped.
 
     The tier, label and model come from the artifact's run context (``generate`` hands it to its
-    watchdog); the DF11 size was never recorded, and the status says the run was stopped.
+    watchdog); the DF11 size was never recorded, and the status says the run was stopped. On a
+    CAPPED row the limits note comes from the context's ``limits`` (the MLX limits read back after
+    the install): a wired limit above zero is mlx-dfloat's caps for the tier, zero is MLX's
+    defaults, and an older artifact without ``limits`` reads "not recorded".
 
     Raises:
         DFloatFormatError: The artifact has no run context, the context lacks ``model``,
@@ -138,7 +181,7 @@ def tier_row_from_abort_artifact(artifact: Mapping[str, Any], *, source: str) ->
         mlx_peak_bytes=None if mlx_peak is None else int(mlx_peak),
         label=str(label),
         status=_STOPPED,
-        limits_note="host caps" if label != "CAPPED" else "MLX defaults for the tier",
+        limits_note=_abort_limits_note(label, context),
         source=source,
         stopped_after_s=float(_need(artifact, "elapsed", "abort artifact")),
     )
@@ -215,7 +258,7 @@ def _pct(x: float | None) -> str:
 
 
 _TIER_HEADER = (
-    "| Mac | Fit budget (budget − reserve) | Model | DF11 size | Peak (watched) | Peak footprint "  # noqa: RUF001
+    "| Mac | Working set − reserve | Model | DF11 size | Peak (watched) | Peak footprint "  # noqa: RUF001
     "| Peak MLX (sampled active + cache, or exact phase peak) | Label | Status | Limits | Result |"
 )
 

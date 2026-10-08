@@ -698,12 +698,14 @@ def test_requested_limits_on_the_host_are_the_installed_caps(caps, want):
 
 def test_requested_limits_on_a_smaller_tier_are_the_tiers_own():
     # Bug caught: a CAPPED run compared against the host caps, so the tier's limits are never checked.
+    # By hand: a 24 GB tier's working set is 16 GiB, so mlx-dfloat's caps there are wired 14 GiB
+    # and memory 16 GiB.
     from scripts.bench_flux_step import limits_for_process, requested_limits
 
     tier = limits_for_process(24, host_ram_bytes=32 * GIB, host_recommended_bytes=HOST_REC)
     assert requested_limits(tier, [0, 0], 7) == {
-        "memory": tier.memory_limit_bytes,
-        "wired": 0,
+        "memory": 17_179_869_184,
+        "wired": 15_032_385_536,
         "cache": 7,
     }
 
@@ -1594,7 +1596,7 @@ def test_run_one_records_the_limits_effective_values_and_label(
     tmp_path, restore_cache_limit, fake_limits
 ):
     # Bug caught (host): no limits record without --tier, the host tier labelled CAPPED, or the
-    # tier defaults installed on the host. Bug caught (tier 24): the host caps installed over the
+    # tier caps installed on the host. Bug caught (tier 24): the host caps installed over the
     # tier's limits, the host ceiling kept (the run would never abort at the tier's budget), or the
     # scenario's cache limit set before apply_limits (the tier's 15.2 GiB would stay in force).
     from scripts.bench_flux_step import limits_for_process, run_one
@@ -1622,7 +1624,7 @@ def test_run_one_records_the_limits_effective_values_and_label(
     capped = json.loads((tmp_path / "r.json").read_text())
     assert code == 0
     assert fake_limits == [("apply_limits", 24)]
-    assert capped["limits"]["applied"] == "tier-defaults"
+    assert capped["limits"]["applied"] == "tier-caps"
     assert capped["label"] == "CAPPED"
     assert capped["tier_gb"] == 24
     assert capped["watchdog_ceiling_bytes"] == int(14.5 * GIB)
