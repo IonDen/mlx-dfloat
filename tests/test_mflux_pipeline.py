@@ -14,7 +14,7 @@ from mlx_dfloat.mflux import _pipeline
 from mlx_dfloat.mflux._phases import FamilySizes, PhaseConstants
 
 GIB = 1024**3
-# Klein 4B decoded group sizes (S3 plan arithmetic table): double block 490_733_568 B, single block 245_366_784 B.
+# Klein 4B decoded group sizes (from the header's matrix shapes): double block 490_733_568 B, single block 245_366_784 B.
 LARGEST = {"transformer_blocks": 490_733_568, "single_transformer_blocks": 245_366_784}
 LOG = logging.getLogger("tests.pipeline")
 

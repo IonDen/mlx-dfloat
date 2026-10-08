@@ -127,7 +127,7 @@ def test_splice_replaces_only_the_marked_block():
     ],
 )
 def test_splice_refuses_missing_or_duplicated_markers(doc):
-    # Review Focus 5: a README without exactly one marker pair must not be silently rewritten.
+    # A README without exactly one marker pair must not be silently rewritten.
     with pytest.raises(DFloatFormatError, match="bench:x"):
         splice(doc, "x", "new\n")
 

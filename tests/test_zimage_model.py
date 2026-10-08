@@ -135,7 +135,7 @@ def test_the_set_load_installs_the_nonblock_weight_and_attaches_with_verify_in_c
 def test_a_drop_restores_every_placeholder_and_a_reload_reinstalls_the_nonblock_weight(
     tmp_path, monkeypatch
 ):
-    # Bug caught (Review Focus 2): the second load after a new prompt finding cap_embedder.1 still a placeholder,
+    # Bug caught: the second load after a new prompt finding cap_embedder.1 still a placeholder,
     # or the dropped set still referenced by the module (the active-memory check would refuse the reload).
     model = fake_model(tmp_path, monkeypatch)
     expected = _source(tmp_path)["cap_embedder"][0]
@@ -269,7 +269,7 @@ def _patch_upstream_generate(monkeypatch, model, *, raise_after_loop=None, raise
     ],
 )
 def test_cfg_prompts_follow_mflux_rules(tmp_path, monkeypatch, model, guidance, negative, expected):
-    # Bug caught (Review Focus 1): a negative prompt encoded at guidance <= 1 (a wasted encoder reload), not encoded
+    # Bug caught: a negative prompt encoded at guidance <= 1 (a wasted encoder reload), not encoded
     # at > 1 (the CFG call would find nothing cached), or Turbo running CFG although mflux forces guidance 0
     # (z_image.py:65-67, 177-179).
     instance = fake_model(tmp_path, monkeypatch, model=model)
@@ -351,7 +351,7 @@ def test_generate_refusals_come_before_encoding_or_loading(tmp_path, monkeypatch
 def test_plan_call_uses_the_rounded_size_and_refuses_above_1024_squared(
     tmp_path, monkeypatch, caplog
 ):
-    # Bug caught (Review Focus 3): planning 1000x1000 while mflux runs 992x992; a 1040x1040 request accepted without
+    # Bug caught: planning 1000x1000 while mflux runs 992x992; a 1040x1040 request accepted without
     # a measurement. 1040x1040 with fit_check=True -> DFloatResourceError; fit_check=False -> a warning.
     from mlx_dfloat.errors import DFloatResourceError
 
@@ -498,7 +498,7 @@ def test_a_format_error_mid_step_drops_the_set_and_restores_the_limit(tmp_path, 
 def test_a_keyboard_interrupt_keeps_the_set_restores_the_limit_and_the_next_call_runs(
     tmp_path, monkeypatch
 ):
-    # Bug caught (Review Focus 4): StopImageGenerationException leaving status words pending (begin_step refuses
+    # Bug caught: StopImageGenerationException leaving status words pending (begin_step refuses
     # the next call) or the cache limit not restored; or the interrupt dropping the set (a reload per Ctrl-C).
     from mflux.models.z_image.variants.z_image import ZImage
     from mflux.utils.exceptions import StopImageGenerationException
@@ -760,7 +760,7 @@ def test_a_python_api_call_runs_under_the_commands_caps_and_restores_mlxs_defaul
 
 
 def test_encode_runs_under_the_commands_caps_and_restores_mlxs_defaults(tmp_path, monkeypatch):
-    # Bug caught (X4): encode() from Python run at MLX's default wired limit 0 (a prompt encode is one of the measured
+    # Bug caught: encode() from Python run at MLX's default wired limit 0 (a prompt encode is one of the measured
     # phases, sized under the command's caps), or the caps left installed after it returns.
     from tests._mlx_limits import command_caps, current_limits, mlx_without_wired_cap
 

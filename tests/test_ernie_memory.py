@@ -1,6 +1,6 @@
 """ERNIE-Image's memory rules: the encoder's resident bytes, the text-token count, the sizes, the measured constants.
 
-Measured inputs (2026-10-08, git a771e58, M1 Max 32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0): two one-step de-risk
+Measured inputs (2026-10-08, git a771e58, M1 Max 32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0): two one-step calibration
 runs at 1024², seed 42, the 26-token lighthouse prompt, one process each (build, encode, drop, set load, one step at the
 planner's cache limit for the block-cache probe's allowance, VAE decode on the resident set): ERNIE-Image-Turbo at
 guidance 1.0 (batch 1) and ERNIE-Image at guidance 4.0 (mflux's " " negative then the prompt: batch 2). Their phase
@@ -26,7 +26,7 @@ from mlx_dfloat.mflux._phases import FamilySizes, PhaseConstants, activation_all
 from mlx_dfloat.mflux._pipeline import plan_call_for
 from mlx_dfloat.mflux.ernie import memory as emem
 
-# The de-risk prompt's token count (mflux 0.20.0 TokenizerLoader on both base snapshots, 2026-10-08).
+# The calibration prompt's token count (mflux 0.20.0 TokenizerLoader on both base snapshots, 2026-10-08).
 DERISK_TOKENS = 26
 
 
@@ -207,7 +207,7 @@ VAE_SAMPLES = {
 LARGEST = {
     "layers": 436_207_616
 }  # one block kind; 36 groups of 218_103_808 elements (4 x 4096² + 3 x 4096 x 12288)
-TEXT_TOKENS = 26  # the de-risk prompt's (the base's negative " " is 2)
+TEXT_TOKENS = 26  # the calibration prompt's (the base's negative " " is 2)
 # The block-cache probe's allowances at 4096 + 26 tokens (the smallest limit at which each batch's decoded buffer is
 # reused: 2.6e9 and 3.6e9 B, minus one decoded block).
 ALLOWANCE = {1: 2_163_792_384, 2: 3_163_792_384}
@@ -249,7 +249,7 @@ def _plan(batch, budget, *, fit_check=True, cache_limit_override=None, policy="p
     )
 
 
-# The constants are calibrated on the two de-risk runs and, for batch 1's denoise term, the CAPPED 24 GB run (the
+# The constants are calibrated on the two calibration runs and, for batch 1's denoise term, the CAPPED 24 GB run (the
 # overall-peak rule), so at their working point the estimate equals the measurement by construction: the in-sample
 # checks are exact. No ERNIE-Image run away from 1024² and 26 tokens exists yet.
 
@@ -276,7 +276,7 @@ def test_the_calibration_records_hold_the_runs_the_constants_name():
 
 
 def test_the_record_sizes_count_the_evaluated_language_model():
-    # Bug caught: the records carrying every language-model tensor (6_858_012_672 B, Task 0's header sum) while the
+    # Bug caught: the records carrying every language-model tensor (6_858_012_672 B, the published header's sum) while the
     # code counts the evaluated layers (the encode term would come out negative: the runs held about 6.63e9 B), or the
     # other way round. 6_858_012_672 - the last layer's 232_796_160 = 6_625_216_512.
     assert {b: s.encoders for b, s in SIZES.items()} == {1: 6_625_216_512, 2: 6_625_216_512}
@@ -292,7 +292,7 @@ def test_the_overhead_is_the_larger_post_build_gap_of_the_two_runs():
         for b in RUNS
         for label, run in RUNS[b].items()
         if "after_build"
-        in run  # the one-step de-risk runs; the later samples record a VAE peak only
+        in run  # the one-step calibration runs; the later samples record a VAE peak only
     }
     assert gaps == {"derisk-turbo-1": 616_434_178, "derisk-base-1": 548_194_818}
     assert RECORDS[1]["overhead_from"] == "derisk-turbo-1"
@@ -318,10 +318,10 @@ def test_the_estimate_at_1024_equals_each_batchs_calibration_run_phase_for_phase
 
 
 def test_the_vae_term_covers_every_1024_sample_and_equals_the_highest():
-    # Bug caught: the VAE transient derived from one run instead of the highest sample (the base's de-risk sample, with
+    # Bug caught: the VAE transient derived from one run instead of the highest sample (the base's calibration sample, with
     # its own sizes, is 35_821_552 B lower and puts the Turbo run's VAE phase that much low), or a sample dropped from a
-    # record. Five samples: the two de-risk runs, the two MEASURED rows and the base identity check's df11 side; the
-    # highest is still the Turbo de-risk run. One term serves both models, whose sets differ by 59_576 B, so the
+    # record. Five samples: the two calibration runs, the two MEASURED rows and the base identity check's df11 side; the
+    # highest is still the Turbo calibration run. One term serves both models, whose sets differ by 59_576 B, so the
     # estimate equals the sample only for the model whose record holds it (Turbo).
     assert len(VAE_SAMPLES) == 5
     for b in RUNS:
@@ -411,7 +411,7 @@ def _tier_budget(tier):
     [(2, 1024, 450_976_567), (2, 512, 402_653_184), (1, 512, 136_331_547)],
 )
 def test_the_batch_2_denoise_term_is_floored_by_the_float32_weight_copies(batch, size, expected):
-    # Bug caught (X3): a small CFG call predicted below the float32 copies a batch-2 step holds whatever the image size
+    # Bug caught: a small CFG call predicted below the float32 copies a batch-2 step holds whatever the image size
     # (a float32 hidden state times a BF16 weight makes MLX copy the weight to float32: gate_proj and up_proj, 2 x
     # 12288 x 4096 x 4 = 402_653_184 B), or the floor changing the 1024² term it was calibrated on. 512² + 26 tokens:
     # 450_976_567 x 1050 / 4122 = 114_877_582 scaled, floored; batch 1 carries no floor (not measured below 1024²):
@@ -428,7 +428,7 @@ def test_the_tier_budgets_are_a_real_macs():
 
 
 def test_turbo_at_24_gb_is_refused_0_39_gib_over_the_budget():
-    # Bug caught (X1): the batch-1 denoise term taken from one run instead of the highest denoise sample (the de-risk
+    # Bug caught: the batch-1 denoise term taken from one run instead of the highest denoise sample (the calibration
     # run's passed the call 58 MB under the budget; the first CAPPED run's, 37 MB over it; the second identical run
     # peaked 0.35 GiB higher still), or the dropped-set VAE phase without the extras.
     forced = _plan(1, _tier_budget(24), fit_check=False)
@@ -454,7 +454,7 @@ def test_every_capped_call_is_refused_in_the_denoise_phase(batch, tier):
 # + the slack. The encode term is per prompt, so the bound does not depend on the batch or on the prompt length.
 NOT_LOADED = (
     806_610_944 + 33_556_480
-)  # the vision tower and the projector in the encoder's file (Task 0's header)
+)  # the vision tower and the projector in the encoder's file (its published header)
 
 
 def _encode_bound(batch, text_tokens=TEXT_TOKENS):

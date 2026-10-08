@@ -383,7 +383,7 @@ def test_a_link_to_a_name_that_is_not_a_cache_blob_is_not_checked_as_one(tmp_pat
 
 
 def test_a_config_less_file_with_an_unknown_header_is_refused_naming_its_digest(tmp_path):
-    # Bug caught (Review Focus 1): an unknown file read with a guessed order, or a refusal that cannot be acted on.
+    # Bug caught: an unknown file read with a guessed order, or a refusal that cannot be acted on.
     root, _layout = _tiny(tmp_path)
     digest = hashlib.sha256(read_header_bytes(root / "model.safetensors")[0]).hexdigest()
     with pytest.raises(DFloatFormatError) as err:

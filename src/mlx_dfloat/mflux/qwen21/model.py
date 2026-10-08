@@ -50,7 +50,7 @@ MODELS: dict[str, tuple[str, str]] = {
     n: (e.df11_repo, e.base_repo) for n, e in registry.MODELS.items() if e.family == "qwen21"
 }
 POLICIES: tuple[str, ...] = ("per-block", "depth2")
-# The policies a Qwen-Image 2.1 run has measured (the de-risk, the MEASURED row, the identity check); depth2 is
+# The policies a Qwen-Image 2.1 run has measured (the one-step calibration run, the MEASURED row, the identity check); depth2 is
 # accepted, and the report labels it unmeasured.
 MEASURED_POLICIES: frozenset[str] = frozenset({"per-block"})
 RETAINED_SLACK_BYTES = 2 * 1024**3

@@ -865,7 +865,7 @@ def test_ernie_negative_prompt_is_accepted_and_keyed_with_mfluxs_guidance(tmp_pa
 
 @pytest.mark.parametrize("guidance", ["4", "1.5"])
 def test_ernie_turbo_guidance_other_than_1_is_refused(tmp_path, capsys, guidance):
-    # Bug caught (C2): an identity run of Turbo at a guidance its command refuses (mflux's turbo command errors on any
+    # Bug caught: an identity run of Turbo at a guidance its command refuses (mflux's turbo command errors on any
     # but 1.0, ernie_image_turbo_generate.py:42-45), so the check would cover a path no user runs.
     with pytest.raises(SystemExit) as info:
         _parse_ernie(tmp_path, tmp_path, "--guidance", guidance, model=ERNIE_TURBO)
@@ -1042,7 +1042,7 @@ def _tiny_krea_native(path, ckpt, matrices, extras):
 def test_the_krea2_bf16_side_gives_stock_mfluxs_latents_on_a_tiny_checkpoint(
     tmp_path, monkeypatch, guidance, negative
 ):
-    # Bug caught (TT4): the bf16 side's copy of mflux's loop body drifting from mflux's own (the CFG formula, the
+    # Bug caught: the bf16 side's copy of mflux's loop body drifting from mflux's own (the CFG formula, the
     # stepper's seed, the sigma passed as the timestep, the embeddings swapped), a native tensor not replacing the DF11
     # value it stands for, or the streamed blocks read under other names. Stock Krea2 over the same BF16 weights, the
     # same embeddings and seed; equality is bit for bit on the float32 latents, before the heavy identity run.

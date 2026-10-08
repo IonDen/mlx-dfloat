@@ -160,7 +160,7 @@ def test_generate_builds_the_model_from_the_flags_writes_the_image_and_the_repor
     # Bug caught: a flag not forwarded (e.g. --cache-limit dropped), the image saved elsewhere,
     # the watchdog not stopped, or the report missing the exit code and the model's report.
     log = []
-    out = tmp_path / "new" / "dir" / "o.png"  # Review Focus 5: the directory does not exist yet
+    out = tmp_path / "new" / "dir" / "o.png"  # the directory does not exist yet
     code, watchdogs = _run(
         [
             "--model",
@@ -470,7 +470,7 @@ def test_a_watchdog_construction_failure_still_writes_the_report(tmp_path, capsy
 
 @pytest.mark.parametrize("text", ["0", "-5", "abc", "inf", "-inf", "nan"])
 def test_cache_limit_must_be_a_positive_byte_count(text):
-    # Bug caught (Review Focus 4): a zero or negative cache limit reaching mx.set_cache_limit.
+    # Bug caught: a zero or negative cache limit reaching mx.set_cache_limit.
     # A non-positive value and a non-numeric string raise ValueError with different messages
     # (the explicit check vs. float()'s own conversion error), so this shared parametrized
     # case checks the common ValueError contract rather than one specific message.
@@ -579,7 +579,7 @@ def _ceiling_for(*extra):
         (("--tier", "24"), TIER_24_CEILING, 24, False, "CAPPED"),
         # Bug caught: the 2/3 ratio applied as 3/4 at 16 GB (a 12 GiB budget).
         (("--tier", "16"), TIER_16_CEILING, 16, False, "CAPPED"),
-        # Bug caught (Review Focus 2): the host's own tier treated as a cap (the ratio's 24 GiB
+        # Bug caught: the host's own tier treated as a cap (the ratio's 24 GiB
         # budget, 22 GiB ceiling) instead of keeping the host's default ceiling.
         (("--tier", "32"), HOST_CEILING, 32, True, "MEASURED"),
     ],
@@ -597,7 +597,7 @@ def test_ceiling_for_resolves_the_ceiling_the_limits_and_the_label(
 
 
 def test_ceiling_for_refuses_both_flags_and_a_tier_above_the_host():
-    # Bug caught (Review Focus 6): --tier and --memory-ceiling together silently picking one of them,
+    # Bug caught: --tier and --memory-ceiling together silently picking one of them,
     # or a 48 GB "tier" on a 32 GB host setting limits above its RAM and looking like a pass.
     with pytest.raises(ValueError, match="--tier") as info:
         _ceiling_for("--tier", "24", "--memory-ceiling", "12345")
@@ -642,7 +642,7 @@ def test_tier_24_applies_the_tier_limits_not_the_host_caps_and_budgets_the_fit_c
 
 
 def test_tier_32_on_a_32_gb_host_keeps_the_host_caps_and_is_measured(tmp_path):
-    # Bug caught (Review Focus 2): `--tier <host>` installing a smaller tier's caps instead of the
+    # Bug caught: `--tier <host>` installing a smaller tier's caps instead of the
     # host caps, so MEASURED rows run under other limits than a plain generate.
     code, watchdogs, calls, report = _limits_run(["--tier", "32"], tmp_path)
     assert code == 0
@@ -684,7 +684,7 @@ def test_a_plain_run_records_the_host_tiers_limits(tmp_path):
 
 
 def test_both_flags_exit_2_naming_both_before_anything_is_installed(tmp_path, capsys):
-    # Bug caught (Review Focus 6): argparse or run() silently preferring one flag, or the caps
+    # Bug caught: argparse or run() silently preferring one flag, or the caps
     # installed / the watchdog started before the refusal.
     code, watchdogs, calls, report = _limits_run(
         ["--tier", "24", "--memory-ceiling", "12345"], tmp_path
@@ -699,7 +699,7 @@ def test_both_flags_exit_2_naming_both_before_anything_is_installed(tmp_path, ca
 
 
 def test_a_tier_above_the_host_exits_2_before_anything_is_installed(tmp_path, capsys):
-    # Bug caught: a 48 GB tier on a 32 GB host installing limits above RAM (Review Focus 2), or the
+    # Bug caught: a 48 GB tier on a 32 GB host installing limits above RAM, or the
     # refusal surfacing as a traceback.
     code, watchdogs, calls, report = _limits_run(["--tier", "48"], tmp_path)
     assert code == 2
@@ -1201,7 +1201,7 @@ def test_qwen_passes_the_negative_prompt_through(tmp_path, capsys):
 
 
 def test_qwen_guidance_without_a_negative_prompt_warns(tmp_path, capsys):
-    # Bug caught (Review Focus 4): a Qwen user's --guidance 4 silently running no CFG (mflux's rule: guidance above
+    # Bug caught: a Qwen user's --guidance 4 silently running no CFG (mflux's rule: guidance above
     # 1.0 AND a negative prompt, qwen_image_21.py:89), or the call changed instead of warned (the call still runs at
     # 4.0 without a negative prompt, as mflux would).
     call = _generate_kwargs("qwen-image-2.1", tmp_path, "--guidance", "4")
@@ -1287,7 +1287,7 @@ def test_ernie_steps_follow_mflux_per_variant():
 
 
 def test_turbo_guidance_other_than_1_is_refused_before_the_build(tmp_path, capsys):
-    # Bug caught (Review Focus 1, command half): --guidance 4 reaching ERNIE-Image-Turbo (mflux's turbo command errors,
+    # Bug caught (the command's half): --guidance 4 reaching ERNIE-Image-Turbo (mflux's turbo command errors,
     # ernie_image_turbo_generate.py:42-45), or the refusal coming after the caps or the build.
     built = []
     args = gen.build_parser().parse_args(
@@ -1383,7 +1383,7 @@ def test_an_empty_prompt_is_still_passed_to_the_other_families(tmp_path):
 
 
 def test_krea_negative_prompt_at_guidance_half_does_not_warn_it_has_no_effect(tmp_path, capsys):
-    # Bug caught (Review Focus 1): the "runs only above guidance 1.0" warning for Krea 2 at 0.5, where mflux does run
+    # Bug caught: the "runs only above guidance 1.0" warning for Krea 2 at 0.5, where mflux does run
     # classifier-free guidance (any guidance other than 1.0, prompt_encoder.py:33), so the negative prompt is used.
     call = _generate_kwargs("krea-2", tmp_path, "--guidance", "0.5", "--negative-prompt", "blurry")
     assert (call["guidance"], call["negative_prompt"]) == (0.5, "blurry")
@@ -1415,7 +1415,7 @@ def test_flux_dev_negative_prompt_at_guidance_half_still_warns(tmp_path, capsys)
 
 
 def test_an_unknown_krea_scheduler_is_refused_before_the_build(tmp_path, capsys):
-    # Bug caught (Review Focus 3): flow_match_euler_discrete (another family's scheduler) reaching the model, where
+    # Bug caught: flow_match_euler_discrete (another family's scheduler) reaching the model, where
     # mflux would raise only after the encoder and the set loaded, or the refusal after the caps.
     log = []
     code, watchdogs = _run(

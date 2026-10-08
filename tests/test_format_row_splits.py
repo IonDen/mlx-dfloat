@@ -17,7 +17,7 @@ from mlx_dfloat.format import (
     with_row_splits,
 )
 
-# S0 (2026-10-07): every Qwen-Image 2.1 block's stored split_positions and element count.
+# Every Qwen-Image 2.1 block's stored split_positions and element count (the published header, read 2026-10-07).
 QWEN_SPLITS = np.array(
     [16_777_216, 33_554_432, 50_331_648, 67_108_864, 167_772_160], dtype=np.int64
 )
@@ -41,8 +41,8 @@ QWEN_RAW = {
 FUSED = {"img_mlp.gate_up": ("img_mlp.gate_layer", "img_mlp.proj")}
 
 
-def test_the_gate_up_segment_is_cut_in_half_at_the_s0_seam():
-    # Bug caught: the seam taken from the wrong segment (index off by one) or not halved. S0 measured the proj rows
+def test_the_gate_up_segment_is_cut_in_half_at_the_measured_seam():
+    # Bug caught: the seam taken from the wrong segment (index off by one) or not halved. A 2026-10-07 byte comparison put the proj rows
     # (gate_up row 12288) starting at element 117,440,512.
     got = insert_row_splits(
         QWEN_SPLITS, QWEN_BLOCK_ELEMENTS, ((4, 2),), name="transformer_blocks.0"
@@ -118,7 +118,7 @@ def test_a_disordered_stored_split_table_is_refused_before_planning(splits, n):
 
 
 def test_the_plan_expands_gate_up_into_gate_layer_then_proj():
-    # Bug caught: the halves swapped (S0: rows 0..12287 are gate_layer), or the fused name left in the list.
+    # Bug caught: the halves swapped (rows 0..12287 are gate_layer, by the 2026-10-07 byte comparison), or the fused name left in the list.
     config = with_row_splits(parse_df11_config(QWEN_RAW, source="t"), FUSED, source="t")
     stored, names, plan = row_split_plan("transformer_blocks.7", config)
     head = "transformer_blocks.7."

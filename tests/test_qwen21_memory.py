@@ -1,6 +1,6 @@
 """Qwen-Image 2.1's memory rules: the encoder's resident bytes, the text-token count, the sizes, the measured constants.
 
-Measured inputs (2026-10-08, the first one-step de-risk run: Qwen-Image-2.1 DF11
+Measured inputs (2026-10-08, the first one-step calibration run: Qwen-Image-2.1 DF11
 (mingyi456/Qwen-Image-2.1-DF11-ComfyUI @ 1b22a3a) over the Qwen/Qwen-Image-2.1 base (@ d26bb61), 1024², seed 42,
 guidance 4 with the negative prompt " " (two transformer calls per step), text tokens 33 (prompt) and 9 (negative);
 one process: build, encode, drop, set load, one step, VAE decode on the resident set; M1 Max 32 GB, macOS 27.0.1,
@@ -13,10 +13,10 @@ encode held 66_567_800 over the language model. The committed MEASURED record
 ``bench/results/tiers/qwen-image-2.1-1024.json`` carries the same five sizes (``sizes``), the 33 text tokens, the
 2_731_761_634 cache limit and this Mac's working set and RAM (``limits.tier``).
 
-The denoise term is re-derived at the planner's limit (2026-10-08, the first one-step de-risk run at that limit, in
+The denoise term is re-derived at the planner's limit (2026-10-08, the first one-step calibration run at that limit, in
 the cache-limit A/B; same model, prompt, size, seed and guidance): denoise footprint peak 13_939_106_072 at the
 2_731_761_634 limit. The VAE term covers the highest of eleven 1024² VAE-phase footprint peaks (21.76-22.79 GB; MLX's
-VAE peak was the same in every de-risk run): 22_788_580_400, from the second one-step run of the A/B at the old limit.
+VAE peak was the same in every calibration run): 22_788_580_400, from the second one-step run of the A/B at the old limit.
 
 The calibration runs' phase peaks are committed in ``bench/results/calibration/qwen-image-2.1-1024.json`` (each run's
 label, date, cache limit and footprint peaks; ``constants_from`` names the run each term was derived from), and the
@@ -54,21 +54,21 @@ LARGEST = {"transformer_blocks": 436_207_616}  # one block kind; 32 groups of 21
 # The planner's 1024² limit: the largest decoded block 436_207_616 + Qwen's own allowance 2_295_554_018 at 4096 + 33
 # tokens (the block-cache probe: a decoded buffer is reused at a 2605 MiB limit, released at 1773 and 2189 MiB).
 CACHE_LIMIT = 2_731_761_634
-# The de-risk run's limit: the block + the shared 1.5e9 allowance at 4096 + 256 tokens, rescaled to 4096 + 33.
+# The calibration run's limit: the block + the shared 1.5e9 allowance at 4096 + 256 tokens, rescaled to 4096 + 33.
 CALIBRATION_CACHE_LIMIT = 1_859_346_402
-TEXT_TOKENS = 33  # the de-risk prompt's (the negative " " is 9)
+TEXT_TOKENS = 33  # the calibration prompt's (the negative " " is 9)
 REPO = Path(__file__).resolve().parents[1]
 CALIBRATION = json.loads((REPO / "bench/results/calibration/qwen-image-2.1-1024.json").read_text())
 CALIBRATION_RUNS = {run["label"]: run for run in CALIBRATION["runs"]}
 # The phase peaks the constants were derived from: the denoise peak is the first one-step A/B run's at CACHE_LIMIT;
 # the VAE peak the highest of the eleven 1024² samples (the second A/B run at the old limit); the encode peak the first
-# de-risk run's.
+# calibration run's.
 MEASURED = {
     phase: CALIBRATION_RUNS[label]["footprint_peaks"][phase]
     for phase, label in CALIBRATION["constants_from"].items()
 }
 VAE_SAMPLES = {label: run["footprint_peaks"]["vae"] for label, run in CALIBRATION_RUNS.items()}
-# This Mac (M1 Max 32 GB): mx.device_info()["max_recommended_working_set_size"] and the RAM, from the de-risk record.
+# This Mac (M1 Max 32 GB): mx.device_info()["max_recommended_working_set_size"] and the RAM, from the calibration record.
 RECOMMENDED_32 = 26_800_603_136
 RAM_32 = 34_359_738_368
 
@@ -183,7 +183,7 @@ def test_the_token_cap_is_mfluxs_tokenizer_max_length():
     assert qmem.TEXT_MAX_LENGTH == 2048
 
 
-# The de-risk prompt (the run record's env.sh, $PROMPT): 33 text tokens by the real tokenizer.
+# The calibration prompt (the run record's env.sh, $PROMPT): 33 text tokens by the real tokenizer.
 DERISK_PROMPT = (
     "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the "
     "water"
@@ -199,7 +199,7 @@ DERISK_PROMPT = (
 )
 def test_the_real_tokenizer_counts_the_text_tokens_the_calibration_used(prompt, tokens):
     # Bug caught: prompt_tokens disagreeing with the real tokenizer where the constants were calibrated (33 for the
-    # de-risk prompt, 9 for its negative " "): the template or the system prefix miscounted, or "" not encoded as " "
+    # calibration prompt, 9 for its negative " "): the template or the system prefix miscounted, or "" not encoded as " "
     # (the stub tests cannot see either). Needs the base's processor/ files (a few MB, CPU only).
     base = os.environ.get("MLX_DFLOAT_QWEN21_BASE")
     if not base:
@@ -242,7 +242,7 @@ def _plan(budget, *, fit_check=True, cache_limit_override=None):
     )
 
 
-# The constants are calibrated on the de-risk run, so at its working point the estimate equals the measurement by
+# The constants are calibrated on the calibration run, so at its working point the estimate equals the measurement by
 # construction: the in-sample checks are exact. No Qwen-Image 2.1 run outside the calibration exists yet (another size
 # or prompt length), so whether the model predicts away from 1024² and 33 tokens is not tested.
 
@@ -261,7 +261,7 @@ def test_the_calibration_record_holds_the_runs_the_constants_name():
 
 def test_the_vae_term_covers_every_1024_sample_and_equals_the_highest():
     # Bug caught: the VAE transient derived from one run instead of the highest of the eleven samples (a fit check that
-    # under-predicts the runs it was calibrated on: the first de-risk run alone puts the phase 648_937_376 B low), or a
+    # under-predicts the runs it was calibrated on: the first calibration run alone puts the phase 648_937_376 B low), or a
     # sample dropped from the record.
     assert len(VAE_SAMPLES) == 11
     fit = _fit()
@@ -271,14 +271,14 @@ def test_the_vae_term_covers_every_1024_sample_and_equals_the_highest():
 
 def test_the_estimate_at_1024_equals_the_calibration_run_phase_for_phase():
     # Bug caught: a term dropped from a phase or counted twice; the VAE transient taken from one run instead of the
-    # highest sample (the first de-risk's 22_139_643_024 puts the VAE phase 648_937_376 B under it);
+    # highest sample (the first calibration run's 22_139_643_024 puts the VAE phase 648_937_376 B under it);
     # REFERENCE_TOKENS left at another prompt's count (the activation scaled off the calibration point, e.g. 4096 + 512
     # puts denoise 94_905_646 B low); or a borrowed family's constants (Klein 9B's put the VAE phase 4.2 GiB low).
     # The encode phase: the language model 15_136_811_008 + the measured encode term 66_567_800 + overhead
     # 459_445_098 (by footprint the run's encode peaked 195_114_382 B higher: memory MLX does not count, which the
     # overhead measured after the build does not cover).
     # The denoise phase is calibrated at the planner's own limit (CACHE_LIMIT), so a cache-limit term taken from
-    # another limit (the de-risk's 1_859_346_402 puts it 872_415_232 B low) also shows here.
+    # another limit (the calibration run's 1_859_346_402 puts it 872_415_232 B low) also shows here.
     fit = _fit()
     assert fit.peak_phase == "vae"
     assert fit.phases["vae"] == MEASURED["vae"]
@@ -287,14 +287,14 @@ def test_the_estimate_at_1024_equals_the_calibration_run_phase_for_phase():
 
 
 def test_the_planners_1024_cache_limit_is_one_block_plus_qwens_own_allowance():
-    # Bug caught: Qwen planned on the shared 1.5e9 allowance (the de-risk's 1_859_346_402: the probe released the
+    # Bug caught: Qwen planned on the shared 1.5e9 allowance (the calibration run's 1_859_346_402: the probe released the
     # decoded buffer at that limit, so every block's output was allocated fresh), two blocks budgeted for the one
     # block kind (3_167_969_250), or the allowance's reference tokens left at the shared 4096 + 256 (2_659_262_210).
     assert _plan(24_653_119_488).cache_limit == CACHE_LIMIT
 
 
 def test_a_cache_limit_override_under_qwens_derived_minimum_warns(caplog):
-    # Bug caught: an override of one block or more passing silently for this one-kind family (the de-risk's own
+    # Bug caught: an override of one block or more passing silently for this one-kind family (the calibration run's own
     # 1_859_346_402 would have): the minimum is the block + the allowance, the planner's own limit.
     with caplog.at_level("WARNING", logger="test"):
         _plan(24_653_119_488, cache_limit_override=CACHE_LIMIT)
@@ -327,7 +327,7 @@ def test_a_32_gb_mac_keeps_the_set_through_the_vae_decode(monkeypatch):
 
 @pytest.mark.parametrize("tier", [16, 24])
 def test_a_16_or_24_gb_tier_is_refused_in_the_encode_phase(tier):
-    # The prediction for the CAPPED tiers at 1024² (the de-risk prompt, 33 tokens): the VAE phase with the set
+    # The prediction for the CAPPED tiers at 1024² (the calibration prompt, 33 tokens): the VAE phase with the set
     # (22_788_580_400 B) is over either tier's budget, so the set is dropped before the decode: the VAE phase is then
     # the extras (they stay on the transformer) + the VAE + its transient + overhead, 137_388_032 + 1_350_989_512 +
     # 11_119_436_651 + 459_445_098 = 13_067_259_293 B; the encode phase (the language model 15_136_811_008 + the encode term 66_567_800 + overhead 459_445_098 =
@@ -353,7 +353,7 @@ def test_a_16_or_24_gb_tier_is_refused_in_the_encode_phase(tier):
 
 # What the prompt encode may hold before the model warns (model._check_encode_peak): MLX's encode peak minus what was
 # active when the phase began, against the encode phase without its overhead (language model + encode term) + the slack.
-ENCODE_HELD = 15_350_204_544 - 146_825_736  # de-risk: MLX encode peak - MLX active after the build
+ENCODE_HELD = 15_350_204_544 - 146_825_736  # calibration: MLX encode peak - active after the build
 # The tensors in the encoder's shards mflux does not load (the vision tower and the lm_head), counted as the shards'
 # file size minus the language model's tensor bytes (the headers' few KB included: an upper bound by those bytes).
 NOT_LOADED = 17_534_339_488 - 15_136_811_008
@@ -364,7 +364,7 @@ def _encode_bound(text_tokens):
 
 
 def test_the_encode_warning_bound_holds_the_measured_encode_with_the_slack_to_spare():
-    # Bug caught: a bound under what a normal encode holds (every call would warn): the de-risk encode held
+    # Bug caught: a bound under what a normal encode holds (every call would warn): the calibration encode held
     # 66_567_800 B over the language model, exactly the encode term, so the whole 256 MiB slack is left.
     assert _encode_bound(TEXT_TOKENS) - ENCODE_HELD == 268_435_456
 
@@ -393,7 +393,7 @@ def test_the_encode_warning_is_silent_at_the_bound_and_names_the_prompt_length_o
     assert "more of the encoder than its language model" in message
 
 
-# The two committed 1024² records with more steps than the one-step calibration runs, both on the 33-token de-risk
+# The two committed 1024² records with more steps than the one-step calibration runs, both on the 33-token calibration
 # prompt: the MEASURED row (`mlx-dfloat generate --tier 32`, 40 steps, no CFG) and the identity check's df11 side
 # (4 steps, guidance 4 with CFG). Each is re-estimated with the current constants from its own report (its sizes, the
 # cache limit in force, its text tokens, its policy and its VAE strategy), so a re-run that changes the record is

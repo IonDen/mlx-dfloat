@@ -204,7 +204,7 @@ def test_the_set_load_installs_the_five_nonblock_weights_and_attaches_with_verif
 def test_a_new_prompt_drops_the_set_reloads_the_encoder_and_reinstalls_the_nonblock_weights(
     tmp_path, monkeypatch
 ):
-    # Bug caught (Review Focus 5): context_embedder (or any non-block weight) left on its placeholder after the
+    # Bug caught: context_embedder (or any non-block weight) left on its placeholder after the
     # reload a new prompt forces, or the reload not reading the base the model was built from.
     model = fake_model(tmp_path, monkeypatch)
     loads = []
@@ -491,7 +491,7 @@ def _patch_upstream_generate(monkeypatch, *, raise_after_loop=None, raise_before
     [(None, ("p",)), (1.0, ("p",)), (1.0001, ("p", " ")), (4.0, ("p", " "))],
 )
 def test_cfg_prompts_follow_mflux(tmp_path, monkeypatch, guidance, expected):
-    # Bug caught (Review Focus 4): `>=` for `>` (guidance 1.0 encoding the negative: a wasted encoder reload and a
+    # Bug caught: `>=` for `>` (guidance 1.0 encoding the negative: a wasted encoder reload and a
     # second transformer call), or guidance None encoding one. mflux 0.20.0 flux2_klein.py:78-80, 163: the negative is
     # " " and is encoded only when guidance > 1.0.
     model = fake_model(tmp_path, monkeypatch, model="flux2-klein-base-4b")
@@ -874,7 +874,7 @@ def test_a_python_api_call_runs_under_the_commands_caps_and_restores_mlxs_defaul
 
 
 def test_encode_runs_under_the_commands_caps_and_restores_mlxs_defaults(tmp_path, monkeypatch):
-    # Bug caught (X4): encode() from Python run at MLX's default wired limit 0 (a prompt encode is one of the measured
+    # Bug caught: encode() from Python run at MLX's default wired limit 0 (a prompt encode is one of the measured
     # phases, sized under the command's caps), or the caps left installed after it returns.
     from tests._mlx_limits import command_caps, current_limits, mlx_without_wired_cap
 

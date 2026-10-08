@@ -137,7 +137,7 @@ def test_device_data_overrides_the_ratio_and_is_labelled_device():
 
 
 def test_a_tier_above_the_host_is_refused():
-    # Review Focus 2: a 48 GB "cap" on a 32 GB Mac would set limits above RAM and look like a pass.
+    # A 48 GB "cap" on a 32 GB Mac would set limits above RAM and look like a pass.
     with pytest.raises(DFloatUnsupportedError, match="48"):
         tier_limits(48, host_ram_bytes=HOST_RAM, host_recommended_bytes=HOST_REC)
 

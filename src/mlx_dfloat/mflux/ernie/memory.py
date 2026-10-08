@@ -32,7 +32,7 @@ ENCODER_PREFIX = "language_model.model."
 TEXT_MAX_LENGTH = 2048
 MAX_MEASURED_PIXELS = 1024 * 1024  # no run above 1024² on this path
 
-# Measured on 2026-10-08 (git a771e58, M1 Max 32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0): two one-step de-risk runs at
+# Measured on 2026-10-08 (git a771e58, M1 Max 32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0): two one-step calibration runs at
 # 1024², seed 42, the 26-token lighthouse prompt; one process each: build, encode, drop, set load, one step at the
 # planner's cache limit for the block-cache probe's allowance, VAE decode on the resident set. ERNIE-Image-Turbo
 # (mingyi456/ERNIE-Image-Turbo-DF11 @ 27f84b4 over baidu/ERNIE-Image-Turbo @ bc68c81) at guidance 1.0: batch 1, run
@@ -48,7 +48,7 @@ REFERENCE_TOKENS = 4096 + 26
 # the two runs: Turbo 644_400_592 - 27_961_608 - 4_806 = 616_434_178 (the base's 548_194_818). One value for both
 # batches: the build is the same.
 OVERHEAD = 616_434_178  # 0.574 GiB
-# VAE_TRANSIENT, by the overall-peak rule over every 1024² sample (the two de-risk runs so far): the highest measured
+# VAE_TRANSIENT, by the overall-peak rule over every 1024² sample (the two calibration runs so far): the highest measured
 # VAE-phase peak on the resident set minus the VAE phase's other terms (compressed + extras + non-block + VAE file +
 # OVERHEAD), from the Turbo run: 19_163_080_232 - (10_894_810_183 + 27_961_600 + 335_544_320 + 168_120_878 +
 # 616_434_178). The base run's peak (19_127_199_104, with its own sizes) would give a term 35_821_552 B lower. A fit
@@ -61,9 +61,9 @@ VAE_TRANSIENT = 7_120_209_073  # 6.631 GiB
 # CAPPED 24 GB run of ERNIE-Image-Turbo (label "capped-24-gb-2" in ernie-image-turbo-1024.json; git f4cd325), whose
 # watched peak was in the denoise phase: 15_446_156_600 - (10_894_810_183 + 27_961_600 + 335_544_320 + 436_207_616 +
 # 2_600_000_000 + 616_434_178) = 535_198_703. The first identical run ("capped-24-gb-1", git 5e2e7c2) peaked at
-# 15_069_554_288 (term 158_596_391), 376_602_312 B (0.35 GiB) lower, and the de-risk run's 14_974_035_520 gave
+# 15_069_554_288 (term 158_596_391), 376_602_312 B (0.35 GiB) lower, and the calibration run's 14_974_035_520 gave
 # 63_077_623: the denoise phase varies that much between identical runs. A fit check must not under-predict, so the
-# term covers the highest sample. Batch 2 (base, limit 3_600_000_000), its de-risk
+# term covers the highest sample. Batch 2 (base, limit 3_600_000_000), its calibration
 # run, the only denoise-phase sample: 16_361_874_888 - (10_894_750_607 + 27_961_600 + 335_544_320 + 436_207_616 +
 # 3_600_000_000 + 616_434_178) = 450_976_567.
 DENOISE_ACTIVATION: dict[int, int] = {1: 535_198_703, 2: 450_976_567}
@@ -109,7 +109,7 @@ CONSTANTS: dict[int, PhaseConstants] = {1: _constants(1), 2: _constants(2)}
 # (Turbo) and 332_466_044 (base) under the bound, and an encode that also loads the vision tower and projector
 # (840_167_424 B more) is over it by 507_701_380 at every prompt length.
 ENCODE_SLACK_BYTES = 256 * 1024**2
-# The prompt length ENCODE_ACTIVATION was measured at (the de-risk prompt's text tokens).
+# The prompt length ENCODE_ACTIVATION was measured at (the calibration prompt's text tokens).
 ENCODE_ACTIVATION_TOKENS = 26
 _LAYER = re.compile(r"^language_model\.model\.layers\.(\d+)\.")
 

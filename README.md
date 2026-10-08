@@ -6,16 +6,15 @@
 
 Run [DFloat11](https://github.com/LeanModels/DFloat11) checkpoints on a Mac with
 [MLX](https://github.com/ml-explore/mlx). The weights stay about 30 % smaller than BF16 in memory, and the GPU decodes
-each block back to exactly the same bits just before it runs. Today that means FLUX.1 image generation on a 32 GB Mac;
-Z-Image, FLUX.2 Klein, Qwen-Image-2.1 and ERNIE-Image arrive in the next release.
+each block back to exactly the same bits just before it runs. It generates images on a 32 GB Mac with FLUX.1, Z-Image,
+FLUX.2 Klein, Qwen-Image-2.1, ERNIE-Image and Krea 2.
 
 DFloat11 is lossless compression for BF16 model weights. Each weight is 16 bits. DFloat11 stores the 8 exponent bits
 as a short variable-length code, the same idea a zip file uses, and keeps the other 8 bits (the sign and the
 fraction) exactly as they are. The DFloat11 authors report models at about 70% of their BF16 size with output that is
 bit for bit the same as the original.[^size] Their decoder runs on NVIDIA GPUs only. This project is an independent
 reader and decoder for Apple Silicon. The weights stay compressed in memory, and a Metal kernel decodes each block
-on the GPU as it runs. That is how it generates FLUX.1 images through mflux; Z-Image, FLUX.2 Klein, Qwen-Image-2.1 and
-ERNIE-Image follow in the next release.
+on the GPU as it runs.
 
 ```
 one BF16 weight, 16 bits:    s   eeeeeeee   mmmmmmm
@@ -30,10 +29,11 @@ DFloat11 FLUX.1 transformer stays compressed in a Mac's memory, and the GPU unpa
 before it runs." width="720">
 </p>
 
-Why that matters on a Mac: unified memory is the limit. The BF16 FLUX.1-dev transformer is about 24 GB,[^flux] more
+On a Mac, unified memory is the limit. The BF16 FLUX.1-dev transformer is about 24 GB,[^flux] more
 than the GPU on a 32 GB machine can comfortably hold. At 70% it comes in under that line, and unlike 4-bit or 8-bit
 quantisation it changes nothing in the weights. On a 32 GB M1 Max a 1024² generation peaked at about 20 GiB for each
-of the three FLUX.1 models; no other Mac has been measured. The numbers are under "Measured numbers" below.
+of the three FLUX.1 models, and between 11.88 GiB (FLUX.2-klein-4B) and 21.17 GiB (Krea 2 Turbo) for the others; no
+other Mac has been measured. The numbers are under "Measured numbers" below.
 
 ## Does this help me?
 
@@ -41,24 +41,26 @@ of the three FLUX.1 models; no other Mac has been measured. The numbers are unde
 |---|---|
 | A 32 GB Mac, FLUX.1-schnell, FLUX.1-dev or FLUX.1-Krea-dev, and you want the BF16 weights unchanged | mlx-dfloat. Measured peak about 20 GiB at 1024² for all three. The final latents were checked bit for bit against BF16 on FLUX.1-schnell, not yet on the other two. Unpacking makes a denoising step 3.5 % slower on dev and 4.0 % slower on schnell than a control that runs the same graph on weights decoded in advance (Krea-dev's step was not timed). |
 | Less memory or a faster step, and a different image is fine | mflux's own quantised transformer. Its 8-bit mode, the only one measured here, ran a step roughly 1.3 times faster and peaked about 5 GiB lower, under the same 2.5 GB cache limit; mflux's own generate sets no cache limit, so this is not quite its default setup (see "Measured numbers" for why the ratio is rough). It changes the weights and the output; by how much was not measured. |
-| A 32 GB Mac, Z-Image-Turbo or Z-Image, with the weights unchanged | mlx-dfloat, from the next release. Peak at 1024²: 13.1 to 14.3 GiB for Z-Image-Turbo over six runs, 13.15 GiB for Z-Image. See "Generate a Z-Image image". |
-| A 32 GB Mac, FLUX.2 Klein (4B or 9B, base or distilled), with the weights unchanged | mlx-dfloat, from the next release. Peak at 1024²: 11.88 to 12.78 GiB for the 4B models, 17.60 to 18.40 GiB for the 9B models. See "Generate a FLUX.2 Klein image". |
+| A 32 GB Mac, Z-Image-Turbo or Z-Image, with the weights unchanged | mlx-dfloat. Peak at 1024²: 13.1 to 14.3 GiB for Z-Image-Turbo over six runs, 13.15 GiB for Z-Image. See "Generate a Z-Image image". |
+| A 32 GB Mac, FLUX.2 Klein (4B or 9B, base or distilled), with the weights unchanged | mlx-dfloat. Peak at 1024²: 11.88 to 12.78 GiB for the 4B models, 17.60 to 18.40 GiB for the 9B models. See "Generate a FLUX.2 Klein image". |
 | A 24 GB Mac, FLUX.2 Klein | CAPPED: FLUX.2-klein-base-4B passed, peak 12.29 GiB; FLUX.2-klein-base-9B is at risk (the fit check refuses it, and a forced run was stopped by the watchdog). See "Generate a FLUX.2 Klein image". |
 | A 16 GB Mac, FLUX.2-klein-base-4B | CAPPED: passed, peak 8.15 GiB. See "Generate a FLUX.2 Klein image". |
 | A 16 GB Mac, Z-Image-Turbo | CAPPED: at risk. The fit check refuses it, and a forced run was stopped by the watchdog at 9.26 GiB before the transformer ran. See "Generate a Z-Image image". |
-| A 32 GB Mac, Qwen-Image-2.1, with the weights unchanged | mlx-dfloat, from the next release. Peak at 1024²: 20.42 GiB. See "Generate a Qwen-Image-2.1 image". |
+| A 32 GB Mac, Qwen-Image-2.1, with the weights unchanged | mlx-dfloat. Peak at 1024²: 20.42 GiB. See "Generate a Qwen-Image-2.1 image". |
 | A 16 GB or 24 GB Mac, Qwen-Image-2.1 | CAPPED: at risk. The fit check refuses it, and forced runs were stopped by the watchdog while the prompt was being encoded, before the transformer ran. See "Generate a Qwen-Image-2.1 image". |
-| A 32 GB Mac, ERNIE-Image or ERNIE-Image-Turbo, with the weights unchanged | mlx-dfloat, from the next release. Peak at 1024²: 16.79 GiB for ERNIE-Image (50 steps), 17.34 GiB for ERNIE-Image-Turbo (8 steps). See "Generate an ERNIE-Image image". |
+| A 32 GB Mac, ERNIE-Image or ERNIE-Image-Turbo, with the weights unchanged | mlx-dfloat. Peak at 1024²: 16.79 GiB for ERNIE-Image (50 steps), 17.34 GiB for ERNIE-Image-Turbo (8 steps). See "Generate an ERNIE-Image image". |
 | A 24 GB Mac, ERNIE-Image-Turbo | CAPPED: at risk. The fit check refuses it, 0.39 GiB over the budget; a forced run passed with a 14.39 GiB peak, 0.11 GiB under the watchdog ceiling. See "Generate an ERNIE-Image image". |
 | A 24 GB Mac, ERNIE-Image | CAPPED: at risk. The fit check refuses it, and a forced run was stopped by the watchdog. See "Generate an ERNIE-Image image". |
 | A 16 GB Mac, ERNIE-Image or ERNIE-Image-Turbo | CAPPED: at risk. The fit check refuses both, and forced runs were stopped by the watchdog. See "Generate an ERNIE-Image image". |
+| A 32 GB Mac, Krea 2 Turbo or Krea 2 Raw, with the weights unchanged | mlx-dfloat. Peak at 1024²: 21.17 GiB for Turbo at 8 steps, 21.15 GiB for Raw at 25 steps and for Raw with its model card's 52 steps at guidance 3.5. The fit estimate predicts a refusal at about 500 prompt tokens; only a 30-token prompt was measured. See "Generate a Krea 2 image". |
+| A 16 GB or 24 GB Mac, Krea 2 Turbo or Krea 2 Raw | CAPPED: at risk. The fit check refuses both models, and forced runs were stopped by the watchdog while the compressed weights were loading, before the transformer ran. See "Generate a Krea 2 image". |
 | A Mac with room for the BF16 transformer next to everything else | Plain mflux in BF16. There is nothing to decode. |
 | A Mac with less than 32 GB | Not measured. The rows marked CAPPED are runs on the 32 GB Mac under the caps mlx-dfloat installs on a 16 GB or 24 GB Mac; the tables below make no other claim for those Macs. |
-| Another model: an LLM, the original Qwen-Image or Qwen-Image-Edit, FLUX.2-dev, Krea-2 | Not wired up yet. The reader and the decoder handle all four published versions of the DFloat11 format, but generation in 0.1.0 covers FLUX.1 only. The next release adds Z-Image-Turbo, Z-Image, the four FLUX.2 Klein models, Qwen-Image-2.1, ERNIE-Image and ERNIE-Image-Turbo. |
+| Another model: an LLM, the 20B Qwen-Image models (the original Qwen-Image, Qwen-Image-2512, Qwen-Image-Edit) or FLUX.2-dev | Not wired up yet. The reader and the decoder handle all four published versions of the DFloat11 format, but generation covers only the models in the rows above. The 20B Qwen-Image models are planned for a later release, for Macs with more than 32 GB; none of them has been run for generation. |
 
 ## Status
 
-Pre-alpha: version 0.1.0 is on PyPI.
+Pre-alpha: version 0.2.0 is on PyPI.
 
 Released in 0.1.0:
 
@@ -67,7 +69,9 @@ Released in 0.1.0:
   Qwen-Image-Edit-2509.
 - A Metal kernel decodes to the same bits as the CPU reference decoder, at about 50 GB/s on an M1 Max on its default
   path, timed on Qwen3-4B and FLUX.1-schnell groups with `uv run python -m scripts.bench_decode_kernel --df11
-  <checkpoint dir> --groups <group names> --out decode.json`.
+  <checkpoint dir> --groups <group names> --out decode.json`. The records, `bench/results/decode/qwen3-4b-layer0.json`
+  and `bench/results/decode/flux1-schnell.json`, give 49.9 to 54.2 GB/s, each the median of five timed repetitions
+  (M1 Max, macOS 27.0, mlx 0.32.2).
 - FLUX.1-schnell, FLUX.1-dev and FLUX.1-Krea-dev make 1024² images through mflux, from the command line or from
   Python. For FLUX.1-schnell, the final latents match the same transformer run block by block from its BF16 weights
   bit for bit, and the saved images match pixel for pixel.
@@ -76,7 +80,7 @@ Released in 0.1.0:
 - `mlx-dfloat generate`, the parity scripts and the benchmark run under a memory watchdog that stops them when they
   cross its ceiling.
 
-In the next release (not yet on PyPI):
+Released in 0.2.0:
 
 - Z-Image-Turbo and Z-Image make 1024² images through mflux, from the command line or from Python. For Z-Image, every
   one of the 271 compressed matrices and 250 other tensors equals the BF16 original
@@ -122,6 +126,20 @@ In the next release (not yet on PyPI):
   (`bench/results/parity/ernie-image-turbo/full-vs-bf16.json`), and the GPU decoder matches the CPU reference on all
   256 (`bench/results/parity/ernie-image-turbo/kernel-vs-reference.json`). Turbo's latents were not compared with a
   reference: that check needs its 16 GB BF16 transformer on disk.
+- Krea 2 Turbo and Krea 2 Raw make 1024² images through mflux, from the command line or from Python. Their DFloat11
+  checkpoints (`mingyi456/Krea-2-Turbo-DF11-ComfyUI` and `mingyi456/Krea-2-Raw-DF11-ComfyUI`) are single files made for
+  ComfyUI, with no `config.json`; mlx-dfloat carries the layout of each, pinned to one revision on the Hub. Both were
+  checked in full against their originals in `krea/Krea-2-Turbo` and `krea/Krea-2-Raw`, read from the Hub one piece at
+  a time. The 256 matrices of the 28 transformer blocks and the four text-fusion blocks equal the BF16 originals. The
+  originals store the other 5 matrices and the 169 other tensors in FP32, and the DFloat11 values equal them rounded to
+  BF16, nearest even (`bench/results/parity/krea-2/full-vs-original.json` and
+  `bench/results/parity/krea-2-raw/full-vs-original.json`). The GPU decoder gives the same bits as the CPU reference on
+  all 261 matrices of each model (`bench/results/parity/krea-2/kernel-vs-reference.json` and
+  `bench/results/parity/krea-2-raw/kernel-vs-reference.json`). Krea 2 Raw's final latents match, bit for bit, those of
+  the same transformer streaming its original weights one block at a time, and the images match pixel for pixel. That
+  check ran at 1024² for 4 steps at guidance 3.5, so classifier-free guidance ran (record:
+  `bench/results/identity/krea-2-raw-1024/compare.json`). Turbo's latents were not compared with a reference: that
+  check needs its 26 GB original transformer on disk.
 - `mlx-dfloat generate --tier 16` and `--tier 24` run under the memory caps mlx-dfloat installs on a Mac of that size.
   The 16 GB and 24 GB rows under "Measured numbers" are CAPPED runs on the 32 GB Mac under those caps; no smaller Mac
   was measured.
@@ -138,7 +156,8 @@ pip install "mlx-dfloat[mflux]"
 ```
 
 Without the extra you get the checkpoint reader and the decoder. The `mflux` extra installs mflux 0.20, which the
-`mlx-dfloat generate` command needs for FLUX.1, Z-Image, FLUX.2 Klein, Qwen-Image-2.1 and ERNIE-Image generation.
+`mlx-dfloat generate` command needs for FLUX.1, Z-Image, FLUX.2 Klein, Qwen-Image-2.1, ERNIE-Image and Krea 2
+generation.
 
 The parity scripts and the benchmark live in the repository, not in the package, so run them from a checkout with
 [uv](https://docs.astral.sh/uv/):
@@ -153,7 +172,8 @@ A plain `uv sync` installs the reader, the decoder and the parity scripts, and `
 benchmark runs with `uv run --group bench`, which installs mflux as well.
 
 Every FLUX.1 base repository on the Hugging Face Hub is gated, so log in once with `hf auth login` and accept the
-model's licence on its Hub page (details under "Generate a FLUX.1 image"). On disk, a DFloat11 FLUX.1 transformer
+model's licence on its Hub page (details under "Generate a FLUX.1 image"). The Krea 2 bases are gated too (see
+"Generate a Krea 2 image"). On disk, a DFloat11 FLUX.1 transformer
 takes about 16 GB, and the base's text encoders, VAE and tokenizers about 10 GB more. The benchmark's `q8`
 condition also needs the base's BF16 transformer, about 24 GB, which generation itself never downloads.
 
@@ -190,10 +210,11 @@ result is compared with bits known in advance. It exits 0 when every check passe
 GPU decoder cannot run at all, for example because there is no Metal device. `--json` prints the same report as JSON.
 
 The same check runs automatically the first time a process decodes on the GPU, once for each write path, and when a
-FLUX.1, Z-Image, FLUX.2 Klein, Qwen-Image-2.1 or ERNIE-Image model or the `generate` command sets up its decoder, so a
-broken GPU decoder refuses before any model loads. On an M1 Max the check itself took about 13 ms, measured after the
-kernel pipelines were compiled; the one-time compile took about 0.4 s with a cold shader cache and 0.03 s with a warm
-one. It does not check whether a real model fits in your memory or how fast it runs; the numbers below cover that.
+FLUX.1, Z-Image, FLUX.2 Klein, Qwen-Image-2.1, ERNIE-Image or Krea 2 model or the `generate` command sets up its
+decoder, so a broken GPU decoder refuses before any model loads. In one measurement on an M1 Max, not committed, the
+check itself took about 13 ms after the kernel pipelines were compiled, and the one-time compile took about 0.4 s with
+a cold shader cache and 0.03 s with a warm one. It does not check whether a real model fits in your memory or how fast it runs; the numbers
+below cover that.
 
 ### Generate a FLUX.1 image
 
@@ -239,24 +260,29 @@ FLUX.1-dev and FLUX.1-Krea-dev want more steps; the measured runs below used 20 
 returns; a wired limit your process already set is left alone. Only the command adds a memory watchdog, so prefer it
 on a Mac near its memory limit.
 
-Measured on an M1 Max (32 GB, macOS 27.0, mlx 0.32.2, mflux 0.20.0, 2026-09-28/29) at 1024², one image per model:
-FLUX.1-schnell (4 steps) peaked at 19.94 GiB and took 1 minute 54 seconds including imports; FLUX.1-dev (20 steps,
-guidance 3.5) peaked at 20.10 GiB in 7 minutes 6 seconds; FLUX.1-Krea-dev (20 steps, guidance 3.5) peaked at 20.09
-GiB in 7 minutes 2 seconds. The machine's budget for this, its recommended working set minus a 2 GiB reserve, is
-22.96 GiB, so all three stay under it. `scripts/verify_image.py` checked FLUX.1-schnell's output against the same
-transformer streaming its BF16 shards block by block instead of the compressed set: the final latents matched bit
-for bit and the two images matched pixel for pixel. FLUX.1-dev and FLUX.1-Krea-dev were not checked this way,
-because their BF16 transformers are gated and were not on disk to compare against. A later run of each model, the
-one recorded under "Measured numbers", peaked within 0.2 GiB of these figures.
+Measured on an M1 Max at 1024², one image per model, with the commands under "Measured numbers": FLUX.1-schnell (4
+steps) peaked at 19.78 GiB, FLUX.1-dev (20 steps, guidance 3.5) at 19.96 GiB and FLUX.1-Krea-dev (20 steps, guidance
+3.5) at 20.04 GiB (`bench/results/tiers/schnell-1024.json`, `dev-1024.json` and `krea-dev-1024.json`). The machine's
+budget, its recommended working set minus a 2 GiB reserve, is 22.96 GiB, so all three stay under it. Those records
+hold no wall time. Earlier single runs on 2026-09-28 and 29, not committed, took 1 minute 54 seconds for
+FLUX.1-schnell, imports included, and about 7 minutes each for FLUX.1-dev and FLUX.1-Krea-dev.
 
-Generating a second image in the same process pays a reload. On a 32 GB Mac every call drops the compressed transformer
-before the VAE decode, whatever the image size: at 1024² holding it next to the decode measured 23.29 GiB, over the
-budget, and smaller sizes have not been measured, so the estimate assumes the decode needs at least as much there. The
-next call reloads it, about 26 seconds. A Mac with a larger budget keeps the transformer loaded between calls. Even a
-repeated prompt pays the reload: three consecutive 4-step FLUX.1-schnell calls with the same prompt each took about 103
-seconds and peaked between 19.77 and 19.98 GiB. A different prompt adds a further reload, this time of the text encoders
-instead of the transformer, since the two are never resident together. `model.encode(*prompts)` pays that encoder reload
-once for several prompts, by encoding all of them while the compressed transformer is not yet loaded.
+`scripts/verify_image.py` checked FLUX.1-schnell's output against the same transformer streaming its BF16 shards block
+by block instead of the compressed set. After 4 steps at 1024², the final latents matched bit for bit and the two
+images matched pixel for pixel (record: `bench/results/identity/flux1-schnell-1024/compare.json`). FLUX.1-dev and
+FLUX.1-Krea-dev were not checked this way, because their BF16 transformers are gated and were not on disk to compare
+against.
+
+Generating a second image in the same process pays a reload. On a 32 GB Mac every call drops the compressed
+transformer before the VAE decode, whatever the image size. At 1024², holding it next to the decode measured 23.29 GiB,
+over the budget (a run on 2026-09-28, not committed). Smaller sizes have not been measured, so the estimate assumes the
+decode needs at least as much there. The next call loads the transformer again, which took 27 to 28 seconds in the
+three committed runs (`lifecycle.set_seconds`). A Mac with a larger budget keeps the transformer loaded between calls.
+
+Even a repeated prompt pays the reload. In a test on 2026-09-28, not committed, three consecutive 4-step FLUX.1-schnell
+calls with the same prompt each took about 103 seconds and peaked between 19.77 and 19.98 GiB. A different prompt also
+reloads the text encoders, because they and the transformer are never resident together. `model.encode(*prompts)` pays
+that encoder reload once for several prompts: it encodes all of them before the compressed transformer loads.
 
 Sizes above 1024² are refused for now, because no run above 1024² has been measured on this path. `--no-fit-check`
 (`fit_check=False` in Python) runs them anyway, on a memory estimate that is then an extrapolation.
@@ -323,11 +349,11 @@ Z-Image-Turbo has no BF16 original to compare with.
 On a 16 GB Mac, Z-Image-Turbo is at risk. No 16 GB Mac was measured: the run behind that row is CAPPED, made on the 32
 GB M1 Max under the caps mlx-dfloat installs on a 16 GB Mac and the tier's watchdog ceiling (`--tier 16`). Without
 `--no-fit-check` the fit check refuses the run: it predicts a 12.2 GiB peak against a 9.17 GiB budget
-(`bench/results/refusals/z-image-turbo-1024-tier16.json`). That run used the older, looser budget for a 16 GB Mac;
-`generate` now uses 8.67 GiB there, which refuses it too. With the flag, the watchdog stopped the run after 4.7 s, at
-the start of loading the transformer weights (the abort file names the phase), with a footprint of 9.26 GiB against the
-9.17 GiB ceiling, while MLX held almost nothing (9 MB). The transformer never ran, so this run says nothing about
-whether it would fit.
+(`bench/results/refusals/z-image-turbo-1024-tier16.json`). That record was made with a looser 16 GB budget; the budget
+`generate` applies on a 16 GB Mac is 8.67 GiB, which refuses the run too. With the flag, the watchdog stopped the run
+after 4.7 s, at the start of loading the transformer weights (the abort file names the phase), with a footprint of 9.26
+GiB against the 9.17 GiB ceiling, while MLX held almost nothing (9 MB). The transformer never ran, so this run says
+nothing about whether it would fit.
 
 Quantisation, LoRA, img2img, mflux's alternative image decoder (`--pid-decode`) and ControlNet are refused, as for
 FLUX.1. Sizes above 1024² are refused unless you pass `--no-fit-check`, because none has been measured.
@@ -404,9 +430,9 @@ installs on those Macs. FLUX.2-klein-base-4B (50 steps, guidance 4.0) passed und
 16 GB Mac's caps, where it dropped the compressed transformer before the VAE decode to stay under the budget, and at
 12.29 GiB under a 24 GB Mac's. FLUX.2-klein-base-9B is at risk on a 24 GB Mac. The fit check refuses it, predicting
 16.3 GiB while denoising against a 14.50 GiB budget (`bench/results/refusals/flux2-klein-base-9b-1024-tier24.json`).
-That run used the older, looser budget for a 24 GB Mac; `generate` now uses 14.00 GiB there, which refuses it too. A
-forced run (`--no-fit-check`) was stopped by the watchdog while denoising, at 14.64 GiB against the 14.50 GiB
-ceiling. Under a 16 GB Mac's caps only FLUX.2-klein-base-4B was run, and under a 24 GB Mac's only the two base models.
+That record was made with a looser 24 GB budget; the budget `generate` applies on a 24 GB Mac is 14.00 GiB, which
+refuses the run too. A forced run (`--no-fit-check`) was stopped by the watchdog while denoising, at 14.64 GiB against
+the 14.50 GiB ceiling. Under a 16 GB Mac's caps only FLUX.2-klein-base-4B was run, and under a 24 GB Mac's only the two base models.
 
 Quantisation, LoRA, img2img, mflux's alternative image decoder (`--pid-decode`) and ControlNet are refused, as for
 FLUX.1. FLUX.2 Klein's image-editing and KV-cache variants are not on this path. `--negative-prompt` is ignored with
@@ -549,8 +575,9 @@ Under a 24 GB Mac's caps (`--tier 24`, run on the 32 GB M1 Max), the fit check r
 GiB peak in 2.8 minutes, the compressed transformer dropped before the VAE decode
 (`bench/results/tiers/ernie-image-turbo-1024-tier24.json`). That peak is only 0.11 GiB under the 14.50 GiB watchdog
 ceiling. The run's report still shows the earlier 14.03 GiB estimate in its `fit` block, because the estimate was raised
-from this run's peak. Two identical runs under these caps peaked 0.35 GiB apart, at 14.03 and 14.39 GiB, which is why
-the estimate takes the higher one. ERNIE-Image-Turbo on a 24 GB Mac is at risk. No 24 GB Mac was measured.
+from this run's peak. Two identical runs under these caps peaked 0.35 GiB apart, at 14.03 and 14.39 GiB
+(`bench/results/repeats/ernie-image-turbo-1024-tier24/run-1.json` and the tier file above), which is why the estimate
+takes the higher one. ERNIE-Image-Turbo on a 24 GB Mac is at risk. No 24 GB Mac was measured.
 
 ERNIE-Image under a 24 GB Mac's caps, and both models under a 16 GB Mac's, are at risk too. The fit check refuses them:
 it predicts 15.2 GiB for ERNIE-Image's denoising step and 14.39 GiB for Turbo's, against budgets of 14.00 GiB at 24 GB
@@ -558,6 +585,119 @@ and 8.67 GiB at 16 GB. Forced runs (`--no-fit-check`) were stopped by the watchd
 the denoising step after 20.6 s, at a 14.80 GiB footprint against the 14.50 GiB ceiling. At 16 GB both were stopped
 while the compressed transformer was loading, against the 9.17 GiB ceiling: Turbo after 18.6 s at 9.22 GiB, ERNIE-Image
 after 23.3 s at 9.44 GiB.
+
+Quantisation, LoRA, img2img, mflux's alternative image decoder (`--pid-decode`) and ControlNet are refused, as for
+FLUX.1. Sizes above 1024² are refused unless you pass `--no-fit-check`, because none has been measured.
+
+### Generate a Krea 2 image
+
+Krea 2 Turbo and Krea 2 Raw run through the same command. Turbo is the post-trained, distilled release for image
+generation; Raw is the pre-training base. Raw's model card calls it "not recommended for inference use" and a good base
+for fine-tuning ([Krea 2 Raw](https://huggingface.co/krea/Krea-2-Raw)).
+
+The command takes each model's text encoder, VAE and tokenizer from its BF16 repository, `krea/Krea-2-Turbo` or
+`krea/Krea-2-Raw`, and both are gated on the Hub. Log in once (`hf auth login`) and accept the Krea 2 Community License
+([licence](https://huggingface.co/krea/Krea-2-Turbo/blob/main/LICENSE.pdf)) on the Hub page of each model you run;
+the Hub grants access as soon as you accept. The DFloat11 checkpoints (`mingyi456/Krea-2-Turbo-DF11-ComfyUI` and
+`mingyi456/Krea-2-Raw-DF11-ComfyUI`) are not gated and list the same licence.
+
+```
+mlx-dfloat generate --model krea-2 \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024 --report report.json
+mlx-dfloat generate --model krea-2-raw \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024 --report report.json
+```
+
+The defaults are 8 steps for Turbo and 25 for Raw, both at guidance 1.0 with the `er_sde` scheduler. Turbo's are those
+of mflux's own Krea 2 command. That command does not run Raw, so Raw's 25 steps are mflux's fallback for a model
+without a step default of its own.[^krea-defaults] At guidance 1.0 each step calls the transformer once. Raw's model card runs 52 steps at guidance 3.5 in every example.
+To use that recipe, pass `--steps 52 --guidance 3.5` and raise the time limit. A single run took 56.2 minutes here,
+close to the one hour after which the command's watchdog stops a run unless you pass `--wall-budget`:
+
+```
+mlx-dfloat generate --model krea-2-raw --steps 52 --guidance 3.5 --wall-budget 7200 \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024 --report report.json
+```
+
+Any guidance other than 1.0, below 1.0 too, turns on classifier-free guidance, as in mflux. Each step then runs the
+transformer twice, once on the prompt and once on the negative prompt, and the command prints a line saying so. Without
+`--negative-prompt` the second call uses a single space, as mflux does. At guidance 1.0 a `--negative-prompt` has no
+effect, and the command warns. `--scheduler` takes `er_sde` (the default), `euler` or `linear`, which mflux runs as
+`er_sde`; any other name is refused. An empty or blank `--prompt` is refused as a user error: Krea 2's tokenizer gives an
+empty prompt no tokens at all.
+
+On a 32 GB Mac the fit estimate predicts a refusal for a prompt of about 500 tokens or more. Only the 30-token
+lighthouse prompt above was measured. The estimate grows with the prompt's length, and at 1024² it reaches the 22.96
+GiB budget near 500 tokens.[^krea-tokens] The command refuses such a prompt before the text encoder or the transformer
+loads. `--no-fit-check` runs it anyway.
+
+The command takes the DFloat11 transformer from that checkpoint, one 17.5 GB file for either model, and the text
+encoder, VAE and tokenizer from the model's BF16 repository. It does not download that repository's own transformer
+(26.3 GB). The text-encoder file is 8.9 GB and also holds a vision model that is never loaded; the VAE is 0.5 GB. All
+these sizes are as listed on the Hub. Both BF16 repositories publish the same text-encoder, VAE and tokenizer files
+(the Hub lists the same hashes for them). Each DFloat11 checkpoint is a single file made for ComfyUI, with no
+`config.json`. mlx-dfloat carries the layout of each, pinned to one revision, and refuses to build one Krea 2 model
+from the other's file, naming the `--model` it belongs to. The default checkpoints and BF16 repositories are pinned to
+the revisions the measured runs used; a `--df11` or `--base` you pass is used as given.
+
+The same from Python:
+
+```python
+from mlx_dfloat.mflux import DFloatModel
+
+model = DFloatModel("krea-2")  # or "krea-2-raw"
+image = model.generate_image(
+    seed=42,
+    prompt="A stone lighthouse on a rocky shore at dawn",
+    height=1024,
+    width=1024,
+)
+image.save("lighthouse.png")
+```
+
+Left out, `num_inference_steps`, `guidance` and `scheduler` take the same per-model defaults as the command; mflux's own
+`Krea2` class defaults to 8 steps for both models. For Raw's card recipe pass `num_inference_steps=52, guidance=3.5`.
+An empty or blank prompt is refused here too. Each call runs under the memory caps the command installs, unless the
+process has already set a wired limit.
+
+mflux compiles Krea 2's denoising step on M1 and M2 Max and Ultra chips and on M3 and later. This path runs it without
+that compilation on every chip (see "Generate a Z-Image image" for why). mflux also passes Krea 2's hidden state from
+block to block in float32, not BF16, because the latents it starts from are float32; this path runs mflux's own block
+code, so it does the same. No Krea 2 step time is reported, against stock mflux or otherwise.
+
+Besides its 28 transformer blocks, Krea 2 has seven smaller compressed groups: four blocks that merge the text
+encoder's layers into the prompt input, and three small layers for the timestep and the text.[^krea-groups] Decoded,
+they take 1.23 GiB. mlx-dfloat decodes them at the start of every transformer call and frees them before the first
+block runs. It also empties MLX's buffer cache at the start of each call and again before the first block. On one Raw
+step at guidance 3.5, the denoising peak was 21.14 GiB this way, against 22.56 GiB with the seven groups kept decoded
+for the whole run (two single-step runs in `bench/results/calibration/krea-2-raw-1024.json`, one per setup, made at
+different development commits). Most of that 1.4 GiB comes from emptying the cache; decoding per call saves about
+0.14 GiB on its own.[^krea-nonblock] The price is about 1.3 GB more decoded weights resident at the start of each
+call, decoded again every call; that decode time was not measured on its own.
+
+Measured on an M1 Max (32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0) at 1024², seed 42, with the commands under
+"Measured numbers", one run each: Krea 2 Turbo (8 steps at guidance 1.0) peaked at 21.17 GiB and took 5.1 minutes,
+and Krea 2 Raw (25 steps at guidance 1.0) peaked at 21.15 GiB in 14.1 minutes. With the card's recipe (52 steps at
+guidance 3.5) Raw peaked at 21.15 GiB in 56.2 minutes
+(`bench/results/recipes/krea-2-raw-1024-52steps-guidance3.5.json`; it is not a row of the table below, which shows no
+step count). In all three runs the peak came while denoising.
+
+The fit estimate is mlx-dfloat's prediction of each step's peak memory, checked before a call. For this prompt it puts
+the denoising step at 22.58 GiB, under this Mac's 22.96 GiB budget. That is about 1.4 GiB above the measured peaks,
+because the estimate counts a full buffer cache that the emptied cache never reaches. The estimate implies that
+holding the compressed transformer through the VAE decode would go over the budget. So on a 32 GB Mac every call
+drops it before the decode and loads it again at the next call (31 s in the Turbo run).
+
+On a 16 GB or 24 GB Mac, both models are at risk. No such Mac was measured: the runs behind those rows are CAPPED, made
+on the 32 GB M1 Max under the caps mlx-dfloat installs on a Mac of that size (`--tier 16` and `--tier 24`). The fit
+check refuses both models at both sizes. It predicts 22.6 GiB for the denoising step, against a budget of 8.67 GiB at
+16 GB and 14.00 GiB at 24 GB; the compressed transformer alone is 16.34 GiB. Forced runs (`--no-fit-check`) were
+stopped by the watchdog while the compressed transformer was loading. At 16 GB, against the 9.17 GiB ceiling, Turbo
+was stopped after 17.1 s at 9.50 GiB and Raw after 17.7 s at 9.49 GiB. At 24 GB, against the 14.50 GiB ceiling, Turbo
+was stopped after 29.7 s at 15.05 GiB and Raw after 32.0 s at 14.91 GiB.
 
 Quantisation, LoRA, img2img, mflux's alternative image decoder (`--pid-decode`) and ControlNet are refused, as for
 FLUX.1. Sizes above 1024² are refused unless you pass `--no-fit-check`, because none has been measured.
@@ -575,23 +715,24 @@ ceiling, made only to show that the watchdog works; it never appears as a tier r
 The 32 GB rows are MEASURED, on one M1 Max. The 16 GB and 24 GB rows are CAPPED, run on that same Mac:
 FLUX.2-klein-base-4B passed under both and ERNIE-Image-Turbo under a 24 GB Mac's caps (a forced run: the fit check
 refuses it), while FLUX.2-klein-base-9B under a 24 GB Mac's caps, Z-Image-Turbo under a 16 GB Mac's, ERNIE-Image-Turbo
-under a 16 GB Mac's, and Qwen-Image-2.1 and ERNIE-Image under both were stopped by the watchdog. The table makes no
-claim about any Mac it does not list. Each row is one `mlx-dfloat generate` run at 1024² with seed 42 (4 steps for
-FLUX.1-schnell, FLUX.2-klein-4B and FLUX.2-klein-9B, 20 for FLUX.1-dev and FLUX.1-Krea-dev, 9 for Z-Image-Turbo, 40 at
-guidance 1.0 for Qwen-Image-2.1, 8 at guidance 1.0 for ERNIE-Image-Turbo, 50 with guidance 4.0 for Z-Image, ERNIE-Image
-and the two FLUX.2 Klein base models), with `--tier` and `--report` writing the file in the last column.
+under a 16 GB Mac's, and Qwen-Image-2.1, ERNIE-Image, Krea 2 Turbo and Krea 2 Raw under both were stopped by the
+watchdog. The table makes no claim about any Mac it does not list. Each row is one `mlx-dfloat generate` run at 1024²
+with seed 42 (4 steps for FLUX.1-schnell, FLUX.2-klein-4B and FLUX.2-klein-9B, 20 for FLUX.1-dev and FLUX.1-Krea-dev, 9
+for Z-Image-Turbo, 40 at guidance 1.0 for Qwen-Image-2.1, 8 at guidance 1.0 for ERNIE-Image-Turbo and Krea 2 Turbo, 25
+at guidance 1.0 for Krea 2 Raw, 50 with guidance 4.0 for Z-Image, ERNIE-Image and the two FLUX.2 Klein base models),
+with `--tier` and `--report` writing the file in the last column.
 
 The second column is the Mac's recommended GPU working set minus a reserve. On the 16 GB and 24 GB rows the working
 set is taken as two thirds of that Mac's memory. Two limits come off that working set, with different reserves. The
 fit budget, which `generate` checks before a run, is the working set minus 2 GiB on every Mac: 22.96 GiB on this one,
 8.67 GiB for a 16 GB Mac and 14.00 GiB for a 24 GB Mac. The watchdog ceiling, where a CAPPED run is stopped, is the
 working set minus 1.5 GiB at 16 GB and 24 GB: 9.17 and 14.50 GiB. So the second column is the fit budget on the 32 GB
-rows and the watchdog ceiling on the CAPPED rows. The FLUX.2 Klein and Z-Image CAPPED rows were recorded while the
-fit check still used the 1.5 GiB reserve, and the stricter budget changes none of their outcomes. FLUX.2-klein-base-4B still passes at 16 GB
-(a predicted 8.54 GiB against 8.67), and at 24 GB it still keeps the compressed transformer loaded for the VAE decode
-(12.69 GiB predicted against 14.00). FLUX.2-klein-base-9B at 24 GB and Z-Image-Turbo at 16 GB are still refused.
-The Qwen-Image-2.1 rows were recorded under the current budget, which refuses both (a predicted 14.6 GiB while it
-encodes the prompt).
+rows and the watchdog ceiling on the CAPPED rows. The FLUX.2 Klein and Z-Image CAPPED rows were recorded when the fit
+check used a 1.5 GiB reserve, and the 2 GiB reserve changes none of their outcomes. FLUX.2-klein-base-4B passes at
+16 GB (a predicted 8.54 GiB against 8.67), and at 24 GB it keeps the compressed transformer loaded for the VAE decode
+(12.69 GiB predicted against 14.00). FLUX.2-klein-base-9B at 24 GB and Z-Image-Turbo at 16 GB are refused. The
+Qwen-Image-2.1 rows were recorded with the 2 GiB reserve, which refuses both (a predicted 14.6 GiB while it encodes
+the prompt).
 
 "Peak (watched)" is the larger of the process footprint the OS reports and MLX's active plus cached memory, and a
 row's status is "target" when it stayed under the second column. "Peak MLX" is the larger of two
@@ -646,9 +787,8 @@ mlx-dfloat generate --model flux2-klein-base-9b --steps 50 --guidance 4 --tier 2
 ```
 
 The last one runs with `--no-fit-check` because without it the fit check refuses the run: it predicts 16.3 GiB while
-denoising against the 14.50 GiB budget of that run, and 14.00 GiB today
-(`bench/results/refusals/flux2-klein-base-9b-1024-tier24.json`). It ends with
-exit 70, like the Z-Image-Turbo run above.
+denoising, against the 14.50 GiB budget recorded with that run and the 14.00 GiB budget `generate` applies
+(`bench/results/refusals/flux2-klein-base-9b-1024-tier24.json`). It ends with exit 70, like the Z-Image-Turbo run above.
 
 The Qwen-Image-2.1 rows come from these commands, with the same prompt:
 
@@ -696,7 +836,41 @@ table's copies are in `bench/results/tiers/aborts/`. Without `--no-fit-check` th
 exit 2 (`bench/results/refusals/ernie-image-turbo-1024-tier24.json`, `ernie-image-turbo-1024-tier16.json`,
 `ernie-image-1024-tier16.json` and `ernie-image-1024-tier24.json`).
 
-Measured on an Apple M1 Max, 32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0.
+The Krea 2 rows come from these commands, with the same prompt:
+
+```
+mlx-dfloat generate --model krea-2 --tier 32 \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024 --report bench/results/tiers/krea-2-1024.json
+mlx-dfloat generate --model krea-2-raw --tier 32 \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024 --report bench/results/tiers/krea-2-raw-1024.json
+mlx-dfloat generate --model krea-2-raw --steps 52 --guidance 3.5 --tier 32 --wall-budget 7200 \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024 --report bench/results/recipes/krea-2-raw-1024-52steps-guidance3.5.json
+mlx-dfloat generate --model krea-2 --tier 16 --no-fit-check \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024
+mlx-dfloat generate --model krea-2-raw --tier 16 --no-fit-check \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024
+mlx-dfloat generate --model krea-2 --tier 24 --no-fit-check \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024
+mlx-dfloat generate --model krea-2-raw --tier 24 --no-fit-check \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024
+```
+
+The third command writes outside `bench/results/tiers/`, so it is not a table row: the table shows no step count, and
+two Krea 2 Raw rows would look the same. In the last four the watchdog stops the run (exit 70) and writes its
+`abort.json` next to the output image; the table's copies are in `bench/results/tiers/aborts/`. Without
+`--no-fit-check` the last four are refused with exit 2 (`bench/results/refusals/krea-2-1024-tier16.json`,
+`krea-2-raw-1024-tier16.json`, `krea-2-1024-tier24.json` and `krea-2-raw-1024-tier24.json`).
+
+Measured on an Apple M1 Max, 32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0. The `git` fields in the committed result
+files name development commits that were folded into a release; they tell the runs apart, but they cannot be fetched
+from the public repository.
 
 <!-- bench:tier-table -->
 | Mac | Working set − reserve | Model | DF11 size | Peak (watched) | Peak footprint | Peak MLX (sampled active + cache, or exact phase peak) | Label | Status | Limits | Result |
@@ -711,6 +885,8 @@ Measured on an Apple M1 Max, 32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0.
 | 24 GB | 14.50 GiB | FLUX.2-klein-base-4B | 4.90 GiB | 12.29 GiB | 12.29 GiB | 10.91 GiB | CAPPED | target | mlx-dfloat caps for the tier | `bench/results/tiers/flux2-klein-base-4b-1024-tier24.json` |
 | 32 GB | 22.96 GiB | FLUX.2-klein-base-4B | 4.90 GiB | 12.78 GiB | 12.78 GiB | 11.91 GiB | MEASURED | target | host caps | `bench/results/tiers/flux2-klein-base-4b-1024.json` |
 | 32 GB | 22.96 GiB | FLUX.2-klein-base-9B | 11.47 GiB | 17.60 GiB | 17.60 GiB | 16.58 GiB | MEASURED | target | host caps | `bench/results/tiers/flux2-klein-base-9b-1024.json` |
+| 32 GB | 22.96 GiB | Krea 2 Turbo | 16.34 GiB | 21.17 GiB | 21.17 GiB | 20.64 GiB | MEASURED | target | host caps | `bench/results/tiers/krea-2-1024.json` |
+| 32 GB | 22.96 GiB | Krea 2 Raw | 16.34 GiB | 21.15 GiB | 21.15 GiB | 20.64 GiB | MEASURED | target | host caps | `bench/results/tiers/krea-2-raw-1024.json` |
 | 32 GB | 22.96 GiB | FLUX.1-Krea-dev | 15.21 GiB | 20.04 GiB | 20.04 GiB | 19.19 GiB | MEASURED | target | host caps | `bench/results/tiers/krea-dev-1024.json` |
 | 32 GB | 22.96 GiB | Qwen-Image-2.1 | 9.06 GiB | 20.42 GiB | 20.42 GiB | 19.72 GiB | MEASURED | target | host caps | `bench/results/tiers/qwen-image-2.1-1024.json` |
 | 32 GB | 22.96 GiB | FLUX.1-schnell | 15.19 GiB | 19.78 GiB | 19.78 GiB | 19.03 GiB | MEASURED | target | host caps | `bench/results/tiers/schnell-1024.json` |
@@ -720,6 +896,10 @@ Measured on an Apple M1 Max, 32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0.
 | 24 GB | 14.50 GiB | ERNIE-Image | not recorded | at least 14.80 GiB (stopped after 20.6 s) | at least 14.80 GiB | at least 14.25 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/ernie-image-1024-tier24.json` |
 | 16 GB | 9.17 GiB | ERNIE-Image-Turbo | not recorded | at least 9.22 GiB (stopped after 18.6 s) | at least 9.22 GiB | at least 8.75 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/ernie-image-turbo-1024-tier16.json` |
 | 24 GB | 14.50 GiB | FLUX.2-klein-base-9B | not recorded | at least 14.64 GiB (stopped after 28.5 s) | at least 14.64 GiB | at least 14.26 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/flux2-klein-base-9b-1024-tier24.json` |
+| 16 GB | 9.17 GiB | Krea 2 Turbo | not recorded | at least 9.50 GiB (stopped after 17.1 s) | at least 9.50 GiB | at least 9.39 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/krea-2-1024-tier16.json` |
+| 24 GB | 14.50 GiB | Krea 2 Turbo | not recorded | at least 15.05 GiB (stopped after 29.7 s) | at least 15.05 GiB | at least 14.95 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/krea-2-1024-tier24.json` |
+| 16 GB | 9.17 GiB | Krea 2 Raw | not recorded | at least 9.49 GiB (stopped after 17.7 s) | at least 9.49 GiB | at least 9.39 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/krea-2-raw-1024-tier16.json` |
+| 24 GB | 14.50 GiB | Krea 2 Raw | not recorded | at least 14.91 GiB (stopped after 32.0 s) | at least 14.91 GiB | at least 14.41 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/krea-2-raw-1024-tier24.json` |
 | 16 GB | 9.17 GiB | Qwen-Image-2.1 | not recorded | at least 9.28 GiB (stopped after 4.4 s) | at least 8.90 GiB | at least 9.28 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/qwen-image-2.1-1024-tier16.json` |
 | 24 GB | 14.50 GiB | Qwen-Image-2.1 | not recorded | at least 14.59 GiB (stopped after 4.8 s) | at least 14.59 GiB | at least 14.31 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/qwen-image-2.1-1024-tier24.json` |
 | 16 GB | 9.17 GiB | Z-Image-Turbo | not recorded | at least 9.26 GiB (stopped after 4.7 s) | at least 9.26 GiB | at least 8.81 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/z-image-turbo-1024-tier16.json` |
@@ -730,7 +910,8 @@ every condition in its own process. `df11` decodes each transformer block's weig
 the block runs and evaluates after every block. `control` runs the same graph with the same per-block evaluation, but
 hands every block the weights of one double and one single block, decoded once before timing started, so the gap between
 the two is the cost of decoding just in time. At the earlier 1.4 GB cache limit most of that gap was allocating a fresh
-buffer for each block's decoded weights; at 2.5 GB the share was not measured. The depth-2 pair evaluates one block
+buffer for each block's decoded weights (measured on 2026-09-27, not committed); at 2.5 GB the share was not
+measured. The depth-2 pair evaluates one block
 behind instead, so the CPU can queue the next block, decode included, while the GPU runs the current one. The eval
 policy cost is what evaluating after every block adds by itself: `control` minus a control that evaluates once per step,
 with no decode involved. A negative value means the per-block control was the faster of the two. The q8 ratio is DF11
@@ -754,7 +935,7 @@ output.
 
 The control was validated once with `scripts/bench_control_validation.py`, at the earlier 1.4 GB cache limit and on
 a reduced-depth transformer (4 double and 8 single blocks instead of 19 and 38): it agreed within 0.13 % with a run
-whose BF16 weights were all resident.
+whose BF16 weights were all resident (`bench/results/validation/control-vs-bf16-schnell-1024.json`).
 
 <!-- bench:overhead -->
 FLUX.1-dev, 1024², per-block evaluation: +3.5 % (depth-2: +4.6 %); eval policy cost -0.07 s/step; DF11 (per-block) over the mflux q8 step (one eval per step, same cache limit): 1.26×
@@ -838,3 +1019,15 @@ encoder copied from the DFloat11 repository, each with its licence.
     depends on the model and is slightly different for each one.
 [^flux]: The FLUX.1-dev transformer has about 12 billion parameters. In BF16 each takes 2 bytes, so about 24 GB for
     the weights alone, before activations and before the text encoders.
+[^krea-defaults]: mflux's own Krea 2 command runs Turbo only; it refuses `krea-2-raw`. For Raw, 25 steps is what
+    mflux's table of step defaults gives a model it has no entry for, and guidance 1.0 is the default of mflux's
+    Python `generate_image`.
+[^krea-tokens]: Tokens are counted after mflux strips Krea 2's chat template from the encoded prompt. The estimate's
+    cache term grows by about 0.84 MiB per token, and at 30 tokens the estimate is 0.38 GiB under the budget, so the
+    limit falls near 496 tokens (the constants are in `src/mlx_dfloat/mflux/krea2/memory.py`). The tokenizer itself
+    stops at 1,024 tokens, chat template included. A guided step is sized by the longer of its two prompts.
+[^krea-groups]: The four blocks are `txtfusion.layerwise_blocks.0`, `.1` and `txtfusion.refiner_blocks.0`, `.1`; the
+    three layers are `tmlp`, `tproj` and `txtmlp`. `tproj` alone is 0.42 GiB decoded.
+[^krea-nonblock]: Decoding per call without emptying the cache lowered that peak by only 0.14 GiB, to 22.42 GiB (a
+    third single-step run in the same file). In a guided step the second call otherwise starts on the buffers the
+    first call left in MLX's cache.

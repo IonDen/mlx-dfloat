@@ -213,8 +213,8 @@ def test_save_model_is_refused_and_freeze_skips_dropped_encoders(tmp_path, monke
 def test_plan_call_rounds_to_multiples_of_16_and_warns_below_the_derived_minimum(
     tmp_path, monkeypatch, caplog
 ):
-    # Bug caught: planning at the requested 1000² while mflux runs 992² (Review Focus 1), or an
-    # override below the two largest groups accepted silently (Review Focus 4).
+    # Bug caught: planning at the requested 1000² while mflux runs 992², or an
+    # override below the two largest groups accepted silently.
     model = _fake_model(tmp_path, monkeypatch)
     assert (
         model.plan_call(height=1000, width=1000).cache_limit
@@ -426,7 +426,7 @@ def test_a_new_prompt_with_the_set_resident_drops_it_reloads_the_encoders_and_re
 
 @pytest.mark.parametrize("where", ["raise_before_loop", "raise_after_loop"])
 def test_a_format_error_mid_step_drops_the_set_and_restores_the_limit(tmp_path, monkeypatch, where):
-    # Bug caught (Review Focus 2): a corrupt block leaving the set attached with stale status words,
+    # Bug caught: a corrupt block leaving the set attached with stale status words,
     # so the retry is refused by begin_step, or the cache limit left at the call's value; checked
     # both before the after-loop guard ran (inside the loop) and after it (during the decode).
     model = _fake_model(tmp_path, monkeypatch)
@@ -475,7 +475,7 @@ def test_a_format_errors_traceback_does_not_pin_the_set_past_the_drop(tmp_path, 
 
 
 def test_an_interrupt_keeps_the_set_resident_and_restores_the_limit(tmp_path, monkeypatch):
-    # Bug caught (Review Focus 3): Ctrl-C (mflux's StopImageGenerationException) dropping the set
+    # Bug caught: Ctrl-C (mflux's StopImageGenerationException) dropping the set
     # (a 24 s reload on the retry) or leaving the limit changed.
     from mflux.utils.exceptions import StopImageGenerationException
 
@@ -689,7 +689,7 @@ def test_a_python_api_call_runs_under_the_commands_caps_and_restores_mlxs_defaul
 
 
 def test_encode_runs_under_the_commands_caps_and_restores_mlxs_defaults(tmp_path, monkeypatch):
-    # Bug caught (X4): encode() from Python run at MLX's default wired limit 0 (a prompt encode is one of the measured
+    # Bug caught: encode() from Python run at MLX's default wired limit 0 (a prompt encode is one of the measured
     # phases, sized under the command's caps), or the caps left installed after it returns.
     from tests._mlx_limits import command_caps, current_limits, mlx_without_wired_cap
 

@@ -175,7 +175,7 @@ def test_plan_children_skips_complete_runs_in_interleaved_order(tmp_path):
 
 
 def test_plan_children_refuses_a_dir_whose_child_key_differs(tmp_path):
-    # Review Focus 4. Bug caught: plan_children skipping the resume-key check, so a run with another
+    # Bug caught: plan_children skipping the resume-key check, so a run with another
     # mlx version or source hash resumes into (and pools with) results it did not produce.
     s = scenario_from_mapping(SPEC)
     _child_json(tmp_path / "round2-q8.json", key={"model": "dev"}, round_no=2, mode="q8")

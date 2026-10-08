@@ -22,7 +22,7 @@ from mlx_dfloat.mflux.flux1.memory import (
 GIB = 1024**3
 LARGEST = {"transformer_blocks": 679_000_000, "single_transformer_blocks": 283_000_000}
 
-# Measured on the 2026-09-28 de-risk run (schnell DF11 `51a428b9`, schnell base `741f7c3c`).
+# Measured on the 2026-09-28 calibration run (schnell DF11 `51a428b9`, schnell base `741f7c3c`).
 MEASURED_VAE_PEAK_GIB = 23.29  # derisk.json phases.vae.footprint_peak, set resident
 SCHNELL_SIZES = FluxSizes(
     compressed=16_195_141_095, extras=113_899_648, encoders=9_770_792_936, vae=167_666_902
@@ -216,8 +216,8 @@ def test_fit_for_uses_the_measured_constants_and_names_the_peak_phase():
 
 def test_the_measured_constants_are_the_recorded_ones():
     # Bug caught: a constant edited without a new measurement (a "tidy-up" rounding it, a units slip).
-    # OVERHEAD: the de-risk run's build-phase footprint minus MLX active and cache.
-    # VAE_TRANSIENT: the de-risk run's VAE-phase footprint peak (23.29 GiB) minus the footprint at the
+    # OVERHEAD: the calibration run's build-phase footprint minus MLX active and cache.
+    # VAE_TRANSIENT: the calibration run's VAE-phase footprint peak (23.29 GiB) minus the footprint at the
     # end of the set load (15.47 GiB) = 7.82 GiB. The same record's `derisk.json["vae_transient_bytes"]`
     # (5.47 GiB) is a different quantity: the VAE peak minus the footprint at the end of the denoise
     # phase, which already carries the retained activations. Re-deriving from the record means the

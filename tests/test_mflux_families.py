@@ -243,7 +243,7 @@ def test_the_qwen_entry_names_its_published_repos_and_pinned_checkpoint():
 def test_pinned_bases_are_the_snapshots_the_recorded_runs_used_and_no_other_base_is():
     # Bug caught: a base (text encoder, VAE, tokenizer) following whatever lands on main instead of the snapshot its
     # recorded runs used (Qwen-Image 2.1: d26bb61, bench/results/tiers/qwen-image-2.1-1024.json; ERNIE-Image and
-    # ERNIE-Image-Turbo: the snapshots their parity and de-risk runs read, 2026-10-08), or a pin set on a family whose
+    # ERNIE-Image-Turbo: the snapshots their parity and calibration runs read, 2026-10-08), or a pin set on a family whose
     # base no recorded run names.
     assert {
         n: e.base_revision for n, e in families.MODELS.items() if e.base_revision is not None
