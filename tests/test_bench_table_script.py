@@ -359,3 +359,38 @@ def test_the_committed_reports_render_each_command_and_the_dev_runs_skipped_pref
     for name in ("flux1-dev-1024", "flux1-schnell-1024"):
         assert f"bench/scenarios/{name}.toml`" in block
     assert "flux1-dev-1024.toml` (preflight skipped: not_charging)" in block
+
+
+def test_collect_reads_the_watchdog_stops_next_to_the_tier_reports(tmp_path):
+    # Bug caught: a --tier 16 abort artifact left in tiers/aborts/ never reaching the README table.
+    root = _full_root(tmp_path)
+    (root / "tiers" / "aborts").mkdir()
+    (root / "tiers" / "aborts" / "turbo-16.json").write_text(
+        json.dumps(
+            {
+                "reason": "memory",
+                "elapsed": 5.6,
+                "ceiling": 9_842_633_386,
+                "peak_watched": 9_900_000_000,
+                "peak_footprint": 9_800_000_000,
+                "peak_mlx": 9_700_000_000,
+                "context": {"model": "z-image-turbo", "tier_gb": 16, "label": "CAPPED"},
+            }
+        )
+    )
+    rows = bt.collect(root).tier_rows
+    assert [r.status for r in rows] == ["target", "target", "stopped by the watchdog"]
+    assert rows[-1].source == "bench/results/tiers/aborts/turbo-16.json"
+    out = bt.render_readme(README, bt.collect(root), date="2026-10-08")
+    assert "| 16 GB | 9.17 GiB | Z-Image-Turbo | not recorded |" in out
+
+
+def test_collect_refuses_a_stop_without_its_tier_context(tmp_path):
+    # Bug caught: an unreadable-as-a-row abort artifact skipped silently (the README quietly missing the stop).
+    root = _full_root(tmp_path)
+    (root / "tiers" / "aborts").mkdir()
+    (root / "tiers" / "aborts" / "x.json").write_text(
+        json.dumps({"reason": "memory", "ceiling": 1})
+    )
+    with pytest.raises(DFloatFormatError):
+        bt.collect(root)

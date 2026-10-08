@@ -3,7 +3,8 @@
     python -m scripts.bench_table            # rewrite the blocks in README.md
     python -m scripts.bench_table --check    # exit 1 when a block differs from the render
 
-Reads ``bench/results/tiers/*.json`` (``mlx-dfloat generate --report`` files), every scenario
+Reads ``bench/results/tiers/*.json`` (``mlx-dfloat generate --report`` files),
+``bench/results/tiers/aborts/*.json`` (abort artifacts of runs the watchdog stopped), every scenario
 directory that holds a ``report.json`` and its child results, and the ``harness-proof/`` pair.
 The numbers in the README are never typed by hand: the test suite fails when they differ from
 this render. Exit codes: 0 fresh (or written), 1 stale under ``--check``, 2 any error (a
@@ -33,6 +34,7 @@ from mlx_dfloat.bench.table import (  # noqa: E402
     render_tier_table,
     scenario_title,
     splice,
+    tier_row_from_abort_artifact,
     tier_row_from_generate_report,
 )
 from mlx_dfloat.errors import DFloatFormatError  # noqa: E402
@@ -105,9 +107,17 @@ def collect(results_root: Path) -> Collected:
             records missing runs or a stop.
     """
     root = Path(results_root)
-    rows = tuple(
-        tier_row_from_generate_report(_read_json(p), source=f"{_RESULTS_PREFIX}/tiers/{p.name}")
-        for p in sorted((root / "tiers").glob("*.json"))
+    rows = (
+        *(
+            tier_row_from_generate_report(_read_json(p), source=f"{_RESULTS_PREFIX}/tiers/{p.name}")
+            for p in sorted((root / "tiers").glob("*.json"))
+        ),
+        *(
+            tier_row_from_abort_artifact(
+                _read_json(p), source=f"{_RESULTS_PREFIX}/tiers/aborts/{p.name}"
+            )
+            for p in sorted((root / "tiers" / "aborts").glob("*.json"))
+        ),
     )
     summaries: dict[str, Summary] = {}
     reproducers: dict[str, str] = {}

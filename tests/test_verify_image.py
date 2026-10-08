@@ -343,3 +343,112 @@ def test_pixels_identical_decodes_the_images_and_ignores_embedded_metadata(tmp_p
     assert (tmp_path / "a.png").read_bytes() != (tmp_path / "b.png").read_bytes()
     assert vi.pixels_identical(tmp_path / "a.png", tmp_path / "b.png")
     assert not vi.pixels_identical(tmp_path / "a.png", tmp_path / "c.png")
+
+
+def _parse(tmp_path, *extra):
+    return vi.parse_args(
+        [
+            "--side",
+            "df11",
+            "--df11",
+            str(tmp_path),
+            "--base",
+            str(tmp_path),
+            "--out",
+            str(tmp_path),
+            *extra,
+        ]
+    )
+
+
+def test_compare_latents_views_an_odd_length_bf16_array_and_tells_signed_zeros_apart():
+    # Bug caught: a uint32 view of an odd-length bf16 array raises, or float == equates -0.0 with 0.0.
+    pos = mx.array([0.0, 1.0, 2.0], dtype=mx.bfloat16)
+    neg = mx.array([-0.0, 1.0, 2.0], dtype=mx.bfloat16)
+    assert vi.compare_latents(pos, mx.array([0.0, 1.0, 2.0], dtype=mx.bfloat16))
+    assert not vi.compare_latents(pos, neg)
+    assert not vi.compare_latents(pos, pos.astype(mx.float32))  # another dtype is never equal
+
+
+def test_compare_latents_still_compares_float32_bits():
+    # Bug caught: the dtype-sized view breaking the 4-byte (FLUX.1 latents, Z-Image latents that end float32) path.
+    a = mx.array([0.0, 1.5, -2.0], dtype=mx.float32)
+    assert vi.compare_latents(a, mx.array([0.0, 1.5, -2.0], dtype=mx.float32))
+    assert not vi.compare_latents(a, mx.array([-0.0, 1.5, -2.0], dtype=mx.float32))
+
+
+def test_guidance_resolves_per_model_before_the_key(tmp_path, monkeypatch):
+    # Bug caught: FLUX's 3.5 forced on Z-Image (base would run CFG at 3.5), or FLUX losing it.
+    monkeypatch.setattr(vi, "source_hash", lambda: "src")
+    z = _parse(tmp_path, "--model", "z-image")
+    assert z.guidance is None
+    assert "guidance" in vi.run_key(z)
+    assert vi.run_key(z)["guidance"] is None
+    assert _parse(tmp_path, "--model", "z-image", "--guidance", "4").guidance == 4.0
+    flux = _parse(tmp_path, "--model", "schnell")
+    assert vi.run_key(flux)["guidance"] == 3.5
+
+
+def test_the_flux_key_has_exactly_its_old_fields(tmp_path, monkeypatch):
+    # Bug caught: every stored FLUX.1 side invalidated by a new key field (negative_prompt) or a changed default.
+    monkeypatch.setattr(vi, "source_hash", lambda: "src")
+    key = vi.run_key(_parse(tmp_path, "--model", "dev"))
+    assert set(key) == {
+        "model",
+        "seed",
+        "steps",
+        "size",
+        "prompt",
+        "guidance",
+        "eval_policy",
+        "df11",
+        "base",
+        "source",
+        "mlx",
+    }
+    assert key["guidance"] == 3.5
+
+
+def test_the_negative_prompt_is_in_the_key_when_given(tmp_path, monkeypatch):
+    # Bug caught: a stored base-model side reused after the negative prompt changed.
+    monkeypatch.setattr(vi, "source_hash", lambda: "src")
+    key = vi.run_key(_parse(tmp_path, "--model", "z-image", "--negative-prompt", "blurry"))
+    assert key["negative_prompt"] == "blurry"
+
+
+def test_the_model_choices_are_the_registry_names_with_a_bf16_original(tmp_path):
+    # Bug caught: --model still limited to the FLUX.1 names.
+    for name in ("schnell", "dev", "krea-dev", "z-image"):
+        assert _parse(tmp_path, "--model", name).model == name
+
+
+def test_turbo_is_refused_at_parse_time_because_its_original_is_fp32(tmp_path, capsys):
+    # Bug caught: --model z-image-turbo accepted, so the df11 side runs for minutes before the bf16 side finds no
+    # BF16 transformer to stream (Turbo's original weights are FP32), or fails later with an unrelated error.
+    with pytest.raises(SystemExit) as info:
+        _parse(tmp_path, "--model", "z-image-turbo")
+    assert info.value.code == 2
+    err = capsys.readouterr().err
+    assert "z-image-turbo" in err
+    assert "FP32" in err
+
+
+def test_child_command_carries_the_negative_prompt_and_omits_an_unset_guidance(tmp_path):
+    # Bug caught: a negative prompt lost between the orchestrator and its children, or the literal "None"
+    # passed to --guidance (argparse float error in every Z-Image child).
+    z = _parse(tmp_path, "--model", "z-image", "--negative-prompt", "blurry")
+    cmd = vi.child_command(z, "bf16")
+    assert cmd[cmd.index("--negative-prompt") + 1] == "blurry"
+    assert "--guidance" not in cmd
+    plain = vi.child_command(_parse(tmp_path, "--model", "z-image"), "df11")
+    assert "--negative-prompt" not in plain
+    flux = vi.child_command(_parse(tmp_path, "--model", "schnell"), "df11")
+    assert flux[flux.index("--guidance") + 1] == "3.5"
+
+
+def test_each_family_has_its_own_pair_of_side_runners():
+    # Bug caught: Z-Image run through the FLUX.1 sides (or the reverse), a wrong-model identity verdict.
+    assert vi.runner_for("schnell", "df11") is vi.run_df11
+    assert vi.runner_for("krea-dev", "bf16") is vi.run_bf16
+    assert vi.runner_for("z-image", "df11") is vi.run_df11_zimage
+    assert vi.runner_for("z-image-turbo", "bf16") is vi.run_bf16_zimage

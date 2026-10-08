@@ -16,6 +16,7 @@ from mlx_dfloat.bench.table import (
     render_proof_paragraph,
     render_tier_table,
     splice,
+    tier_row_from_abort_artifact,
     tier_row_from_generate_report,
 )
 from mlx_dfloat.errors import DFloatFormatError
@@ -46,7 +47,7 @@ def test_tier_table_renders_gib_labels_and_the_source_file():
     text = render_tier_table([_row()])
     assert text.startswith(
         "| Mac | Fit budget (budget − reserve) | Model | DF11 size | Peak (watched) | Peak footprint "  # noqa: RUF001
-        "| Peak MLX (active + cache) | Label | Status | Limits | Result |"
+        "| Peak MLX (sampled active + cache, or exact phase peak) | Label | Status | Limits | Result |"
     )
     assert (
         "| 32 GB | 22.96 GiB | FLUX.1-schnell | 15.08 GiB | 19.94 GiB | 19.94 GiB | 17.40 GiB | MEASURED | target | host caps | `bench/results/tiers/schnell-1024.json` |"
@@ -166,13 +167,50 @@ REPORT = {
 def test_tier_row_from_generate_report_reads_the_ceiling_sizes_and_peaks():
     # Bug caught: the budget column read from fit.budget_bytes (the raw recommended set, no reserve),
     # the DF11 size excluding the extras, or the MLX peak taken from a phase's active-only
-    # mx.get_peak_memory (17.4 GiB here) instead of the watchdog's active + cache peak (19.19 GiB).
+    # mx.get_peak_memory (17.4 GiB here) although the watchdog's active + cache peak is larger (19.19 GiB).
     row = tier_row_from_generate_report(REPORT, source="bench/results/tiers/schnell-1024.json")
     assert row.ceiling_bytes == int(22.96 * GIB)
     assert row.df11_bytes == 16_081_241_447 + 113_899_648
     assert row.mlx_peak_bytes == int(19.19 * GIB)
     assert row.status == "target"
     assert row.limits_note == "host caps"
+
+
+def test_the_mlx_column_takes_an_exact_phase_peak_above_the_sampled_one():
+    # Bug caught: a short MLX spike between two 0.05 s watchdog samples (the Z-Image VAE decode: sampled 12.20
+    # GiB, MLX's own per-phase peak 12.65 GiB in z-image-1024.json) hidden, the column then understating the run.
+    report = {
+        **REPORT,
+        "mlx_peak_bytes": 13_099_464_594,
+        "peaks": {
+            "label": "sampled at phase boundaries",
+            "denoise": {"mlx_peak": 10_637_496_516},
+            "vae": {"mlx_peak": 13_578_549_138},
+        },
+    }
+    assert tier_row_from_generate_report(report, source="s").mlx_peak_bytes == 13_578_549_138
+    no_peaks = {k: v for k, v in report.items() if k != "peaks"}
+    assert tier_row_from_generate_report(no_peaks, source="s").mlx_peak_bytes == 13_099_464_594
+
+
+def test_an_abort_row_reads_as_a_lower_bound_with_the_time_it_ran():
+    # Bug caught: a stopped run's peaks printed like a finished run's (9.26 GiB was where the watchdog stopped
+    # it, not where the run would have peaked), or without how long it ran. Literals from
+    # the first 16 GB Turbo run (superseded by a re-run at the same path): 9_947_618_600 B = 9.26 GiB, 5.57 s, MLX 8.81 GiB.
+    artifact = {
+        "reason": "memory",
+        "elapsed": 5.5735681660007685,
+        "ceiling": 9_842_633_386,
+        "peak_watched": 9_947_618_600,
+        "peak_footprint": 9_947_618_600,
+        "peak_mlx": 9_456_147_030,
+        "context": {"model": "z-image-turbo", "tier_gb": 16, "label": "CAPPED"},
+    }
+    text = render_tier_table([tier_row_from_abort_artifact(artifact, source="a.json")])
+    assert (
+        "| 16 GB | 9.17 GiB | Z-Image-Turbo | not recorded | at least 9.26 GiB (stopped after 5.6 s) "
+        "| at least 9.26 GiB | at least 8.81 GiB | CAPPED | stopped by the watchdog |"
+    ) in text
 
 
 def test_tier_row_reads_a_report_the_generate_command_actually_wrote():
@@ -183,8 +221,8 @@ def test_tier_row_reads_a_report_the_generate_command_actually_wrote():
     row = tier_row_from_generate_report(report, source="schnell-1024.json")
     assert row.watched_peak_bytes == 21266019216
     assert row.footprint_peak_bytes == 21266019216
-    # the report's own mlx_peak_bytes (the watchdog's active + cache peak), not the largest
-    # phase's active-only mlx_peak (18725825760, denoise's)
+    # the larger of the report's own mlx_peak_bytes (the watchdog's active + cache peak) and the
+    # largest phase's active-only mlx_peak (18725825760, denoise's): the watchdog's here
     assert row.mlx_peak_bytes == 20488964670
     assert row.ceiling_bytes == 24653119488
     assert row.label == "MEASURED"
@@ -211,11 +249,16 @@ PROOF_CAP = PASS_REPORT["memory_ceiling_bytes"]
 def _abort_artifact(tmp_path, monkeypatch, *argv, ceiling=PROOF_CAP, peak=None):
     """An abort artifact written by the real producers: generate's run context, the watchdog's _fire."""
     import mlx_dfloat._watchdog as wd
-    from mlx_dfloat.mflux.flux1 import cli as gen
+    from mlx_dfloat.mflux import generate as gen
 
     args = gen.build_parser().parse_args(["--prompt", "p", *argv])
     monkeypatch.setattr(wd, "_exit", lambda code: None)
-    watchdog = wd.Watchdog(tmp_path, ceiling=ceiling, budget=60.0, context=gen._run_context(args))
+    watchdog = wd.Watchdog(
+        tmp_path,
+        ceiling=ceiling,
+        budget=60.0,
+        context=gen._run_context(args, tier_gb=32, label="MEASURED"),
+    )
     watchdog.peak_watched = peak if peak is not None else ceiling + 1
     watchdog._fire(
         "memory",
@@ -361,3 +404,62 @@ def test_caption_keeps_the_dirty_suffix():
         "git": "abc1234def-dirty",
     }
     assert "git abc1234-dirty, d" in caption(prov, date="d")
+
+
+def _abort(**over):
+    # ceiling: 16 GiB * 2 // 3 - 1.5 GiB = 9_842_633_386 (bench/capped.py:87-99).
+    base = {
+        "reason": "memory",
+        "elapsed": 5.6,
+        "ceiling": 9_842_633_386,
+        "peak_watched": 9_900_000_000,
+        "peak_footprint": 9_800_000_000,
+        "peak_mlx": 9_700_000_000,
+        "context": {
+            "model": "z-image-turbo",
+            "tier_gb": 16,
+            "label": "CAPPED",
+            "height": 1024,
+            "width": 1024,
+        },
+    }
+    return {**base, **over}
+
+
+def test_a_zimage_report_row_renders_the_model_label():
+    # Bug caught: a Z-Image row printed as the raw name "z-image-turbo" (the table knew only FLUX.1 names).
+    text = render_tier_table([_row(model="z-image-turbo"), _row(model="z-image")])
+    assert "| Z-Image-Turbo |" in text
+    assert "| Z-Image |" in text
+
+
+def test_a_watchdog_stop_renders_as_a_capped_row_with_unrecorded_df11_size():
+    # Bug caught: an abort record that cannot reach the README, or one rendered as "target".
+    # By hand: 9_842_633_386 / 2**30 = 9.1667 -> 9.17; 9_900_000_000 -> 9.22; 9.8e9 -> 9.13; 9.7e9 -> 9.03.
+    row = tier_row_from_abort_artifact(_abort(), source="bench/results/tiers/aborts/t.json")
+    assert row.status == "stopped by the watchdog"
+    assert row.df11_bytes is None
+    assert (
+        "| 16 GB | 9.17 GiB | Z-Image-Turbo | not recorded | at least 9.22 GiB (stopped after 5.6 s) "
+        "| at least 9.13 GiB | at least 9.03 GiB "
+        "| CAPPED | stopped by the watchdog | MLX defaults for the tier "
+        "| `bench/results/tiers/aborts/t.json` |"
+    ) in render_tier_table([row])
+
+
+def test_an_abort_without_an_mlx_peak_renders_it_as_not_recorded():
+    # Bug caught: the watchdog's peak_mlx is None until a sample read MLX; int(None) crashing the README render.
+    row = tier_row_from_abort_artifact(_abort(peak_mlx=None), source="s")
+    assert "| at least 9.13 GiB | not recorded | CAPPED |" in render_tier_table([row])
+
+
+@pytest.mark.parametrize("missing", ["tier_gb", "label", "model"])
+def test_an_abort_artifact_without_the_tier_context_is_refused(missing):
+    # Bug caught: a stop that cannot say which tier it was rendered under a guessed one.
+    context = {k: v for k, v in _abort()["context"].items() if k != missing}
+    with pytest.raises(DFloatFormatError, match=missing):
+        tier_row_from_abort_artifact(_abort(context=context), source="s")
+    with pytest.raises(DFloatFormatError, match="context"):
+        tier_row_from_abort_artifact(
+            {k: v for k, v in _abort().items() if k != "context"}, source="s"
+        )
