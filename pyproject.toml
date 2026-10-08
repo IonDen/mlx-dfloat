@@ -170,6 +170,8 @@ omit = [
   # init.py stays OUT of this list: most of it has real offline (non-mflux) tests in
   # tests/test_flux1_init.py, so it must keep gating the required 85% threshold too.
   "src/mlx_dfloat/mflux/flux1/model.py",
+  # the same for Z-Image's model class: every test is @pytest.mark.mflux, gated in the integration lane.
+  "src/mlx_dfloat/mflux/zimage/model.py",
 ]
 
 [tool.coverage.report]

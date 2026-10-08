@@ -87,7 +87,7 @@ def test_the_mflux_lane_installs_the_locked_extra_and_proves_it_ran_tests():
     # Every `uv run` names the extra and the group, so no step depends on uv's sync mode keeping
     # what `uv sync --extra mflux` installed.
     uv_runs = [run for run in runs if "uv run" in run]
-    assert len(uv_runs) == 4
+    assert len(uv_runs) == 5
     assert all("uv run --extra mflux --group dev " in run for run in uv_runs)
     pytest_runs = [
         shlex.split(run)
@@ -126,6 +126,27 @@ def test_the_mflux_lane_gates_the_model_module_on_its_own():
         and "--co" not in shlex.split(run)
     )
     assert runs.index(report) == lane + 1
+
+
+def test_the_mflux_lane_measures_and_gates_the_zimage_model_module_on_its_own():
+    # Bug caught: zimage/model.py (every test @pytest.mark.mflux) omitted from the required job's gate but measured
+    # by no job either, so its coverage could fall to zero with every check green; or its gate diluted by
+    # flux1/model.py's lines, or run before the lane's pytest wrote the data.
+    import tomllib
+
+    runs = [step.get("run", "") for step in _integration_job()["steps"]]
+    lane = next(
+        i
+        for i, run in enumerate(runs)
+        if run.startswith("uv run --extra mflux --group dev pytest")
+        and "--co" not in shlex.split(run)
+    )
+    assert "--cov=mlx_dfloat.mflux.zimage.model" in shlex.split(runs[lane])
+    report = "uv run --extra mflux --group dev coverage report --include='*/mflux/zimage/model.py' --fail-under=80"
+    assert report in runs
+    assert lane < runs.index(report) < lane + 3
+    pyproject = tomllib.loads((CI.parents[2] / "pyproject.toml").read_text())
+    assert "src/mlx_dfloat/mflux/zimage/model.py" in pyproject["tool"]["coverage"]["run"]["omit"]
 
 
 def _config() -> dict:
