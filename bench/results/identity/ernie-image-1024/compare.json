@@ -1,0 +1,34 @@
+{
+ "exit_code": 0,
+ "equal": true,
+ "degenerate": [],
+ "df11_key": {
+  "model": "ernie-image",
+  "seed": 42,
+  "steps": 4,
+  "size": 1024,
+  "prompt": "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water",
+  "guidance": 4.0,
+  "eval_policy": "per-block",
+  "df11": "~/.cache/huggingface/hub/models--mingyi456--ERNIE-Image-DF11/snapshots/c2dd30ad7dd5a928df2309581b282337f7cdb41f",
+  "base": "~/.cache/huggingface/hub/models--baidu--ERNIE-Image/snapshots/5346b31d68c9c23758ba56ef8be5e9dc174c7f99",
+  "source": "a6a225e0a58ab9db6fbb3040a74fb13befe7b7681804c8b1831ac37d1d7311f7",
+  "mlx": "0.32.2"
+ },
+ "bf16_key": {
+  "model": "ernie-image",
+  "seed": 42,
+  "steps": 4,
+  "size": 1024,
+  "prompt": "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water",
+  "guidance": 4.0,
+  "eval_policy": "per-block",
+  "df11": "~/.cache/huggingface/hub/models--mingyi456--ERNIE-Image-DF11/snapshots/c2dd30ad7dd5a928df2309581b282337f7cdb41f",
+  "base": "~/.cache/huggingface/hub/models--baidu--ERNIE-Image/snapshots/5346b31d68c9c23758ba56ef8be5e9dc174c7f99",
+  "source": "a6a225e0a58ab9db6fbb3040a74fb13befe7b7681804c8b1831ac37d1d7311f7",
+  "mlx": "0.32.2"
+ },
+ "pixels_identical": true,
+ "df11_png_sha256": "bcca459a7625242e0763f249e048d7d15d9835694bf343789e60858b23ddd2ad",
+ "bf16_png_sha256": "931e5d736872e474024b874b66cee9b3055a1d30b8849350ecb03f3615d61de3"
+}

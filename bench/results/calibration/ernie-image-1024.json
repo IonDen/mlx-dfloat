@@ -1,0 +1,70 @@
+{
+ "model": "ernie-image",
+ "purpose": "the 1024² run the ERNIE-Image memory constants were calibrated on (mlx_dfloat.mflux.ernie.memory); one record per CFG batch size",
+ "df11": "mingyi456/ERNIE-Image-DF11@c2dd30ad7dd5a928df2309581b282337f7cdb41f",
+ "base": "baidu/ERNIE-Image@5346b31d68c9c23758ba56ef8be5e9dc174c7f99",
+ "prompt": "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water",
+ "size": 1024,
+ "seed": 42,
+ "text_tokens": 26,
+ "batch": 2,
+ "device": "Apple M1 Max, 32 GB",
+ "macos": "27.0.1",
+ "versions": {
+  "mlx": "0.32.2",
+  "mflux": "0.20.0"
+ },
+ "git": "a771e58b2d12142d484a6564b12484a523dc6595",
+ "footprint_peaks_label": "OS phys_footprint in bytes, the peak of each phase; for the MEASURED and identity runs the run's watched peak, reached in the VAE phase",
+ "sizes_label": "FamilySizes as mlx_dfloat.mflux.ernie.memory.sizes_for computes them: encoders is the language model's evaluated layers (its last layer never runs), not the 6_858_012_672 B of every language-model tensor",
+ "constants_from": {
+  "denoise": "derisk-base-1"
+ },
+ "runs": [
+  {
+   "label": "derisk-base-1",
+   "date": "2026-10-08",
+   "run": "the de-risk run: one step at guidance 4.0 without a negative prompt (mflux's \" \" then the prompt, one batch-2 transformer call), at the planner's limit for the probe's allowance, the VAE decode on the resident set",
+   "steps": 1,
+   "cache_limit": 3600000000,
+   "footprint_peaks": {
+    "encode": 7257593880,
+    "denoise": 16361874888,
+    "vae": 19127199104
+   },
+   "after_build": {
+    "footprint": 576161232,
+    "mlx_active": 27961608,
+    "mlx_cache": 4806
+   },
+   "mlx_encode_held": 6655149770,
+   "sizes": {
+    "compressed": 10894750607,
+    "extras": 27961600,
+    "nonblock": 335544320,
+    "encoders": 6625216512,
+    "vae": 168120878
+   }
+  },
+  {
+   "label": "measured-50-steps",
+   "date": "2026-10-08",
+   "run": "the MEASURED row (mlx-dfloat generate --tier 32): 50 steps at guidance 4.0 (one batch-2 call per step), the VAE decode on the resident set; bench/results/tiers/ernie-image-1024.json",
+   "steps": 50,
+   "cache_limit": 3600000000,
+   "footprint_peaks": {
+    "vae": 18032961064
+   }
+  },
+  {
+   "label": "identity-4-steps-cfg",
+   "date": "2026-10-08",
+   "run": "the identity check's df11 side: 4 steps at guidance 4.0 (one batch-2 call per step), the VAE decode on the resident set; bench/results/identity/ernie-image-1024/df11-result.json",
+   "steps": 4,
+   "cache_limit": 3600000000,
+   "footprint_peaks": {
+    "vae": 18537964904
+   }
+  }
+ ]
+}

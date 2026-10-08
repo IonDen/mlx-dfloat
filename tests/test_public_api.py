@@ -91,3 +91,13 @@ def test_dfloat_qwen_image_21_is_reachable_lazily():
     from mlx_dfloat.mflux.qwen21.model import DFloatQwenImage21
 
     assert adapters.DFloatQwenImage21 is DFloatQwenImage21
+
+
+@pytest.mark.mflux
+def test_dfloat_ernie_image_is_reachable_lazily():
+    # Bug caught: DFloatErnieImage missing from the lazy attribute hook (AttributeError on first use), or added to
+    # __all__ (a star-import would then need mflux; the star-import test pins __all__).
+    import mlx_dfloat.mflux as adapters
+    from mlx_dfloat.mflux.ernie.model import DFloatErnieImage
+
+    assert adapters.DFloatErnieImage is DFloatErnieImage
