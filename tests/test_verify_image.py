@@ -564,3 +564,189 @@ def test_a_negative_prompt_is_refused_for_klein(tmp_path, capsys):
         )
     assert info.value.code == 2
     assert "--negative-prompt" in capsys.readouterr().err
+
+
+# --- Qwen-Image 2.1 -------------------------------------------------------------------------------------------
+
+QWEN = "qwen-image-2.1"
+
+
+def _qwen_base(
+    tmp_path,
+    shards=(
+        "diffusion_pytorch_model-00001-of-00002.safetensors",
+        "diffusion_pytorch_model-00002-of-00002.safetensors",
+    ),
+    *,
+    present=None,
+):
+    """A base snapshot's transformer/ as diffusers publishes it: an index naming its shards, the shards present."""
+    root = tmp_path / "qbase"
+    transformer = root / "transformer"
+    transformer.mkdir(parents=True, exist_ok=True)
+    weight_map = {f"transformer_blocks.{i}.attn.to_q.weight": s for i, s in enumerate(shards)}
+    (transformer / "diffusion_pytorch_model.safetensors.index.json").write_text(
+        json.dumps({"metadata": {"total_size": 1}, "weight_map": weight_map})
+    )
+    for s in shards if present is None else present:
+        (transformer / s).write_bytes(b"\0")
+    return root
+
+
+def _parse_qwen(tmp_path, base, *extra, side=("--side", "df11")):
+    return vi.parse_args(
+        [
+            *side,
+            "--model",
+            QWEN,
+            "--df11",
+            str(tmp_path),
+            "--base",
+            str(base),
+            "--out",
+            str(tmp_path / "out"),
+            *extra,
+        ]
+    )
+
+
+def test_runner_for_dispatches_qwen_to_its_sides():
+    # Bug caught: Qwen-Image 2.1 routed to the FLUX.1 sides (a wrong-model identity verdict), or no qwen21 row (a
+    # KeyError after the df11 side already ran for minutes).
+    assert vi.runner_for(QWEN, "df11") is vi.run_df11_qwen21
+    assert vi.runner_for(QWEN, "bf16") is vi.run_bf16_qwen21
+
+
+def test_qwen_base_problem_is_none_for_an_index_with_its_shards(tmp_path):
+    # Bug caught: a complete transformer/ refused (the identity check could never run).
+    assert vi.qwen21_base_problem(QWEN, _qwen_base(tmp_path)) is None
+
+
+@pytest.mark.parametrize("layout", ["no_dir", "empty_dir", "no_index"])
+def test_qwen_base_problem_names_the_missing_transformer(tmp_path, layout):
+    # Bug caught: the bf16 side launched on a base without its BF16 transformer (the encoder and VAE are enough for
+    # generate, and the transformer is the last, 14 GB download), failing after the df11 side's minutes.
+    base = tmp_path / "qbase"
+    base.mkdir()
+    if layout != "no_dir":
+        (base / "transformer").mkdir()
+    if layout == "no_index":
+        (base / "transformer" / "diffusion_pytorch_model-00001-of-00002.safetensors").write_bytes(
+            b"\0"
+        )
+    problem = vi.qwen21_base_problem(QWEN, base)
+    assert problem is not None
+    assert f"--base {base}: the bf16 side streams the BF16 transformer from transformer/" in problem
+    assert "download Qwen/Qwen-Image-2.1's transformer/* first" in problem
+
+
+def test_qwen_base_problem_names_a_shard_the_index_lists_but_the_snapshot_lacks(tmp_path):
+    # Bug caught: only the index checked, so a download stopped between the two shards passes the check and the bf16
+    # side fails at the first block of the second shard.
+    second = "diffusion_pytorch_model-00002-of-00002.safetensors"
+    base = _qwen_base(tmp_path, present=("diffusion_pytorch_model-00001-of-00002.safetensors",))
+    problem = vi.qwen21_base_problem(QWEN, base)
+    assert problem is not None
+    assert second in problem
+
+
+def test_qwen_base_problem_reports_an_unreadable_index_instead_of_raising(tmp_path):
+    # Bug caught: a truncated index JSON raising a traceback out of parse_args instead of a usage message.
+    base = _qwen_base(tmp_path)
+    (base / "transformer" / "diffusion_pytorch_model.safetensors.index.json").write_text("{")
+    problem = vi.qwen21_base_problem(QWEN, base)
+    assert problem is not None
+    assert "diffusion_pytorch_model.safetensors.index.json" in problem
+
+
+def test_qwen_base_problem_refuses_an_index_that_names_no_shards(tmp_path):
+    # Bug caught: an empty weight map passing as "every named shard present" (nothing to stream; the bf16 side fails
+    # at the first block).
+    base = _qwen_base(tmp_path)
+    (base / "transformer" / "diffusion_pytorch_model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {}})
+    )
+    assert vi.qwen21_base_problem(QWEN, base) is not None
+
+
+@pytest.mark.parametrize("shard", ["../outside.safetensors", "sub/inner.safetensors"])
+def test_qwen_base_problem_refuses_a_shard_name_that_is_not_a_plain_file_name(tmp_path, shard):
+    # Bug caught: an index naming a path outside transformer/ (or below it) accepted because the file happens to exist
+    # there, so the bf16 side streams another file's tensors; the streaming reader's index check refuses the same names
+    # (Path(name).name must equal name).
+    base = _qwen_base(tmp_path)
+    target = base / "transformer" / shard
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"\0")
+    index = base / "transformer" / "diffusion_pytorch_model.safetensors.index.json"
+    index.write_text(json.dumps({"weight_map": {"a.weight": shard}}))
+    problem = vi.qwen21_base_problem(QWEN, base)
+    assert problem is not None
+    assert f"not a plain file name: {shard!r}" in problem
+
+
+def test_qwen_base_problem_is_none_for_the_other_families(tmp_path):
+    # Bug caught: the transformer/ check applied to FLUX.1 or Z-Image bases (their own checks differ).
+    assert vi.qwen21_base_problem("schnell", tmp_path) is None
+    assert vi.qwen21_base_problem("z-image", tmp_path) is None
+
+
+@pytest.mark.parametrize("side", [("--side", "bf16"), ("--orchestrate",)])
+def test_a_qwen_run_that_streams_the_bf16_side_is_refused_without_its_transformer(
+    tmp_path, capsys, side
+):
+    # Bug caught: the check not wired into parse_args for the runs that stream the BF16 transformer (the bf16 side,
+    # and --orchestrate, whose bf16 child starts after the df11 side's minutes).
+    base = tmp_path / "qbase"
+    (base / "transformer").mkdir(parents=True)
+    with pytest.raises(SystemExit) as info:
+        _parse_qwen(tmp_path, base, side=side)
+    assert info.value.code == 2
+    assert "transformer/" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("side", [("--side", "df11"), ("--side", "compare")])
+def test_a_qwen_df11_side_or_compare_needs_no_bf16_transformer(tmp_path, side):
+    # Bug caught: the df11 side refused before the BF16 transformer is downloaded (it needs only the encoder, the VAE
+    # and the DF11 file; the identity's df11 side runs first, before the 14 GB transformer download).
+    base = tmp_path / "qbase"
+    base.mkdir()
+    assert _parse_qwen(tmp_path, base, side=side).model == QWEN
+
+
+def test_qwen_negative_prompt_is_accepted_and_keyed_with_mfluxs_guidance(tmp_path, monkeypatch):
+    # Bug caught: --negative-prompt refused for Qwen as for FLUX.2 Klein (Qwen's CFG needs it), dropped from the key
+    # (a stored side reused after it changed) or from the children; or the guidance left None instead of mflux's 1.0
+    # (qwen21_generate.py:60), which the bf16 side's Config cannot take.
+    monkeypatch.setattr(vi, "source_hash", lambda: "src")
+    args = _parse_qwen(
+        tmp_path, _qwen_base(tmp_path), "--negative-prompt", " ", side=("--orchestrate",)
+    )
+    assert vi.run_key(args)["negative_prompt"] == " "
+    assert args.guidance == 1.0
+    command = vi.child_command(args, "bf16")
+    assert command[command.index("--negative-prompt") + 1] == " "
+    assert command[command.index("--guidance") + 1] == "1.0"
+
+
+def test_qwen_embeds_hold_the_positive_pair_and_the_negative_one_when_cfg_ran():
+    # Bug caught: the negative pair saved under the positive names (the bf16 side would run CFG against the prompt
+    # itself), a mask not saved (the bf16 side's attention would see padding), or a negative saved when CFG did not
+    # run (the bf16 side would then run two calls per step while the df11 side ran one).
+    pos = (mx.array([[[1.0]]]), mx.array([[1]], dtype=mx.int32))
+    neg = (mx.array([[[2.0]]]), mx.array([[0]], dtype=mx.int32))
+    cache = {"p": pos, " ": neg}
+    one = vi.qwen21_embeds(cache, ("p",))
+    assert sorted(one) == ["prompt_embeds", "prompt_mask"]
+    assert one["prompt_embeds"] is pos[0]
+    assert one["prompt_mask"] is pos[1]
+    two = vi.qwen21_embeds(cache, ("p", " "))
+    assert sorted(two) == [
+        "negative_prompt_embeds",
+        "negative_prompt_mask",
+        "prompt_embeds",
+        "prompt_mask",
+    ]
+    assert two["negative_prompt_embeds"] is neg[0]
+    assert two["negative_prompt_mask"] is neg[1]
+    assert two["prompt_embeds"] is pos[0]

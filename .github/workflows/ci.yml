@@ -54,7 +54,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --locked --group dev --extra mflux
       - run: uv run --extra mflux --group dev python -c "import mflux, mlx.core, importlib.metadata as m; print('mflux', m.version('mflux'))"
-      # No combined threshold: init.py's tests run in the default lane (its live ones skip without a token); the next three steps gate each model.py on its own.
+      # No combined threshold: init.py's tests run in the default lane (its live ones skip without a token); the next four steps gate each model.py on its own.
       - name: Integration tests (mflux lane)
         env:
           # Every FLUX.1 base repository is gated on the Hub (schnell auto-approved), so the three
@@ -62,13 +62,15 @@ jobs:
           # Only this step gets it: the actions, the sync and the collection and coverage steps have
           # no use for it. The secret is a read-only Hub token; the default lane runs without one.
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: uv run --extra mflux --group dev pytest -m mflux --run-network --cov=mlx_dfloat.mflux.flux1.model --cov=mlx_dfloat.mflux.flux1.init --cov=mlx_dfloat.mflux.zimage.model --cov=mlx_dfloat.mflux.flux2.model --cov-config=.coveragerc-integration --cov-report=term-missing -q -p no:cacheprovider -rs
+        run: uv run --extra mflux --group dev pytest -m mflux --run-network --cov=mlx_dfloat.mflux.flux1.model --cov=mlx_dfloat.mflux.flux1.init --cov=mlx_dfloat.mflux.zimage.model --cov=mlx_dfloat.mflux.flux2.model --cov=mlx_dfloat.mflux.qwen21.model --cov=mlx_dfloat.mflux.qwen21.init --cov=mlx_dfloat.mflux.qwen21.transformer --cov-config=.coveragerc-integration --cov-report=term-missing -q -p no:cacheprovider -rs
       - name: model.py coverage on its own (mflux lane)
         run: uv run --extra mflux --group dev coverage report --include='*/mflux/flux1/model.py' --fail-under=80
       - name: zimage/model.py coverage on its own (mflux lane)
         run: uv run --extra mflux --group dev coverage report --include='*/mflux/zimage/model.py' --fail-under=80
       - name: flux2/model.py coverage on its own (mflux lane)
         run: uv run --extra mflux --group dev coverage report --include='*/mflux/flux2/model.py' --fail-under=80
+      - name: qwen21/model.py coverage on its own (mflux lane)
+        run: uv run --extra mflux --group dev coverage report --include='*/mflux/qwen21/model.py' --fail-under=80
       - name: The lane collected mflux tests
         run: test "$(uv run --extra mflux --group dev pytest -m mflux --co -q -p no:cacheprovider | grep -c '::')" -ge 2
   build:

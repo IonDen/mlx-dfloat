@@ -1,8 +1,8 @@
-"""Image identity: DFloat11 latents (FLUX.1, Z-Image, FLUX.2 Klein) against the same seam streaming the BF16 weights.
+"""Image identity: DFloat11 latents against the same seam streaming the BF16 weights, for every BF16 family.
 
-The ``df11`` side generates through ``DFloatFlux1``, ``DFloatZImage`` or ``DFloatFlux2Klein`` (the prompt encoded by
-its own encoders; the final latents captured by an after-loop callback and saved with the embeddings and the image).
-The ``bf16`` side builds the same seamed transformer with its extras read from the base's BF16
+The ``df11`` side generates through ``DFloatFlux1``, ``DFloatZImage``, ``DFloatFlux2Klein`` or ``DFloatQwenImage21``
+(the prompt encoded by its own encoders; the final latents captured by an after-loop callback and saved with the
+embeddings and the image). The ``bf16`` side builds the same seamed transformer with its extras read from the base's BF16
 transformer shards, drives it with a ``StreamingBF16Provider`` (each block's matrices read from
 the shards as the block runs, never all resident) through exactly mflux's loop body on the saved
 embeddings and the same seed, then decodes with the base's VAE. ``compare`` checks the two latent
@@ -15,6 +15,10 @@ the two sides' saved latents in-process. For FLUX.2 Klein, ``--base`` is the sna
 repository (a distilled model's transformer lives in the distilled repository, not in the base one). The Klein
 bf16 side's copy of mflux's loop body is measurement glue, run by the identity check and not unit-tested: the df11
 side runs mflux's own loop, so a drift between the two shows as a false mismatch (exit 1), never as a false pass.
+For Qwen-Image 2.1, ``--base`` must hold the BF16 transformer (``transformer/``: its index and both shards) for the
+bf16 side and ``--orchestrate``; the df11 side needs only the text encoder, the VAE and the DF11 file. Both Qwen sides
+run the forward pass uncompiled, and the bf16 side's copy of mflux's Qwen loop body is measurement glue in the same
+sense as Klein's.
 Usage (from the repository root of a synced checkout, ``--group bench``):
     uv run python -m scripts.verify_image --orchestrate --model schnell --df11 DIR --base DIR --out DIR \
         [--prompt "..."] [--seed 42] [--steps 4] [--size 1024] [--guidance 3.5] [--negative-prompt "..."] [--eval-policy per-block]
@@ -120,6 +124,38 @@ def klein_base_problem(model: str, base: Path) -> str | None:
     return None
 
 
+def qwen21_base_problem(model: str, base: Path) -> str | None:
+    """Why ``base`` cannot feed a Qwen-Image 2.1 bf16 side, or None (and None for every other family).
+
+    The bf16 side streams the BF16 transformer from ``base/transformer``: its ``*.safetensors.index.json`` and every
+    shard the index names must be there, each named by a plain file name (as the streaming reader requires). The df11
+    side never reads it.
+    """
+    e = entry(model)
+    if e.family != "qwen21":
+        return None
+    root = base / "transformer"
+    need = (
+        f"--base {base}: the bf16 side streams the BF16 transformer from transformer/ "
+        f"(download {e.base_repo}'s transformer/* first)"
+    )
+    indexes = sorted(root.glob("*.safetensors.index.json")) if root.is_dir() else []
+    if len(indexes) != 1:
+        return f"{need}; found {len(indexes)} weight indexes in {root}"
+    try:
+        weight_map = json.loads(indexes[0].read_text())["weight_map"]
+        shards = sorted({str(v) for v in weight_map.values()})
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        return f"{indexes[0]}: unreadable weight index ({type(exc).__name__}); {need}"
+    unsafe = [s for s in shards if Path(s).name != s]
+    if unsafe:
+        return f"{indexes[0]}: a shard name that is not a plain file name: {unsafe[0]!r}"
+    missing = [s for s in shards if not (root / s).is_file()]
+    if not shards or missing:
+        return f"{need}; the index names {len(shards)} shards, missing {missing}"
+    return None
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse the command line: one side (``df11``, ``bf16`` or ``compare``), or ``--orchestrate``."""
     p = argparse.ArgumentParser(
@@ -143,12 +179,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=None,
         help="guidance (default per model, as mflux: FLUX.1 3.5; Z-Image unset: the model's own rule; "
-        "FLUX.2 Klein 1.0, base models with CFG at 4)",
+        "FLUX.2 Klein 1.0, base models with CFG at 4; Qwen-Image 2.1 1.0, CFG above 1 with --negative-prompt)",
     )
     p.add_argument(
         "--negative-prompt",
         default=None,
-        help="the negative prompt (used by z-image, a base model)",
+        help="the negative prompt (used by z-image, a base model, and qwen-image-2.1 above guidance 1)",
     )
     p.add_argument("--eval-policy", choices=("per-block", "depth2"), default="per-block")
     p.add_argument(
@@ -164,6 +200,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     problem = klein_base_problem(args.model, Path(args.base).expanduser())
     if problem is not None:
         p.error(f"--model {args.model}: {problem}")
+    # Only the runs that stream the BF16 transformer need it; the df11 side and compare never read it.
+    if args.orchestrate or args.side == "bf16":
+        problem = qwen21_base_problem(args.model, Path(args.base).expanduser())
+        if problem is not None:
+            p.error(f"--model {args.model}: {problem}")
     if args.guidance is None:  # resolved before run_key, so a stored FLUX.1 side keeps its 3.5
         args.guidance = entry(args.model).default_guidance
     # Absolute paths: the children run with the repository root as their cwd.
@@ -802,10 +843,188 @@ def run_bf16_flux2(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, An
     }
 
 
+# --- the Qwen-Image 2.1 sides (mflux-touching; exercised by the identity run, not unit-tested here) -----------
+
+
+def qwen21_embeds(
+    prompt_cache: Mapping[str, tuple[mx.array, mx.array]], prompts: tuple[str, ...]
+) -> dict[str, mx.array]:
+    """The embeddings file of a Qwen df11 side: the prompt's pair, and the negative's when CFG ran (two prompts).
+
+    ``prompts`` is ``DFloatQwenImage21.cfg_prompts``'s answer for the call; the pairs are ``(embeds, mask)`` as
+    mflux's prompt cache holds them.
+    """
+    embeds, mask = prompt_cache[prompts[0]]
+    out = {"prompt_embeds": embeds, "prompt_mask": mask}
+    if len(prompts) > 1:
+        out["negative_prompt_embeds"], out["negative_prompt_mask"] = prompt_cache[prompts[1]]
+    return out
+
+
+def run_df11_qwen21(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, Any]:
+    """Generate through ``DFloatQwenImage21``, capture the final latents, and save the image, latents and embeddings.
+
+    The embeddings file holds ``prompt_embeds`` and ``prompt_mask`` and, when classifier-free guidance ran (a
+    guidance above 1.0 with a non-empty negative prompt), ``negative_prompt_embeds`` and ``negative_prompt_mask``.
+
+    Raises:
+        VerifyImageError: The after-loop callback never ran (mflux's own loop never called it).
+    """
+    from mflux.models.qwen21.latent_creator.qwen21_latent_creator import Qwen21LatentCreator
+
+    from mlx_dfloat.mflux.qwen21.model import DFloatQwenImage21
+
+    out_dir = args.out / "df11"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    model = DFloatQwenImage21(
+        args.model, df11_path=args.df11, base_path=args.base, eval_policy=args.eval_policy
+    )
+    capture = _LatentCapture()
+    model.callbacks.register(capture)
+    image = model.generate_image(
+        args.seed,
+        args.prompt,
+        num_inference_steps=args.steps,
+        height=args.size,
+        width=args.size,
+        guidance=args.guidance,
+        negative_prompt=args.negative_prompt,
+    )
+    captured = capture.latents
+    if captured is None:
+        raise VerifyImageError("the after-loop callback never ran; no latents were captured")
+    mx.eval(captured)
+    image.save(str(out_dir / "image.png"), export_json_metadata=False, overwrite=True)
+    mx.save_safetensors(str(out_dir / "latents.safetensors"), {"latents": captured})
+    wanted = model.cfg_prompts(
+        args.prompt, negative_prompt=args.negative_prompt, guidance=args.guidance
+    )
+    mx.save_safetensors(
+        str(out_dir / "embeds.safetensors"), qwen21_embeds(model.prompt_cache, wanted)
+    )
+    noise = Qwen21LatentCreator.create_noise(args.seed, args.size, args.size)
+    degenerate = nondegenerate(captured, noise)
+    report = model.report()
+    return {
+        "exit_code": EXIT_OK if not degenerate else EXIT_ERROR,
+        "degenerate": degenerate,
+        "report": report,
+        "output_shape": list(captured.shape),
+        "output_dtype": str(captured.dtype),
+        "footprint_peak_bytes": max(watchdog.peak_footprint, phys_footprint()),
+        "mlx_peak_bytes_max_over_phases": max_phase_peak(report["peaks"]),
+    }
+
+
+def run_bf16_qwen21(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, Any]:
+    """Stream the base's BF16 transformer shards through the seam and mflux's Qwen-Image 2.1 loop body, then the VAE.
+
+    ``modulation.1`` loads from the base as a plain weight; the blocks stream as they run, the forward pass
+    uncompiled as on the df11 side (``EagerForward`` sets mflux's ``_step_fn`` to the plain method).
+
+    Raises:
+        VerifyImageError: The df11 side's saved embeddings are not present yet.
+    """
+    from mflux.models.common.config.config import Config
+    from mflux.models.common.config.model_config import ModelConfig
+    from mflux.models.common.vae.vae_util import VAEUtil
+    from mflux.models.qwen21.latent_creator.qwen21_latent_creator import Qwen21LatentCreator
+    from mflux.utils.image_util import ImageUtil
+
+    from mlx_dfloat.mflux.qwen21 import init as qinit
+    from mlx_dfloat.mflux.qwen21 import transformer as qtf
+    from mlx_dfloat.mflux.qwen21.names import qwen21_name_map
+
+    out_dir = args.out / "bf16"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    embeds_path = args.out / "df11" / "embeds.safetensors"
+    if not embeds_path.exists():
+        raise VerifyImageError(f"{embeds_path}: run the df11 side first")
+
+    df11_root = Path(args.df11).expanduser()
+    base_root = Path(args.base).expanduser()
+    ckpt = open_checkpoint(df11_root)
+    index = qtf.base_transformer_files_index(base_root / "transformer")
+    build = qtf.build_transformer(
+        ckpt, extras=qtf.base_extras(index, ckpt), nonblock_from_extras=True
+    )
+    provider = StreamingBF16Provider(
+        index, {n: ckpt.groups[n].matrix_names for n in build.shapes}, qwen21_name_map()
+    )
+    transformer = build.transformer
+    transformer.attach(provider, build.shapes, eval_policy=args.eval_policy, verify_in_call=True)
+
+    embeds = mx.load(str(embeds_path))
+    prompt_embeds, prompt_mask = embeds["prompt_embeds"], embeds["prompt_mask"]
+    negative_prompt_embeds = embeds.get("negative_prompt_embeds")  # present only when CFG ran
+    negative_prompt_mask = embeds.get("negative_prompt_mask")
+    do_true_cfg = negative_prompt_embeds is not None
+    config = Config(
+        model_config=ModelConfig.from_name(model_name=args.model, base_model=None),
+        num_inference_steps=args.steps,
+        height=args.size,
+        width=args.size,
+        guidance=args.guidance,
+        scheduler="linear",
+    )
+    # mflux qwen_image_21.py: txt2img noise, cast to the model precision.
+    latents = Qwen21LatentCreator.create_noise(args.seed, args.size, args.size).astype(
+        ModelConfig.precision
+    )
+    mx.eval(latents, prompt_embeds, prompt_mask)
+
+    for t in config.time_steps:
+        # mflux qwen_image_21.py's step body: scale, positive call, negative call when CFG ran, combine, step, eval.
+        latents = config.scheduler.scale_model_input(latents, t)
+        noise = transformer(
+            t=t,
+            config=config,
+            hidden_states=latents,
+            encoder_hidden_states=prompt_embeds,
+            encoder_hidden_states_mask=prompt_mask,
+        )
+        if do_true_cfg:
+            noise_negative = transformer(
+                t=t,
+                config=config,
+                hidden_states=latents,
+                encoder_hidden_states=negative_prompt_embeds,
+                encoder_hidden_states_mask=negative_prompt_mask,
+            )
+            noise = noise_negative + config.guidance * (noise - noise_negative)
+        latents = config.scheduler.step(noise=noise, timestep=t, latents=latents)
+        mx.eval(latents)
+        # No verify_step(): attach(..., verify_in_call=True) checks inside each call, and this provider defers nothing.
+
+    if not qtf.is_eager(transformer):
+        raise VerifyImageError("the bf16 side's forward pass was compiled; the df11 side's is not")
+    mx.save_safetensors(str(out_dir / "latents.safetensors"), {"latents": latents})
+
+    vae = qinit.load_vae(base_root)
+    mx.clear_cache()
+    mx.set_cache_limit(0)  # the transformer-shaped buffers cannot serve the decoder
+    unpacked = Qwen21LatentCreator.unpack_latents(
+        latents=latents, height=args.size, width=args.size
+    )
+    decoded = VAEUtil.decode(vae=vae, latent=unpacked, tiling_config=None)
+    ImageUtil.to_pil(decoded).save(str(out_dir / "image.png"))
+
+    return {
+        "exit_code": EXIT_OK,
+        "reads": provider.reads,
+        "cfg_calls_per_step": 2 if do_true_cfg else 1,
+        "output_shape": list(latents.shape),
+        "output_dtype": str(latents.dtype),
+        "footprint_peak_bytes": max(watchdog.peak_footprint, phys_footprint()),
+        "mlx_peak_bytes_process": int(mx.get_peak_memory()),  # never reset on this side
+    }
+
+
 SIDE_RUNNERS: dict[str, tuple[Callable[..., dict[str, Any]], Callable[..., dict[str, Any]]]] = {
     "flux1": (run_df11, run_bf16),
     "zimage": (run_df11_zimage, run_bf16_zimage),
     "flux2": (run_df11_flux2, run_bf16_flux2),
+    "qwen21": (run_df11_qwen21, run_bf16_qwen21),
 }
 
 
