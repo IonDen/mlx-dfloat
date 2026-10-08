@@ -1,7 +1,7 @@
 """Image identity: DFloat11 latents against the same seam streaming the BF16 weights, for every BF16 family.
 
-The ``df11`` side generates through ``DFloatFlux1``, ``DFloatZImage``, ``DFloatFlux2Klein``, ``DFloatQwenImage21`` or
-``DFloatErnieImage``
+The ``df11`` side generates through ``DFloatFlux1``, ``DFloatZImage``, ``DFloatFlux2Klein``, ``DFloatQwenImage21``,
+``DFloatErnieImage`` or ``DFloatKrea2``
 (the prompt encoded by its own encoders; the final latents captured by an after-loop callback and saved with the
 embeddings and the image). The ``bf16`` side builds the same seamed transformer with its extras read from the base's BF16
 transformer shards, drives it with a ``StreamingBF16Provider`` (each block's matrices read from
@@ -22,6 +22,11 @@ run the forward pass uncompiled, and the bf16 side's copy of mflux's Qwen loop b
 sense as Klein's. ERNIE-Image is checked the same way (``--base`` holds its two-shard BF16 transformer for the bf16 side;
 both sides take mflux's step function uncompiled); its bf16 loop body is measurement glue too, so a drift fails as a
 false mismatch, not a false pass. ERNIE-Image-Turbo runs at guidance 1.0 only and takes no ``--negative-prompt``.
+Krea 2 Raw's bf16 side reads the native single file ``raw.safetensors`` at the base's root: its BF16 block matrices
+stream as the blocks run, and its FP32 extras and five non-block matrices are cast to BF16 as mflux casts them at load
+(``astype``, nearest even); nothing of the DF11 file is read there but its group shapes. Both Krea sides run the step
+function uncompiled; with guidance other than 1.0 each step is two batch-1 transformer calls (mflux's " " negative when
+none is given). Krea 2 Turbo (``turbo.safetensors``) is checked at guidance 1.0 only.
 Usage (from the repository root of a synced checkout, ``--group bench``):
     uv run python -m scripts.verify_image --orchestrate --model schnell --df11 DIR --base DIR --out DIR \
         [--prompt "..."] [--seed 42] [--steps 4] [--size 1024] [--guidance 3.5] [--negative-prompt "..."] [--eval-policy per-block]
@@ -180,6 +185,28 @@ def ernie_base_problem(model: str, base: Path) -> str | None:
     return _sharded_transformer_problem(e, base)
 
 
+# The native single-file transformer each Krea 2 base holds at its root.
+KREA2_NATIVE_FILE = {"krea-2-raw": "raw.safetensors", "krea-2": "turbo.safetensors"}
+
+
+def krea2_base_problem(model: str, base: Path) -> str | None:
+    """Why ``base`` cannot feed a Krea 2 bf16 side, or None (and None for every other family).
+
+    The bf16 side reads the model's own native transformer file at the base's root (``raw.safetensors`` for Raw,
+    ``turbo.safetensors`` for Turbo); it must be a regular file once links resolve. The df11 side never reads it.
+    """
+    e = entry(model)
+    if e.family != "krea2":
+        return None
+    native = KREA2_NATIVE_FILE[model]
+    if (base / native).is_file():
+        return None
+    return (
+        f"--base {base}: the bf16 side streams the transformer from {native} at the base's root (download "
+        f"{e.base_repo}'s {native} first)"
+    )
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse the command line: one side (``df11``, ``bf16`` or ``compare``), or ``--orchestrate``."""
     p = argparse.ArgumentParser(
@@ -204,12 +231,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="guidance (default per model, as mflux: FLUX.1 3.5; Z-Image unset: the model's own rule; "
         "FLUX.2 Klein 1.0, base models with CFG at 4; Qwen-Image 2.1 1.0, CFG above 1 with --negative-prompt; "
-        "ERNIE-Image 4.0, CFG above 1; ERNIE-Image-Turbo 1.0 only)",
+        "ERNIE-Image 4.0, CFG above 1; ERNIE-Image-Turbo 1.0 only; Krea 2 Raw 1.0, CFG at any other value, as "
+        "two calls per step; Krea 2 Turbo 1.0 only in this check)",
     )
     p.add_argument(
         "--negative-prompt",
         default=None,
-        help="the negative prompt (used by z-image, a base model, qwen-image-2.1 and ernie-image above guidance 1)",
+        help="the negative prompt (used by z-image, a base model, qwen-image-2.1 and ernie-image above guidance 1, "
+        "and by krea-2-raw at any guidance other than 1)",
     )
     p.add_argument("--eval-policy", choices=("per-block", "depth2"), default="per-block")
     p.add_argument(
@@ -232,6 +261,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         p.error(
             f"--guidance: {args.model} runs at guidance {e.fixed_guidance} only, as its mflux command does"
         )
+    # Krea 2 Turbo is distilled: its recipe is guidance 1.0 (mflux's default), so the check covers that path only.
+    if args.model == "krea-2" and args.guidance is not None and args.guidance != 1.0:
+        p.error("--guidance: krea-2 runs at guidance 1.0 only in this check (its distilled recipe)")
+    if args.model == "krea-2" and args.negative_prompt is not None:
+        p.error(
+            "--negative-prompt: krea-2 runs at guidance 1.0 only here; there is no negative branch"
+        )
     if entry(args.model).family == "flux2" and args.negative_prompt is not None:
         p.error(
             f"--negative-prompt: {args.model} takes none (mflux's FLUX.2 Klein encodes its own blank negative)"
@@ -242,7 +278,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # Only the runs that stream the BF16 transformer need it; the df11 side and compare never read it.
     if args.orchestrate or args.side == "bf16":
         base = Path(args.base).expanduser()
-        problem = qwen21_base_problem(args.model, base) or ernie_base_problem(args.model, base)
+        problem = (
+            qwen21_base_problem(args.model, base)
+            or ernie_base_problem(args.model, base)
+            or krea2_base_problem(args.model, base)
+        )
         if problem is not None:
             p.error(f"--model {args.model}: {problem}")
     if args.guidance is None:  # resolved before run_key, so a stored FLUX.1 side keeps its 3.5
@@ -1215,12 +1255,172 @@ def run_bf16_ernie(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, An
     }
 
 
+def run_df11_krea2(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, Any]:
+    """Generate through ``DFloatKrea2``, capture the final latents, and save the image, latents and embeddings.
+
+    The embeddings file holds the prompt's embeddings (``embeds``) and, when classifier-free guidance ran (two
+    batch-1 transformer calls per step), the negative prompt's (``neg_embeds``), as the model encoded them.
+
+    Raises:
+        VerifyImageError: The after-loop callback never ran (mflux's own loop never called it).
+    """
+    from mflux.models.krea2.latent_creator.krea2_latent_creator import Krea2LatentCreator
+
+    from mlx_dfloat.mflux.krea2.model import DFloatKrea2
+
+    out_dir = args.out / "df11"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    model = DFloatKrea2(
+        args.model, df11_path=args.df11, base_path=args.base, eval_policy=args.eval_policy
+    )
+    capture = _LatentCapture()
+    model.callbacks.register(capture)
+    image = model.generate_image(
+        args.seed,
+        args.prompt,
+        num_inference_steps=args.steps,
+        height=args.size,
+        width=args.size,
+        guidance=args.guidance,
+        negative_prompt=args.negative_prompt,
+    )
+    captured = capture.latents
+    if captured is None:
+        raise VerifyImageError("the after-loop callback never ran; no latents were captured")
+    mx.eval(captured)
+    image.save(str(out_dir / "image.png"), export_json_metadata=False, overwrite=True)
+    mx.save_safetensors(str(out_dir / "latents.safetensors"), {"latents": captured})
+    prompts = model.cfg_prompts(
+        args.prompt, negative_prompt=args.negative_prompt, guidance=args.guidance
+    )
+    embeds = {"embeds": model._embeds[prompts[0]][0]}
+    if len(prompts) == 2:
+        embeds["neg_embeds"] = model._embeds[prompts[1]][0]
+    mx.save_safetensors(str(out_dir / "embeds.safetensors"), embeds)
+    noise = Krea2LatentCreator.create_noise(args.seed, args.size, args.size)
+    degenerate = nondegenerate(captured, noise)
+    report = model.report()
+    return {
+        "exit_code": EXIT_OK if not degenerate else EXIT_ERROR,
+        "degenerate": degenerate,
+        "report": report,
+        "output_shape": list(captured.shape),
+        "output_dtype": str(captured.dtype),
+        "footprint_peak_bytes": max(watchdog.peak_footprint, phys_footprint()),
+        "mlx_peak_bytes_max_over_phases": max_phase_peak(report["peaks"]),
+    }
+
+
+def run_bf16_krea2(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, Any]:
+    """Stream the base's native file through the seam and mflux's Krea 2 loop body, then the VAE with the set absent.
+
+    The transformer is built with the DF11 file's extras and placeholders, then every extra and every non-block
+    matrix is replaced by the base's (FP32 cast to BF16 as mflux casts it), so this side reads nothing of the DF11
+    file but its group shapes; the 28 blocks stream from the base as they run. The step function is mflux's own
+    ``Krea2._predict``, taken uncompiled as on the df11 side, with the er_sde stepper at the run's seed.
+
+    Raises:
+        VerifyImageError: The df11 side's saved embeddings are not present yet.
+    """
+    import gc
+
+    from mflux.models.common.config.config import Config
+    from mflux.models.common.config.model_config import ModelConfig
+    from mflux.models.common.vae.vae_util import VAEUtil
+    from mflux.models.krea2.latent_creator.krea2_latent_creator import Krea2LatentCreator
+    from mflux.models.krea2.model.krea2_sampler import Krea2Sampler
+    from mflux.models.krea2.variants.txt2img.krea2 import Krea2
+    from mflux.utils.image_util import ImageUtil
+
+    from mlx_dfloat._safetensors import read_header
+    from mlx_dfloat.mflux._compile import uncompiled
+    from mlx_dfloat.mflux.krea2 import init as kinit
+    from mlx_dfloat.mflux.krea2 import transformer as ktf
+    from mlx_dfloat.mflux.krea2.names import krea2_name_map
+
+    out_dir = args.out / "bf16"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    embeds_path = args.out / "df11" / "embeds.safetensors"
+    if not embeds_path.exists():
+        raise VerifyImageError(f"{embeds_path}: run the df11 side first")
+
+    df11_root = Path(args.df11).expanduser()
+    base_root = Path(args.base).expanduser()
+    native = (base_root / KREA2_NATIVE_FILE[args.model]).resolve()
+    names = krea2_name_map()
+    ckpt = open_checkpoint(df11_root)
+    build = ktf.build_transformer(ckpt, model=args.model)
+    replaced = ktf.install_base_weights(build.transformer, ckpt, native, names, build.nonblock)
+    index = {name: (native, info) for name, info in read_header(native).items()}
+    provider = StreamingBF16Provider(
+        index, {n: ckpt.groups[n].matrix_names for n in build.shapes}, names
+    )
+    transformer = build.transformer
+    transformer.attach(provider, build.shapes, eval_policy=args.eval_policy, verify_in_call=True)
+
+    saved = mx.load(str(embeds_path))
+    embeds, neg_embeds = saved["embeds"], saved.get("neg_embeds")
+    scheduler = Krea2._resolve_scheduler(
+        None
+    )  # mflux's default for Krea 2, as the df11 side ran it
+    config = Config(
+        model_config=ModelConfig.from_name(model_name=args.model, base_model=None),
+        num_inference_steps=args.steps,
+        height=args.size,
+        width=args.size,
+        guidance=args.guidance,
+        scheduler=scheduler,
+    )
+    sigmas = config.scheduler.sigmas
+    # mflux krea2.py generate_image: float32 noise, the embeddings evaluated before the loop.
+    latents = Krea2LatentCreator.create_noise(args.seed, args.size, args.size)
+    mx.eval(latents, embeds)
+    if neg_embeds is not None:
+        mx.eval(neg_embeds)
+    stepper = Krea2Sampler.make_stepper(scheduler, sigmas, args.seed)
+    predict = uncompiled(Krea2._predict, transformer, embeds, neg_embeds, args.guidance)
+    for t in config.time_steps:
+        # mflux krea2.py's loop body: predict (two batch-1 calls when CFG runs), denoised, the stepper, eval.
+        v = predict(latents=latents, timestep=sigmas[t].reshape(1))
+        denoised = latents - sigmas[t] * v
+        latents = stepper.step(t, latents, v, denoised)
+        mx.eval(latents)
+        transformer.verify_step()
+
+    mx.save_safetensors(str(out_dir / "latents.safetensors"), {"latents": latents})
+
+    provider_reads = provider.reads
+    # The VAE decodes with the set absent, as the model's does at 1024² on a 32 GB Mac.
+    transformer.detach()
+    del predict, transformer, build, provider, index
+    gc.collect()
+    mx.clear_cache()
+    mx.set_cache_limit(0)
+    vae = kinit.load_vae(base_root)
+    decoded = VAEUtil.decode(vae=vae, latent=latents, tiling_config=None)
+    ImageUtil.to_pil(decoded).save(
+        str(out_dir / "image.png")
+    )  # ImageUtil.to_image's own conversion
+
+    return {
+        "exit_code": EXIT_OK,
+        "reads": provider_reads,
+        "replaced_from_base": len(replaced),
+        "calls_per_step": 1 if neg_embeds is None else 2,
+        "output_shape": list(latents.shape),
+        "output_dtype": str(latents.dtype),
+        "footprint_peak_bytes": max(watchdog.peak_footprint, phys_footprint()),
+        "mlx_peak_bytes_process": int(mx.get_peak_memory()),  # never reset on this side
+    }
+
+
 SIDE_RUNNERS: dict[str, tuple[Callable[..., dict[str, Any]], Callable[..., dict[str, Any]]]] = {
     "flux1": (run_df11, run_bf16),
     "zimage": (run_df11_zimage, run_bf16_zimage),
     "flux2": (run_df11_flux2, run_bf16_flux2),
     "qwen21": (run_df11_qwen21, run_bf16_qwen21),
     "ernie": (run_df11_ernie, run_bf16_ernie),
+    "krea2": (run_df11_krea2, run_bf16_krea2),
 }
 
 
