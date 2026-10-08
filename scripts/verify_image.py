@@ -1,6 +1,7 @@
 """Image identity: DFloat11 latents against the same seam streaming the BF16 weights, for every BF16 family.
 
-The ``df11`` side generates through ``DFloatFlux1``, ``DFloatZImage``, ``DFloatFlux2Klein`` or ``DFloatQwenImage21``
+The ``df11`` side generates through ``DFloatFlux1``, ``DFloatZImage``, ``DFloatFlux2Klein``, ``DFloatQwenImage21`` or
+``DFloatErnieImage``
 (the prompt encoded by its own encoders; the final latents captured by an after-loop callback and saved with the
 embeddings and the image). The ``bf16`` side builds the same seamed transformer with its extras read from the base's BF16
 transformer shards, drives it with a ``StreamingBF16Provider`` (each block's matrices read from
@@ -18,7 +19,9 @@ side runs mflux's own loop, so a drift between the two shows as a false mismatch
 For Qwen-Image 2.1, ``--base`` must hold the BF16 transformer (``transformer/``: its index and both shards) for the
 bf16 side and ``--orchestrate``; the df11 side needs only the text encoder, the VAE and the DF11 file. Both Qwen sides
 run the forward pass uncompiled, and the bf16 side's copy of mflux's Qwen loop body is measurement glue in the same
-sense as Klein's.
+sense as Klein's. ERNIE-Image is checked the same way (``--base`` holds its two-shard BF16 transformer for the bf16 side;
+both sides take mflux's step function uncompiled); its bf16 loop body is measurement glue too, so a drift fails as a
+false mismatch, not a false pass. ERNIE-Image-Turbo runs at guidance 1.0 only and takes no ``--negative-prompt``.
 Usage (from the repository root of a synced checkout, ``--group bench``):
     uv run python -m scripts.verify_image --orchestrate --model schnell --df11 DIR --base DIR --out DIR \
         [--prompt "..."] [--seed 42] [--steps 4] [--size 1024] [--guidance 3.5] [--negative-prompt "..."] [--eval-policy per-block]
@@ -53,7 +56,7 @@ try:
     from mlx_dfloat._memory_caps import install_memory_caps
     from mlx_dfloat.format import open_checkpoint
     from mlx_dfloat.integrate.providers import StreamingBF16Provider
-    from mlx_dfloat.mflux.families import MODELS, entry
+    from mlx_dfloat.mflux.families import MODELS, ModelEntry, entry
     from mlx_dfloat.mflux.flux1 import init as base_init
     from mlx_dfloat.mflux.flux1.names import flux_name_map
     from mlx_dfloat.mflux.flux1.transformer import (
@@ -124,16 +127,12 @@ def klein_base_problem(model: str, base: Path) -> str | None:
     return None
 
 
-def qwen21_base_problem(model: str, base: Path) -> str | None:
-    """Why ``base`` cannot feed a Qwen-Image 2.1 bf16 side, or None (and None for every other family).
+def _sharded_transformer_problem(e: ModelEntry, base: Path) -> str | None:
+    """Why ``base/transformer`` cannot feed a bf16 side that streams a sharded BF16 transformer, or None.
 
-    The bf16 side streams the BF16 transformer from ``base/transformer``: its ``*.safetensors.index.json`` and every
-    shard the index names must be there, each named by a plain file name (as the streaming reader requires). The df11
-    side never reads it.
+    Its ``*.safetensors.index.json`` and every shard the index names must be there, each named by a plain file name
+    (as the streaming reader requires).
     """
-    e = entry(model)
-    if e.family != "qwen21":
-        return None
     root = base / "transformer"
     need = (
         f"--base {base}: the bf16 side streams the BF16 transformer from transformer/ "
@@ -154,6 +153,31 @@ def qwen21_base_problem(model: str, base: Path) -> str | None:
     if not shards or missing:
         return f"{need}; the index names {len(shards)} shards, missing {missing}"
     return None
+
+
+def qwen21_base_problem(model: str, base: Path) -> str | None:
+    """Why ``base`` cannot feed a Qwen-Image 2.1 bf16 side, or None (and None for every other family).
+
+    The bf16 side streams the BF16 transformer from ``base/transformer``: its ``*.safetensors.index.json`` and every
+    shard the index names must be there, each named by a plain file name (as the streaming reader requires). The df11
+    side never reads it.
+    """
+    e = entry(model)
+    if e.family != "qwen21":
+        return None
+    return _sharded_transformer_problem(e, base)
+
+
+def ernie_base_problem(model: str, base: Path) -> str | None:
+    """Why ``base`` cannot feed an ERNIE-Image bf16 side, or None (and None for every other family).
+
+    The same check as Qwen-Image 2.1's: the bf16 side streams the two-shard BF16 transformer from ``base/transformer``;
+    the df11 side never reads it.
+    """
+    e = entry(model)
+    if e.family != "ernie":
+        return None
+    return _sharded_transformer_problem(e, base)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -179,12 +203,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=None,
         help="guidance (default per model, as mflux: FLUX.1 3.5; Z-Image unset: the model's own rule; "
-        "FLUX.2 Klein 1.0, base models with CFG at 4; Qwen-Image 2.1 1.0, CFG above 1 with --negative-prompt)",
+        "FLUX.2 Klein 1.0, base models with CFG at 4; Qwen-Image 2.1 1.0, CFG above 1 with --negative-prompt; "
+        "ERNIE-Image 4.0, CFG above 1; ERNIE-Image-Turbo 1.0 only)",
     )
     p.add_argument(
         "--negative-prompt",
         default=None,
-        help="the negative prompt (used by z-image, a base model, and qwen-image-2.1 above guidance 1)",
+        help="the negative prompt (used by z-image, a base model, qwen-image-2.1 and ernie-image above guidance 1)",
     )
     p.add_argument("--eval-policy", choices=("per-block", "depth2"), default="per-block")
     p.add_argument(
@@ -193,6 +218,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = p.parse_args(argv)
     if args.model in NO_BF16_ORIGINAL:
         p.error(f"--model {args.model}: {NO_BF16_ORIGINAL[args.model]}")
+    e = entry(args.model)
+    if e.family == "ernie" and e.fixed_guidance is not None and args.negative_prompt is not None:
+        p.error(
+            f"--negative-prompt: {args.model} runs at guidance 1.0 only; there is no negative branch"
+        )
+    if (
+        e.family == "ernie"
+        and e.fixed_guidance is not None
+        and args.guidance is not None
+        and args.guidance != e.fixed_guidance
+    ):
+        p.error(
+            f"--guidance: {args.model} runs at guidance {e.fixed_guidance} only, as its mflux command does"
+        )
     if entry(args.model).family == "flux2" and args.negative_prompt is not None:
         p.error(
             f"--negative-prompt: {args.model} takes none (mflux's FLUX.2 Klein encodes its own blank negative)"
@@ -202,7 +241,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         p.error(f"--model {args.model}: {problem}")
     # Only the runs that stream the BF16 transformer need it; the df11 side and compare never read it.
     if args.orchestrate or args.side == "bf16":
-        problem = qwen21_base_problem(args.model, Path(args.base).expanduser())
+        base = Path(args.base).expanduser()
+        problem = qwen21_base_problem(args.model, base) or ernie_base_problem(args.model, base)
         if problem is not None:
             p.error(f"--model {args.model}: {problem}")
     if args.guidance is None:  # resolved before run_key, so a stored FLUX.1 side keeps its 3.5
@@ -1020,11 +1060,167 @@ def run_bf16_qwen21(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, A
     }
 
 
+# --- the ERNIE-Image sides (mflux-touching; exercised by the identity run, not unit-tested here) ---------------
+
+
+def run_df11_ernie(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, Any]:
+    """Generate through ``DFloatErnieImage``, capture the final latents, and save the image, latents and embeddings.
+
+    The embeddings file holds mflux's text batch for the call (``text_bth`` and ``text_lens``): one prompt, or the
+    negative then the prompt when classifier-free guidance ran (one batch-2 call per step).
+
+    Raises:
+        VerifyImageError: The after-loop callback never ran (mflux's own loop never called it).
+    """
+    from mflux.models.ernie_image.latent_creator.ernie_latent_creator import ErnieLatentCreator
+
+    from mlx_dfloat.mflux.ernie.model import DFloatErnieImage
+
+    out_dir = args.out / "df11"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    model = DFloatErnieImage(
+        args.model, df11_path=args.df11, base_path=args.base, eval_policy=args.eval_policy
+    )
+    capture = _LatentCapture()
+    model.callbacks.register(capture)
+    image = model.generate_image(
+        args.seed,
+        args.prompt,
+        num_inference_steps=args.steps,
+        height=args.size,
+        width=args.size,
+        guidance=args.guidance,
+        negative_prompt=args.negative_prompt,
+    )
+    captured = capture.latents
+    if captured is None:
+        raise VerifyImageError("the after-loop callback never ran; no latents were captured")
+    mx.eval(captured)
+    image.save(str(out_dir / "image.png"), export_json_metadata=False, overwrite=True)
+    mx.save_safetensors(str(out_dir / "latents.safetensors"), {"latents": captured})
+    key = model._batch_key(
+        model.cfg_prompts(args.prompt, negative_prompt=args.negative_prompt, guidance=args.guidance)
+    )
+    text_bth, text_lens = model._batches[key]
+    mx.save_safetensors(
+        str(out_dir / "embeds.safetensors"), {"text_bth": text_bth, "text_lens": text_lens}
+    )
+    noise = ErnieLatentCreator.create_noise(args.seed, args.size, args.size)
+    degenerate = nondegenerate(captured, noise)
+    report = model.report()
+    return {
+        "exit_code": EXIT_OK if not degenerate else EXIT_ERROR,
+        "degenerate": degenerate,
+        "report": report,
+        "output_shape": list(captured.shape),
+        "output_dtype": str(captured.dtype),
+        "footprint_peak_bytes": max(watchdog.peak_footprint, phys_footprint()),
+        "mlx_peak_bytes_max_over_phases": max_phase_peak(report["peaks"]),
+    }
+
+
+def run_bf16_ernie(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, Any]:
+    """Stream the base's BF16 transformer shards through the seam and mflux's ERNIE-Image loop body, then the VAE.
+
+    The three non-block groups load from the base as plain weights; the blocks stream as they run. The step function
+    is mflux's own ``ErnieImage._predict``, taken uncompiled as on the df11 side.
+
+    Raises:
+        VerifyImageError: The df11 side's saved embeddings are not present yet.
+    """
+    from mflux.models.common.config.config import Config
+    from mflux.models.common.config.model_config import ModelConfig
+    from mflux.models.common.vae.tiling_config import TilingConfig
+    from mflux.models.ernie_image.latent_creator.ernie_latent_creator import ErnieLatentCreator
+    from mflux.models.ernie_image.variants.txt2img.ernie_image import ErnieImage
+    from mflux.utils.image_util import ImageUtil
+
+    from mlx_dfloat.mflux._compile import uncompiled
+    from mlx_dfloat.mflux.ernie import init as einit
+    from mlx_dfloat.mflux.ernie import transformer as etf
+    from mlx_dfloat.mflux.ernie.names import ernie_name_map
+
+    out_dir = args.out / "bf16"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    embeds_path = args.out / "df11" / "embeds.safetensors"
+    if not embeds_path.exists():
+        raise VerifyImageError(f"{embeds_path}: run the df11 side first")
+
+    df11_root = Path(args.df11).expanduser()
+    base_root = Path(args.base).expanduser()
+    ckpt = open_checkpoint(df11_root)
+    index = etf.base_transformer_files_index(base_root / "transformer")
+    model_config = ModelConfig.from_name(model_name=args.model, base_model=None)
+    build = etf.build_transformer(
+        ckpt,
+        transformer_overrides=model_config.transformer_overrides,
+        extras=etf.base_extras(index, ckpt),
+        nonblock_from_extras=True,
+    )
+    provider = StreamingBF16Provider(
+        index, {n: ckpt.groups[n].matrix_names for n in build.shapes}, ernie_name_map()
+    )
+    transformer = build.transformer
+    transformer.attach(provider, build.shapes, eval_policy=args.eval_policy, verify_in_call=True)
+
+    embeds = mx.load(str(embeds_path))
+    text_bth, text_lens = embeds["text_bth"], embeds["text_lens"]
+    config = Config(
+        model_config=model_config,
+        num_inference_steps=args.steps,
+        height=args.size,
+        width=args.size,
+        guidance=args.guidance,
+        scheduler="linear",
+    )
+    # mflux ernie_image.py: txt2img noise (ernie_latent_creator.py:11-17).
+    latents = ErnieLatentCreator.create_noise(args.seed, args.size, args.size)
+    mx.eval(latents, text_bth, text_lens)
+    predict = uncompiled(ErnieImage._predict, transformer, text_bth, text_lens, latents)
+
+    for t in config.time_steps:
+        # mflux ernie_image.py:90-102's step body: predict (one batch-2 call when CFG runs), step, eval.
+        sigma_t = config.scheduler.sigmas[t].reshape((1,))
+        noise = predict(
+            latents=latents,
+            sigma=sigma_t,
+            text_bth=text_bth,
+            text_lens=text_lens,
+            guidance=config.guidance,
+        )
+        latents = config.scheduler.step(noise=noise, timestep=t, latents=latents)
+        mx.eval(latents)
+        transformer.verify_step()
+
+    mx.save_safetensors(str(out_dir / "latents.safetensors"), {"latents": latents})
+
+    vae = einit.load_vae(base_root)
+    mx.clear_cache()
+    mx.set_cache_limit(0)  # the transformer-shaped buffers cannot serve the decoder
+    decoded = vae.decode_packed_latents(
+        latents, tiling_config=TilingConfig(vae_decode_tiles_per_dim=None)
+    )
+    ImageUtil.to_pil(decoded).save(
+        str(out_dir / "image.png")
+    )  # ImageUtil.to_image's own conversion
+
+    return {
+        "exit_code": EXIT_OK,
+        "reads": provider.reads,
+        "cfg_batch": int(text_bth.shape[0]),
+        "output_shape": list(latents.shape),
+        "output_dtype": str(latents.dtype),
+        "footprint_peak_bytes": max(watchdog.peak_footprint, phys_footprint()),
+        "mlx_peak_bytes_process": int(mx.get_peak_memory()),  # never reset on this side
+    }
+
+
 SIDE_RUNNERS: dict[str, tuple[Callable[..., dict[str, Any]], Callable[..., dict[str, Any]]]] = {
     "flux1": (run_df11, run_bf16),
     "zimage": (run_df11_zimage, run_bf16_zimage),
     "flux2": (run_df11_flux2, run_bf16_flux2),
     "qwen21": (run_df11_qwen21, run_bf16_qwen21),
+    "ernie": (run_df11_ernie, run_bf16_ernie),
 }
 
 

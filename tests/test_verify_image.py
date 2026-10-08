@@ -750,3 +750,130 @@ def test_qwen_embeds_hold_the_positive_pair_and_the_negative_one_when_cfg_ran():
     assert two["negative_prompt_embeds"] is neg[0]
     assert two["negative_prompt_mask"] is neg[1]
     assert two["prompt_embeds"] is pos[0]
+
+
+# --- ERNIE-Image ----------------------------------------------------------------------------------------------
+
+ERNIE = "ernie-image"
+ERNIE_TURBO = "ernie-image-turbo"
+
+
+def _parse_ernie(tmp_path, base, *extra, model=ERNIE, side=("--side", "df11")):
+    return vi.parse_args(
+        [
+            *side,
+            "--model",
+            model,
+            "--df11",
+            str(tmp_path),
+            "--base",
+            str(base),
+            "--out",
+            str(tmp_path / "out"),
+            *extra,
+        ]
+    )
+
+
+@pytest.mark.parametrize("model", [ERNIE, ERNIE_TURBO])
+def test_runner_for_dispatches_ernie_to_its_sides(model):
+    # Bug caught: ERNIE-Image routed to the FLUX.1 sides (a wrong-model identity verdict), or no ernie row (a KeyError
+    # after the df11 side already ran for minutes).
+    assert vi.runner_for(model, "df11") is vi.run_df11_ernie
+    assert vi.runner_for(model, "bf16") is vi.run_bf16_ernie
+
+
+@pytest.mark.parametrize("layout", ["no_dir", "empty_dir", "no_index"])
+def test_ernie_base_problem_names_the_missing_transformer(tmp_path, layout):
+    # Bug caught: the identity launched on a base without its BF16 transformer, failing after the df11 side's minutes.
+    base = tmp_path / "qbase"
+    base.mkdir()
+    if layout != "no_dir":
+        (base / "transformer").mkdir()
+    if layout == "no_index":
+        (base / "transformer" / "diffusion_pytorch_model-00001-of-00002.safetensors").write_bytes(
+            b"\0"
+        )
+    problem = vi.ernie_base_problem(ERNIE, base)
+    assert problem is not None
+    assert f"--base {base}: the bf16 side streams the BF16 transformer from transformer/" in problem
+    assert "download baidu/ERNIE-Image's transformer/* first" in problem
+
+
+def test_ernie_base_problem_is_none_for_an_index_with_its_shards(tmp_path):
+    # Bug caught: a complete transformer/ refused (the identity check could never run).
+    assert vi.ernie_base_problem(ERNIE, _qwen_base(tmp_path)) is None
+
+
+@pytest.mark.parametrize("shard", ["../outside.safetensors", "sub/inner.safetensors"])
+def test_ernie_base_problem_keeps_the_shard_name_check(tmp_path, shard):
+    # Bug caught: the extraction of the shared check losing the plain-file-name guard (an index naming a path outside
+    # transformer/ accepted, so the bf16 side streams another file's tensors).
+    base = _qwen_base(tmp_path)
+    target = base / "transformer" / shard
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"\0")
+    index = base / "transformer" / "diffusion_pytorch_model.safetensors.index.json"
+    index.write_text(json.dumps({"weight_map": {"a.weight": shard}}))
+    problem = vi.ernie_base_problem(ERNIE, base)
+    assert problem is not None
+    assert f"not a plain file name: {shard!r}" in problem
+
+
+def test_ernie_base_problem_is_none_for_the_other_families(tmp_path):
+    # Bug caught: the ERNIE check applied to other families' bases (Qwen keeps its own; FLUX.1 needs no transformer/).
+    assert vi.ernie_base_problem("schnell", tmp_path) is None
+    assert vi.ernie_base_problem("qwen-image-2.1", tmp_path) is None
+
+
+@pytest.mark.parametrize("side", [("--side", "bf16"), ("--orchestrate",)])
+def test_an_ernie_run_that_streams_the_bf16_side_is_refused_without_its_transformer(
+    tmp_path, capsys, side
+):
+    # Bug caught: the check not wired into parse_args for the runs that stream the BF16 transformer.
+    base = tmp_path / "qbase"
+    (base / "transformer").mkdir(parents=True)
+    with pytest.raises(SystemExit) as info:
+        _parse_ernie(tmp_path, base, side=side)
+    assert info.value.code == 2
+    assert "transformer/" in capsys.readouterr().err
+
+
+def test_ernie_turbo_negative_prompt_is_refused(tmp_path, capsys):
+    # Bug caught: a negative prompt accepted for Turbo (it runs at guidance 1.0 only: no negative branch), so the key
+    # would carry a setting that changes nothing, or the bf16 side would run CFG the df11 side never ran.
+    with pytest.raises(SystemExit) as info:
+        _parse_ernie(tmp_path, tmp_path, "--negative-prompt", "blurry", model=ERNIE_TURBO)
+    assert info.value.code == 2
+    assert "runs at guidance 1.0 only; there is no negative branch" in capsys.readouterr().err
+
+
+def test_ernie_negative_prompt_is_accepted_and_keyed_with_mfluxs_guidance(tmp_path, monkeypatch):
+    # Bug caught: --negative-prompt refused for the base (its CFG uses it), dropped from the key (a stored side reused
+    # after it changed) or from the children; or the guidance left None instead of mflux's 4.0
+    # (ernie_image_generate.py:22), which the bf16 side's Config would read as 0.0 (no CFG).
+    monkeypatch.setattr(vi, "source_hash", lambda: "src")
+    args = _parse_ernie(
+        tmp_path, _qwen_base(tmp_path), "--negative-prompt", "blurry", side=("--orchestrate",)
+    )
+    assert vi.run_key(args)["negative_prompt"] == "blurry"
+    assert args.guidance == 4.0
+    command = vi.child_command(args, "bf16")
+    assert command[command.index("--negative-prompt") + 1] == "blurry"
+    assert command[command.index("--guidance") + 1] == "4.0"
+
+
+@pytest.mark.parametrize("guidance", ["4", "1.5"])
+def test_ernie_turbo_guidance_other_than_1_is_refused(tmp_path, capsys, guidance):
+    # Bug caught (C2): an identity run of Turbo at a guidance its command refuses (mflux's turbo command errors on any
+    # but 1.0, ernie_image_turbo_generate.py:42-45), so the check would cover a path no user runs.
+    with pytest.raises(SystemExit) as info:
+        _parse_ernie(tmp_path, tmp_path, "--guidance", guidance, model=ERNIE_TURBO)
+    assert info.value.code == 2
+    assert "runs at guidance 1.0 only" in capsys.readouterr().err
+
+
+def test_ernie_turbo_guidance_1_is_accepted(tmp_path):
+    # Bug caught: the refusal firing on Turbo's own 1.0 (or on the default, which resolves to it).
+    assert _parse_ernie(tmp_path, tmp_path, "--guidance", "1", model=ERNIE_TURBO).guidance == 1.0
+    assert _parse_ernie(tmp_path, tmp_path, model=ERNIE_TURBO).guidance == 1.0
