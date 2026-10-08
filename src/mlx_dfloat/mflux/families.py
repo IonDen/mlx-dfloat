@@ -31,6 +31,12 @@ class ModelEntry:
     uses_negative_prompt: bool
     # A distilled model runs at this guidance only (the CLI refuses any other); None: any guidance.
     fixed_guidance: float | None = None
+    # Classifier-free guidance runs only with a negative prompt as well as a guidance above 1.0 (mflux's rule for
+    # Qwen-Image 2.1); the CLI warns when --guidance asks for it without --negative-prompt.
+    cfg_needs_negative: bool = False
+    # The commit the default base repository is pinned to (None: the default branch); a user's own base is taken as
+    # given.
+    base_revision: str | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -79,6 +85,18 @@ def _flux2_names() -> NameMap:
     return klein_name_map()
 
 
+def _qwen21_class() -> type:
+    from mlx_dfloat.mflux.qwen21.model import DFloatQwenImage21
+
+    return DFloatQwenImage21
+
+
+def _qwen21_names() -> NameMap:
+    from mlx_dfloat.mflux.qwen21.names import qwen21_name_map
+
+    return qwen21_name_map()
+
+
 FAMILIES: dict[str, FamilySpec] = {
     "flux1": FamilySpec(
         name="flux1",
@@ -100,6 +118,12 @@ FAMILIES: dict[str, FamilySpec] = {
         },
         load_model_class=_flux2_class,
         load_name_map=_flux2_names,
+    ),
+    "qwen21": FamilySpec(
+        name="qwen21",
+        refused_flags={},
+        load_model_class=_qwen21_class,
+        load_name_map=_qwen21_names,
     ),
 }
 
@@ -218,6 +242,25 @@ MODELS: dict[str, ModelEntry] = {
             "45a202a0bd19ec01ce8db2d5236890586cbac6a6",
             base=False,
         ),
+        # mflux 0.20.0: 40 steps (cli/defaults/defaults.py:52), guidance 1.0 (models/qwen21/cli/qwen21_generate.py:60),
+        # scheduler "linear" (cli/parser/parsers.py:180). A second transformer call per step runs only above guidance
+        # 1.0 with a non-empty negative prompt (models/qwen21/variants/txt2img/qwen_image_21.py:89).
+        ModelEntry(
+            name="qwen-image-2.1",
+            family="qwen21",
+            label="Qwen-Image-2.1",
+            df11_repo="mingyi456/Qwen-Image-2.1-DF11-ComfyUI",
+            df11_revision="1b22a3a1f96293f3b328d03abe22ab2e51cbd9cc",
+            base_repo="Qwen/Qwen-Image-2.1",
+            default_steps=40,
+            default_guidance=1.0,
+            default_scheduler="linear",
+            cfg_two_calls=True,
+            uses_negative_prompt=True,
+            cfg_needs_negative=True,
+            # The snapshot the identity check and the MEASURED row ran on.
+            base_revision="d26bb61231c349cf6b7896fa83353113880e1ba3",
+        ),
     )
 }
 
@@ -245,7 +288,8 @@ def DFloatModel(name: str, /, **kwargs: Any) -> Any:  # noqa: N802
     """A ready DFloat11 model for a registered name: the family's model class built with ``name`` and ``kwargs``.
 
     Imports mflux. ``DFloatModel("z-image-turbo")`` returns a ``DFloatZImage``; ``DFloatModel("schnell")`` a
-    ``DFloatFlux1``; ``DFloatModel("flux2-klein-4b")`` a ``DFloatFlux2Klein``.
+    ``DFloatFlux1``; ``DFloatModel("flux2-klein-4b")`` a ``DFloatFlux2Klein``; ``DFloatModel("qwen-image-2.1")`` a
+    ``DFloatQwenImage21``.
 
     Args:
         name: A registered model name, such as ``"schnell"`` or ``"z-image-turbo"``.

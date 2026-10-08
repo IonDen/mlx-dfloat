@@ -12,7 +12,7 @@ def test_importing_the_registry_does_not_import_mflux():
     # Bug caught: a family module imported at registry import time (the CLI's --help would need mflux).
     code = "import sys, mlx_dfloat.mflux.families as f; assert 'mflux' not in sys.modules; print(len(f.MODELS))"
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
-    assert out.stdout.strip() == "9"
+    assert out.stdout.strip() == "10"
 
 
 def test_resolving_an_adapter_module_and_importing_the_package_loads_no_mlx():
@@ -22,6 +22,18 @@ def test_resolving_an_adapter_module_and_importing_the_package_loads_no_mlx():
     code = (
         "import importlib.util, sys; importlib.util.find_spec('mlx_dfloat.mflux.flux1.model'); "
         "import mlx_dfloat.mflux; print('mlx.core' in sys.modules)"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "False"
+
+
+def test_resolving_the_qwen21_coverage_specs_loads_no_mlx():
+    # Bug caught: an eager import in mlx_dfloat/mflux/qwen21/__init__.py. The mflux lane's
+    # --cov=mlx_dfloat.mflux.qwen21.model / .init resolve those specs (importing the qwen21 package) when coverage
+    # starts; MLX loaded there registers its native types twice and the lane aborts (exit 134), as it did for FLUX.1.
+    code = (
+        "import importlib.util, sys; importlib.util.find_spec('mlx_dfloat.mflux.qwen21.model'); "
+        "importlib.util.find_spec('mlx_dfloat.mflux.qwen21.init'); print('mlx.core' in sys.modules)"
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "False"
@@ -71,6 +83,10 @@ def test_an_unknown_name_is_refused_with_the_known_ones():
         ("flux2-klein-4b", "flux2", 4, 1.0, "flow_match_euler_discrete", False, False),
         ("flux2-klein-base-9b", "flux2", 50, 1.0, "flow_match_euler_discrete", True, False),
         ("flux2-klein-9b", "flux2", 4, 1.0, "flow_match_euler_discrete", False, False),
+        # mflux 0.20.0 cli/defaults/defaults.py:52 (40 steps); qwen21_generate.py:60 (guidance 1.0);
+        # cli/parser/parsers.py:180 (scheduler "linear"); qwen_image_21.py:89 (a second call per step above 1.0 with
+        # a negative prompt, which mflux takes from --negative-prompt, parsers.py:177).
+        ("qwen-image-2.1", "qwen21", 40, 1.0, "linear", True, True),
     ],
 )
 def test_the_entries_carry_the_mflux_defaults(
@@ -164,6 +180,37 @@ def test_only_the_distilled_klein_models_fix_their_guidance():
         "flux2-klein-4b": 1.0,
         "flux2-klein-base-9b": None,
         "flux2-klein-9b": 1.0,
+        "qwen-image-2.1": None,
+    }
+
+
+def test_only_qwen_image_needs_a_negative_prompt_for_cfg():
+    # Bug caught: the "no CFG without --negative-prompt" warning shown for Z-Image (whose base model does run CFG with
+    # an empty negative) or missing for Qwen-Image 2.1 (mflux runs CFG only with both, qwen_image_21.py:89).
+    assert {n for n, e in families.MODELS.items() if e.cfg_needs_negative} == {"qwen-image-2.1"}
+
+
+def test_the_qwen_entry_names_its_published_repos_and_pinned_checkpoint():
+    # Bug caught: the default checkpoint (one person's Hub account, a ComfyUI single file) following whatever lands on
+    # main instead of the revision whose header and bytes were verified, or a swapped repository.
+    e = families.entry("qwen-image-2.1")
+    assert (e.label, e.df11_repo, e.df11_revision, e.base_repo) == (
+        "Qwen-Image-2.1",
+        "mingyi456/Qwen-Image-2.1-DF11-ComfyUI",
+        "1b22a3a1f96293f3b328d03abe22ab2e51cbd9cc",
+        "Qwen/Qwen-Image-2.1",
+    )
+
+
+def test_the_qwen_base_is_pinned_to_the_revision_the_measured_runs_used_and_no_other_base_is():
+    # Bug caught: the Qwen base (text encoder, VAE, tokenizer) following whatever lands on main instead of the snapshot
+    # the identity check and the MEASURED row ran on (d26bb61, bench/results/tiers/qwen-image-2.1-1024.json), or a pin
+    # set on a family whose base no recorded run names.
+    assert (
+        families.entry("qwen-image-2.1").base_revision == "d26bb61231c349cf6b7896fa83353113880e1ba3"
+    )
+    assert {n for n, e in families.MODELS.items() if e.base_revision is not None} == {
+        "qwen-image-2.1"
     }
 
 
@@ -172,6 +219,7 @@ def test_family_of_returns_the_spec_of_the_models_family():
     assert families.family_of("schnell") is families.FAMILIES["flux1"]
     assert families.family_of("z-image") is families.FAMILIES["zimage"]
     assert families.family_of("flux2-klein-9b") is families.FAMILIES["flux2"]
+    assert families.family_of("qwen-image-2.1") is families.FAMILIES["qwen21"]
 
 
 @pytest.mark.mflux
@@ -215,6 +263,16 @@ def test_the_flux2_model_table_is_derived_from_the_registry():
 
 
 @pytest.mark.mflux
+def test_the_qwen21_model_table_is_derived_from_the_registry():
+    # Bug caught: the Qwen class's own MODELS drifting from the registry the CLI resolves through.
+    from mlx_dfloat.mflux.qwen21.model import MODELS as QWEN
+
+    assert QWEN == {
+        "qwen-image-2.1": ("mingyi456/Qwen-Image-2.1-DF11-ComfyUI", "Qwen/Qwen-Image-2.1")
+    }
+
+
+@pytest.mark.mflux
 def test_the_family_loaders_return_the_real_classes_and_maps():
     # Bug caught: a loader lambda pointing at the other family's class or map.
     from mlx_dfloat.mflux.flux1.model import DFloatFlux1
@@ -234,3 +292,8 @@ def test_the_family_loaders_return_the_real_classes_and_maps():
         "transformer_blocks",
         "single_transformer_blocks",
     )
+    from mlx_dfloat.mflux.qwen21.model import DFloatQwenImage21
+
+    assert families.FAMILIES["qwen21"].load_model_class() is DFloatQwenImage21
+    # mflux 0.20.0 Qwen21Transformer._forward (qwen21_transformer.py:96-100): one block list.
+    assert families.FAMILIES["qwen21"].load_name_map().kinds == ("transformer_blocks",)

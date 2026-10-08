@@ -811,6 +811,7 @@ def test_finish_writes_the_report_with_the_home_directory_as_a_tilde(tmp_path):
         ("flux2-klein-4b", 4),
         ("flux2-klein-base-9b", 50),
         ("flux2-klein-9b", 4),
+        ("qwen-image-2.1", 40),
     ],
 )
 def test_default_steps_follow_mflux_per_model(model, steps):
@@ -831,6 +832,7 @@ def test_the_model_choices_are_the_registry_names():
         "flux2-klein-4b",
         "flux2-klein-base-9b",
         "flux2-klein-9b",
+        "qwen-image-2.1",
     ):
         assert gen.build_parser().parse_args(["--model", name, "--prompt", "p"]).model == name
     with pytest.raises(SystemExit):
@@ -1173,3 +1175,99 @@ def test_the_report_records_the_wall_clock_of_the_whole_run_including_the_build(
     assert code == 0
     assert order == ["clock", "build", "clock"]
     assert json.loads((tmp_path / "r.json").read_text())["elapsed_seconds"] == 72.5
+
+
+# --- Qwen-Image 2.1 ---------------------------------------------------------------------------------------------
+
+
+def test_qwen_gets_mfluxs_defaults(tmp_path, capsys):
+    # Bug caught: Qwen-Image 2.1 on FLUX's 3.5 guidance (a guidance mflux never passes; with a negative prompt it would
+    # run CFG at 3.5) or on Z-Image's None. mflux 0.20.0: 40 steps (cli/defaults/defaults.py:52), guidance 1.0
+    # (qwen21_generate.py:60), scheduler "linear" (cli/parser/parsers.py:180).
+    call = _generate_kwargs("qwen-image-2.1", tmp_path)
+    assert (call["num_inference_steps"], call["guidance"], call["scheduler"]) == (40, 1.0, "linear")
+    assert call["negative_prompt"] is None
+    assert "warning" not in capsys.readouterr().err
+
+
+def test_qwen_passes_the_negative_prompt_through(tmp_path, capsys):
+    # Bug caught: the negative prompt dropped for Qwen-Image 2.1 (CFG never runs: mflux needs both a guidance above
+    # 1.0 and a negative prompt, qwen_image_21.py:89), or the "ignored" warning printed when it is used.
+    call = _generate_kwargs(
+        "qwen-image-2.1", tmp_path, "--guidance", "4", "--negative-prompt", "blurry"
+    )
+    assert (call["guidance"], call["negative_prompt"]) == (4.0, "blurry")
+    assert "warning" not in capsys.readouterr().err
+
+
+def test_qwen_guidance_without_a_negative_prompt_warns(tmp_path, capsys):
+    # Bug caught (Review Focus 4): a Qwen user's --guidance 4 silently running no CFG (mflux's rule: guidance above
+    # 1.0 AND a negative prompt, qwen_image_21.py:89), or the call changed instead of warned (the call still runs at
+    # 4.0 without a negative prompt, as mflux would).
+    call = _generate_kwargs("qwen-image-2.1", tmp_path, "--guidance", "4")
+    assert (call["guidance"], call["negative_prompt"]) == (4.0, None)
+    err = capsys.readouterr().err
+    assert (
+        "warning: --guidance above 1.0 runs no classifier-free guidance for Qwen-Image-2.1 without "
+        "--negative-prompt (as mflux); pass --negative-prompt to enable it"
+    ) in err
+
+
+@pytest.mark.parametrize("guidance", ["1.0", "1"])
+def test_qwen_guidance_at_one_without_a_negative_prompt_does_not_warn(guidance, tmp_path, capsys):
+    # Bug caught: the CFG warning on `>= 1.0` (guidance 1.0 is mflux's default and runs no CFG by design).
+    _generate_kwargs("qwen-image-2.1", tmp_path, "--guidance", guidance)
+    assert "warning" not in capsys.readouterr().err
+
+
+def test_the_cfg_warning_is_qwen_only(tmp_path, capsys):
+    # Bug caught: the warning shown for a Z-Image base (mflux runs its CFG with an empty negative, so --guidance 4
+    # alone does run it) or a base Klein (mflux's blank negative).
+    _generate_kwargs("z-image", tmp_path, "--guidance", "4")
+    _generate_kwargs("flux2-klein-base-4b", tmp_path, "--guidance", "4")
+    assert "classifier-free guidance" not in capsys.readouterr().err
+
+
+def test_qwen_negative_prompt_at_default_guidance_warns_with_its_default(tmp_path, capsys):
+    # Bug caught: the "no effect" warning quoting Z-Image's default 0 for Qwen-Image 2.1, whose default is 1.0
+    # (qwen21_generate.py:60).
+    _generate_kwargs("qwen-image-2.1", tmp_path, "--negative-prompt", "blurry")
+    err = capsys.readouterr().err
+    assert "warning: --negative-prompt has no effect" in err
+    assert "(the default is 1.0)" in err
+    assert "(the default is 0)" not in err
+
+
+def test_zimage_negative_prompt_warning_text_is_unchanged(tmp_path, capsys):
+    # Bug caught: the Z-Image warning changed by the per-model default (its default is None, mflux's own rule: 0).
+    _generate_kwargs("z-image", tmp_path, "--negative-prompt", "blurry")
+    assert (
+        "warning: --negative-prompt has no effect: classifier-free guidance runs only above "
+        "guidance 1.0 (the default is 0). Pass --guidance above 1.0 to enable it."
+    ) in capsys.readouterr().err
+
+
+def test_qwen_takes_a_scheduler(tmp_path):
+    # Bug caught: Klein's scheduler refusal applied to Qwen-Image 2.1 (mflux's Qwen command takes --scheduler,
+    # cli/parser/parsers.py:180).
+    assert (
+        _generate_kwargs("qwen-image-2.1", tmp_path, "--scheduler", "linear")["scheduler"]
+        == "linear"
+    )
+
+
+@pytest.mark.parametrize(
+    "flag", [["--quantize", "8"], ["--lora-paths", "a"], ["--image-path", "x.png"], ["-q", "4"]]
+)
+def test_qwen_refuses_the_common_flags_before_anything_loads(flag, tmp_path, capsys):
+    # Bug caught: a new family whose refusal list replaced the common one (quantize or LoRA reaching
+    # DFloatQwenImage21, which refuses them only after the caps and the watchdog).
+    log = []
+    code, watchdogs = _run(
+        ["--model", "qwen-image-2.1", "--prompt", "p", "--output", str(tmp_path / "o.png"), *flag],
+        log,
+        tmp_path,
+        factory=lambda **kw: pytest.fail("built"),
+    )
+    assert (code, watchdogs, log) == (2, [], [])
+    assert flag[0] in capsys.readouterr().err
