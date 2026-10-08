@@ -1,0 +1,30 @@
+{
+ "reason": "memory",
+ "footprint": 15715739800,
+ "peak_footprint": 15715739800,
+ "ceiling": 15569256448,
+ "elapsed": 28.4559139169869,
+ "budget": 3600.0,
+ "rss": 8015151104,
+ "mlx_active": 14145644516,
+ "mlx_cache": 1161193397,
+ "verdict_memory": 15715739800,
+ "verdict_counter": "footprint",
+ "peak_watched": 15715739800,
+ "peak_mlx": 15306837913,
+ "context": {
+  "model": "flux2-klein-base-9b",
+  "height": 1024,
+  "width": 1024,
+  "seed": 42,
+  "steps": 50,
+  "tier_gb": 24,
+  "label": "CAPPED",
+  "limits": {
+   "memory": 17179869184,
+   "cache": 16320875724,
+   "wired": 15032385536
+  },
+  "phase": "denoise"
+ }
+}

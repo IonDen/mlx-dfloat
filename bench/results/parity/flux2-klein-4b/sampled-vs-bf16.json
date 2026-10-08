@@ -1,0 +1,245 @@
+{
+ "df11_repo": "mingyi456/FLUX.2-klein-4B-DF11",
+ "df11_revision": "d29a2c249ff0afeb678da101e707bd134596c96f",
+ "bf16_repo": "black-forest-labs/FLUX.2-klein-4B",
+ "bf16_revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+ "mode": "parity",
+ "control": "bf16",
+ "exit_code": 0,
+ "compared": 29,
+ "mismatched": 0,
+ "memory_caps_gb": [
+  20,
+  22
+ ],
+ "groups": [
+  {
+   "group": "context_embedder",
+   "matrices": [
+    {
+     "name": "context_embedder.weight",
+     "n": 23592960,
+     "equal": true,
+     "original_dtype": "BF16"
+    }
+   ],
+   "max_code_length": 25,
+   "n_blocks": 1699,
+   "file": "model.safetensors",
+   "status": "equal"
+  },
+  {
+   "group": "transformer_blocks.4",
+   "matrices": [
+    {
+     "name": "transformer_blocks.4.attn.to_q.weight",
+     "n": 9437184,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.4.attn.to_k.weight",
+     "n": 9437184,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.4.attn.to_v.weight",
+     "n": 9437184,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.4.attn.to_out.0.weight",
+     "n": 9437184,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.4.attn.add_q_proj.weight",
+     "n": 9437184,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.4.attn.add_k_proj.weight",
+     "n": 9437184,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.4.attn.add_v_proj.weight",
+     "n": 9437184,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.4.attn.to_add_out.weight",
+     "n": 9437184,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.4.ff.linear_in.weight",
+     "n": 56623104,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.4.ff.linear_out.weight",
+     "n": 28311552,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.4.ff_context.linear_in.weight",
+     "n": 56623104,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.4.ff_context.linear_out.weight",
+     "n": 28311552,
+     "equal": true,
+     "original_dtype": "BF16"
+    }
+   ],
+   "max_code_length": 25,
+   "n_blocks": 19502,
+   "file": "model.safetensors",
+   "status": "equal"
+  },
+  {
+   "group": "double_stream_modulation_txt.linear",
+   "matrices": [
+    {
+     "name": "double_stream_modulation_txt.linear.weight",
+     "n": 56623104,
+     "equal": true,
+     "original_dtype": "BF16"
+    }
+   ],
+   "max_code_length": 27,
+   "n_blocks": 4480,
+   "file": "model.safetensors",
+   "status": "equal"
+  },
+  {
+   "group": "transformer_blocks.0",
+   "matrices": [
+    {
+     "name": "transformer_blocks.0.attn.to_q.weight",
+     "n": 9437184,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.0.attn.to_k.weight",
+     "n": 9437184,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.0.attn.to_v.weight",
+     "n": 9437184,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.0.attn.to_out.0.weight",
+     "n": 9437184,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.0.attn.add_q_proj.weight",
+     "n": 9437184,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.0.attn.add_k_proj.weight",
+     "n": 9437184,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.0.attn.add_v_proj.weight",
+     "n": 9437184,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.0.attn.to_add_out.weight",
+     "n": 9437184,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.0.ff.linear_in.weight",
+     "n": 56623104,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.0.ff.linear_out.weight",
+     "n": 28311552,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.0.ff_context.linear_in.weight",
+     "n": 56623104,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "transformer_blocks.0.ff_context.linear_out.weight",
+     "n": 28311552,
+     "equal": true,
+     "original_dtype": "BF16"
+    }
+   ],
+   "max_code_length": 26,
+   "n_blocks": 19569,
+   "file": "model.safetensors",
+   "status": "equal"
+  },
+  {
+   "group": "single_transformer_blocks.0",
+   "matrices": [
+    {
+     "name": "single_transformer_blocks.0.attn.to_qkv_mlp_proj.weight",
+     "n": 84934656,
+     "equal": true,
+     "original_dtype": "BF16"
+    },
+    {
+     "name": "single_transformer_blocks.0.attn.to_out.weight",
+     "n": 37748736,
+     "equal": true,
+     "original_dtype": "BF16"
+    }
+   ],
+   "max_code_length": 26,
+   "n_blocks": 9840,
+   "file": "model.safetensors",
+   "status": "equal"
+  },
+  {
+   "group": "norm_out.linear",
+   "matrices": [
+    {
+     "name": "norm_out.linear.weight",
+     "n": 18874368,
+     "equal": true,
+     "original_dtype": "BF16"
+    }
+   ],
+   "max_code_length": 24,
+   "n_blocks": 1896,
+   "file": "model.safetensors",
+   "status": "equal"
+  }
+ ]
+}
