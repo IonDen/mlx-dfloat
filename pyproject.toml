@@ -176,6 +176,8 @@ omit = [
   "src/mlx_dfloat/mflux/flux2/model.py",
   # the same for Qwen-Image 2.1's model class: every test is @pytest.mark.mflux, gated in the integration lane.
   "src/mlx_dfloat/mflux/qwen21/model.py",
+  # the same for ERNIE-Image's model class: every test is @pytest.mark.mflux, gated in the integration lane.
+  "src/mlx_dfloat/mflux/ernie/model.py",
 ]
 
 [tool.coverage.report]
