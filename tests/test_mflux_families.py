@@ -12,7 +12,7 @@ def test_importing_the_registry_does_not_import_mflux():
     # Bug caught: a family module imported at registry import time (the CLI's --help would need mflux).
     code = "import sys, mlx_dfloat.mflux.families as f; assert 'mflux' not in sys.modules; print(len(f.MODELS))"
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
-    assert out.stdout.strip() == "12"
+    assert out.stdout.strip() == "14"
 
 
 def test_resolving_an_adapter_module_and_importing_the_package_loads_no_mlx():
@@ -47,6 +47,19 @@ def test_resolving_the_qwen21_coverage_specs_loads_no_mlx():
     code = (
         "import importlib.util, sys; importlib.util.find_spec('mlx_dfloat.mflux.qwen21.model'); "
         "importlib.util.find_spec('mlx_dfloat.mflux.qwen21.init'); print('mlx.core' in sys.modules)"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "False"
+
+
+def test_resolving_the_krea2_coverage_specs_loads_no_mlx():
+    # Bug caught: an eager import in mlx_dfloat/mflux/krea2/__init__.py. The mflux lane's
+    # --cov=mlx_dfloat.mflux.krea2.model / .init / .transformer resolve those specs (importing the krea2 package) when
+    # coverage starts; MLX loaded there registers its native types twice and the lane aborts (exit 134).
+    code = (
+        "import importlib.util, sys; "
+        "[importlib.util.find_spec(f'mlx_dfloat.mflux.krea2.{m}') for m in ('model', 'init', 'transformer')]; "
+        "import mlx_dfloat.mflux; print('mlx.core' in sys.modules)"
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "False"
@@ -203,6 +216,9 @@ def test_only_the_distilled_klein_models_fix_their_guidance():
         # mflux 0.20.0 ernie_image_turbo_generate.py:42-45: any guidance but 1.0 is an error for Turbo.
         "ernie-image-turbo": 1.0,
         "ernie-image": None,
+        # mflux 0.20.0: Krea 2 Turbo and Raw take any guidance (krea2.py:58; CFG for any value other than 1.0).
+        "krea-2": None,
+        "krea-2-raw": None,
     }
 
 
@@ -235,6 +251,9 @@ def test_pinned_bases_are_the_snapshots_the_recorded_runs_used_and_no_other_base
         "qwen-image-2.1": "d26bb61231c349cf6b7896fa83353113880e1ba3",
         "ernie-image": "5346b31d68c9c23758ba56ef8be5e9dc174c7f99",
         "ernie-image-turbo": "bc68c81e2a1730a394d5fc9fae70713dee940140",
+        # Krea 2: the gated base snapshots the range-read parity reads and every Krea run uses (2026-10-08).
+        "krea-2": "98e0fe118d17c9e3547fbb2e25acdbae2cadf7c7",
+        "krea-2-raw": "6b0ece7fffb640c5e3bcbe0a7f10f66b8e60a603",
     }
 
 
@@ -360,4 +379,76 @@ def test_the_ernie_family_loads_its_class_and_one_kind_map():
     assert ERNIE == {
         "ernie-image": ("mingyi456/ERNIE-Image-DF11", "baidu/ERNIE-Image"),
         "ernie-image-turbo": ("mingyi456/ERNIE-Image-Turbo-DF11", "baidu/ERNIE-Image-Turbo"),
+    }
+
+
+# --- Krea 2 ----------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "label", "steps", "df11", "revision", "base", "base_revision"),
+    [
+        # mflux 0.20.0: 8 steps (cli/defaults/defaults.py:47), guidance 1.0 (krea2_generate.py:17; krea2.py:58).
+        (
+            "krea-2",
+            "Krea 2 Turbo",
+            8,
+            "mingyi456/Krea-2-Turbo-DF11-ComfyUI",
+            "978da5fb7647bd222d33125993abd8fdc2840cfc",
+            "krea/Krea-2-Turbo",
+            "98e0fe118d17c9e3547fbb2e25acdbae2cadf7c7",
+        ),
+        # mflux's Krea command refuses krea-2-raw (krea2_generate.py:46-49): the step table's fallback 25
+        # (defaults.py:19,111-118) and generate_image's guidance 1.0 (krea2.py:58) are its only defaults.
+        (
+            "krea-2-raw",
+            "Krea 2 Raw",
+            25,
+            "mingyi456/Krea-2-Raw-DF11-ComfyUI",
+            "8320616b25ac9340a830a7fb21f1b0237e160e66",
+            "krea/Krea-2-Raw",
+            "6b0ece7fffb640c5e3bcbe0a7f10f66b8e60a603",
+        ),
+    ],
+)
+def test_the_krea_entries_carry_mfluxs_defaults_and_their_pins(
+    name, label, steps, df11, revision, base, base_revision
+):
+    # Bug caught: Raw carrying the model card's 52 / 3.5 (a CFG run nobody asked for, about 4x the time) or Turbo's 8
+    # steps, a pin or repository swapped between the two models, or the CFG rule copied as `> 1.0`.
+    e = families.entry(name)
+    assert (e.family, e.label, e.df11_repo, e.df11_revision, e.base_repo, e.base_revision) == (
+        "krea2",
+        label,
+        df11,
+        revision,
+        base,
+        base_revision,
+    )
+    assert (e.default_steps, e.default_guidance, e.default_scheduler) == (steps, 1.0, "er_sde")
+    assert (e.cfg_two_calls, e.uses_negative_prompt, e.cfg_needs_negative) == (True, True, False)
+    assert (e.cfg_unless_guidance_one, e.schedulers) == (True, ("er_sde", "euler", "linear"))
+    assert e.fixed_guidance is None
+
+
+def test_new_fields_default_off_for_every_other_family():
+    # Bug caught: another family's warnings or scheduler handling changed by the two Krea fields.
+    others = [e for e in families.MODELS.values() if e.family != "krea2"]
+    assert len(others) == 12
+    assert all(e.cfg_unless_guidance_one is False for e in others)
+    assert all(e.schedulers is None for e in others)
+
+
+@pytest.mark.mflux
+def test_the_krea2_family_loads_its_class_and_one_block_kind():
+    # Bug caught: the family's loaders pointing at another family's class or map.
+    from mlx_dfloat.mflux.krea2.model import MODELS as KREA
+    from mlx_dfloat.mflux.krea2.model import DFloatKrea2
+
+    assert families.FAMILIES["krea2"].load_model_class() is DFloatKrea2
+    # mflux 0.20.0 Krea2Transformer.__call__ (transformer.py:89-92): one block list.
+    assert families.FAMILIES["krea2"].load_name_map().kinds == ("blocks",)
+    assert KREA == {
+        "krea-2": ("mingyi456/Krea-2-Turbo-DF11-ComfyUI", "krea/Krea-2-Turbo"),
+        "krea-2-raw": ("mingyi456/Krea-2-Raw-DF11-ComfyUI", "krea/Krea-2-Raw"),
     }

@@ -21,7 +21,7 @@ from mlx_dfloat._watchdog import Watchdog, default_ceiling, phys_footprint
 from mlx_dfloat.bench import capped
 from mlx_dfloat.bench.capped import TierLimits, host_tier_gb, limits_record, tier_limits
 from mlx_dfloat.errors import DFloatError
-from mlx_dfloat.mflux.families import FAMILIES, MODELS, entry, family_of
+from mlx_dfloat.mflux.families import FAMILIES, MODELS, ModelEntry, entry, family_of
 
 EXIT_OK, EXIT_ERROR = 0, 2
 FOOTPRINT_PEAK_LABEL = "OS phys_footprint, sampled every 0.05 s by the watchdog"
@@ -119,7 +119,8 @@ def _add_arguments(p: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         help="denoise steps (default per model, as mflux: schnell 4, dev 25, z-image 50, z-image-turbo 9, "
-        "FLUX.2 Klein base 50, distilled 4, qwen-image-2.1 40, ernie-image 50, ernie-image-turbo 8)",
+        "FLUX.2 Klein base 50, distilled 4, qwen-image-2.1 40, ernie-image 50, ernie-image-turbo 8, "
+        "krea-2-raw 25, krea-2 8)",
     )
     p.add_argument("--height", type=int, default=1024)
     p.add_argument("--width", type=int, default=1024)
@@ -131,19 +132,22 @@ def _add_arguments(p: argparse.ArgumentParser) -> None:
         "z-image 0, its model card suggests about 4; FLUX.2 Klein 1.0, where the base models take another "
         "value such as 4 and the distilled ones refuse it; Qwen-Image 2.1 1.0, where classifier-free guidance "
         "needs a value above 1 and --negative-prompt; ERNIE-Image 4.0 (classifier-free guidance above 1, with or "
-        "without --negative-prompt); ERNIE-Image-Turbo 1.0 only)",
+        "without --negative-prompt); ERNIE-Image-Turbo 1.0 only; Krea 2 Raw and Turbo 1.0 (Krea 2 Raw's model card "
+        "uses --steps 52 --guidance 3.5); Krea 2 runs classifier-free guidance, two transformer calls per step, for "
+        "any value other than 1.0)",
     )
     p.add_argument(
         "--scheduler",
         default=None,
         help="scheduler (default per model: FLUX.1, Qwen-Image 2.1 and ERNIE-Image linear; FLUX.2 Klein always runs "
-        "flow_match_euler_discrete and refuses the flag)",
+        "flow_match_euler_discrete and refuses the flag; Krea 2: er_sde (default), euler, or linear, which mflux "
+        "runs as er_sde)",
     )
     p.add_argument(
         "--negative-prompt",
         default=None,
-        help="used by z-image, qwen-image-2.1 and ernie-image with --guidance above 1; accepted and ignored for the "
-        "other models, as mflux does",
+        help="used by z-image, qwen-image-2.1 and ernie-image with --guidance above 1, and by krea-2 and krea-2-raw "
+        "with any --guidance other than 1; accepted and ignored for the other models, as mflux does",
     )
     p.add_argument(
         "--output",
@@ -284,18 +288,56 @@ def ceiling_for(
     return (default_ceiling_bytes if limits.is_host else limits.ceiling_bytes), limits, limits.label
 
 
+# The families whose tokenizer gives an empty prompt no tokens at all, by the name the refusal uses.
+_NO_TOKEN_FAMILIES = {"ernie": "ERNIE-Image", "krea2": "Krea 2"}
+
+
 def empty_prompt_refusal(args: argparse.Namespace) -> str | None:
     """Why an empty or blank ``--prompt`` is refused for this model, or None.
 
-    ERNIE-Image refuses an empty or blank prompt as a user error (its tokenizer gives an empty prompt no tokens at all,
-    not even a start token); the other families' mflux pipelines encode an empty prompt as it is.
+    ERNIE-Image and Krea 2 refuse an empty or blank prompt as a user error (their tokenizers give an empty prompt no
+    tokens at all, not even a start token); the other families' mflux pipelines encode an empty prompt as it is.
     """
-    if entry(args.model).family != "ernie" or args.prompt.strip():
+    name = _NO_TOKEN_FAMILIES.get(entry(args.model).family)
+    if name is None or args.prompt.strip():
         return None
     return (
         f"--prompt {args.prompt!r}: an empty or blank prompt is refused as a user error (an empty prompt gives "
-        "ERNIE-Image's tokenizer no tokens at all)"
+        f"{name}'s tokenizer no tokens at all)"
     )
+
+
+def runs_cfg(e: ModelEntry, guidance: float | None) -> bool:
+    """Whether a call at ``guidance`` runs classifier-free guidance under the model's rule.
+
+    Krea 2 runs it for any guidance other than 1.0; the other families only above 1.0 (Qwen-Image 2.1 also needs a
+    negative prompt, which the caller checks). None, the model's own rule, runs none.
+    """
+    if guidance is None:
+        return False
+    return guidance != 1.0 if e.cfg_unless_guidance_one else guidance > 1.0
+
+
+def scheduler_refusal(args: argparse.Namespace) -> str | None:
+    """Why ``--scheduler`` is refused for this model, or None (a model without an allow-list takes any name)."""
+    e = entry(args.model)
+    if e.schedulers is None or args.scheduler is None or args.scheduler in e.schedulers:
+        return None
+    return f"--scheduler: {e.label} runs {', '.join(e.schedulers)}"
+
+
+def cfg_cost_note(args: argparse.Namespace) -> str | None:
+    """An info line when a Krea 2 call runs classifier-free guidance (two transformer calls per step), else None.
+
+    Krea 2 runs it for any guidance other than 1.0 without asking for a negative prompt, so a guidance such as 0.5
+    doubles the step cost on mflux's ``" "`` negative; the line says so. No other family gets it.
+    """
+    e = entry(args.model)
+    guidance = _guidance(args)
+    if not e.cfg_unless_guidance_one or not runs_cfg(e, guidance):
+        return None
+    note = f"guidance {guidance} on {e.label} runs classifier-free guidance: two transformer calls per step"
+    return note if args.negative_prompt else note + ' (negative prompt " ")'
 
 
 def _steps(args: argparse.Namespace) -> int:
@@ -401,7 +443,12 @@ def run(
     between them).
     """
     started = clock()
-    refused = refused_option(args) or fixed_guidance_refusal(args) or empty_prompt_refusal(args)
+    refused = (
+        refused_option(args)
+        or fixed_guidance_refusal(args)
+        or empty_prompt_refusal(args)
+        or scheduler_refusal(args)
+    )
     if refused is not None:
         print(f"error: {refused}", file=sys.stderr)
         return EXIT_ERROR
@@ -413,13 +460,23 @@ def run(
             else "this model has no negative branch"
         )
         print(f"warning: --negative-prompt is ignored: {why}", file=sys.stderr)
-    elif args.negative_prompt and (_guidance(args) or 0.0) <= 1.0:
+    elif args.negative_prompt and not runs_cfg(entry(args.model), _guidance(args)):
         default = entry(args.model).default_guidance or 0  # None (Z-Image): mflux's own rule, 0
-        print(
-            "warning: --negative-prompt has no effect: classifier-free guidance runs only above "
-            f"guidance 1.0 (the default is {default}). Pass --guidance above 1.0 to enable it.",
-            file=sys.stderr,
-        )
+        if entry(args.model).cfg_unless_guidance_one:
+            print(
+                "warning: --negative-prompt has no effect: classifier-free guidance runs only for a guidance "
+                f"other than 1.0 (the default is {default}). Pass another --guidance to enable it.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "warning: --negative-prompt has no effect: classifier-free guidance runs only above "
+                f"guidance 1.0 (the default is {default}). Pass --guidance above 1.0 to enable it.",
+                file=sys.stderr,
+            )
+    note = cfg_cost_note(args)
+    if note is not None:
+        print(f"info: {note}", file=sys.stderr)
     if (
         entry(args.model).cfg_needs_negative
         and (_guidance(args) or 0.0) > 1.0

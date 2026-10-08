@@ -37,6 +37,11 @@ class ModelEntry:
     # The commit the default base repository is pinned to (None: the default branch); a user's own base is taken as
     # given.
     base_revision: str | None = None
+    # Classifier-free guidance runs for any guidance other than 1.0, below 1.0 too (mflux's rule for Krea 2), rather
+    # than only above 1.0.
+    cfg_unless_guidance_one: bool = False
+    # The schedulers the model's pipeline accepts (the CLI refuses any other before the build); None: not checked here.
+    schedulers: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -109,6 +114,18 @@ def _ernie_names() -> NameMap:
     return ernie_name_map()
 
 
+def _krea2_class() -> type:
+    from mlx_dfloat.mflux.krea2.model import DFloatKrea2
+
+    return DFloatKrea2
+
+
+def _krea2_names() -> NameMap:
+    from mlx_dfloat.mflux.krea2.names import krea2_name_map
+
+    return krea2_name_map()
+
+
 FAMILIES: dict[str, FamilySpec] = {
     "flux1": FamilySpec(
         name="flux1",
@@ -142,6 +159,12 @@ FAMILIES: dict[str, FamilySpec] = {
         refused_flags={},
         load_model_class=_ernie_class,
         load_name_map=_ernie_names,
+    ),
+    "krea2": FamilySpec(
+        name="krea2",
+        refused_flags={},
+        load_model_class=_krea2_class,
+        load_name_map=_krea2_names,
     ),
 }
 
@@ -316,6 +339,46 @@ MODELS: dict[str, ModelEntry] = {
             # The snapshot the parity, identity, de-risk and MEASURED runs used.
             base_revision="5346b31d68c9c23758ba56ef8be5e9dc174c7f99",
         ),
+        # mflux 0.20.0: 8 steps (cli/defaults/defaults.py:47), guidance 1.0 (models/krea2/cli/krea2_generate.py:17;
+        # krea2.py:58), scheduler er_sde (krea2.py:206-212: None and "linear" resolve to er_sde). Classifier-free guidance
+        # runs for any guidance other than 1.0 (prompt_encoder.py:33), as two transformer calls (krea2.py:195-200), with
+        # mflux's " " when the negative prompt is missing or blank.
+        ModelEntry(
+            name="krea-2",
+            family="krea2",
+            label="Krea 2 Turbo",
+            df11_repo="mingyi456/Krea-2-Turbo-DF11-ComfyUI",
+            df11_revision="978da5fb7647bd222d33125993abd8fdc2840cfc",
+            base_repo="krea/Krea-2-Turbo",
+            default_steps=8,
+            default_guidance=1.0,
+            default_scheduler="er_sde",
+            cfg_two_calls=True,
+            uses_negative_prompt=True,
+            cfg_unless_guidance_one=True,
+            schedulers=("er_sde", "euler", "linear"),
+            base_revision="98e0fe118d17c9e3547fbb2e25acdbae2cadf7c7",
+        ),
+        # mflux's Krea command refuses this name (krea2_generate.py:46-49, config_resolution.py:85-91), so the step
+        # table's fallback is mflux's only step default for it: 25 (cli/defaults/defaults.py:19,111-118, no "krea-2-raw"
+        # entry); guidance 1.0 is mflux's generate_image default (krea2.py:58), so no CFG by default. The model card's
+        # 52 steps at 3.5 is a recipe the README names.
+        ModelEntry(
+            name="krea-2-raw",
+            family="krea2",
+            label="Krea 2 Raw",
+            df11_repo="mingyi456/Krea-2-Raw-DF11-ComfyUI",
+            df11_revision="8320616b25ac9340a830a7fb21f1b0237e160e66",
+            base_repo="krea/Krea-2-Raw",
+            default_steps=25,
+            default_guidance=1.0,
+            default_scheduler="er_sde",
+            cfg_two_calls=True,
+            uses_negative_prompt=True,
+            cfg_unless_guidance_one=True,
+            schedulers=("er_sde", "euler", "linear"),
+            base_revision="6b0ece7fffb640c5e3bcbe0a7f10f66b8e60a603",
+        ),
     )
 }
 
@@ -344,7 +407,8 @@ def DFloatModel(name: str, /, **kwargs: Any) -> Any:  # noqa: N802
 
     Imports mflux. ``DFloatModel("z-image-turbo")`` returns a ``DFloatZImage``; ``DFloatModel("schnell")`` a
     ``DFloatFlux1``; ``DFloatModel("flux2-klein-4b")`` a ``DFloatFlux2Klein``; ``DFloatModel("qwen-image-2.1")`` a
-    ``DFloatQwenImage21``; ``DFloatModel("ernie-image")`` a ``DFloatErnieImage``.
+    ``DFloatQwenImage21``; ``DFloatModel("ernie-image")`` a ``DFloatErnieImage``; ``DFloatModel("krea-2")`` a
+    ``DFloatKrea2``.
 
     Args:
         name: A registered model name, such as ``"schnell"`` or ``"z-image-turbo"``.
