@@ -427,6 +427,7 @@ class DFloatZImage(ZImage):  # type: ignore[misc]  # mflux ships no type informa
         self._plan = plan
         return plan
 
+    @_pipeline.with_call_caps
     def encode(self, *prompts: str) -> None:
         """Encode prompts now, so several generations pay the encoder reload once (drops a resident set first)."""
         self._lifecycle.ensure_embeddings(*prompts)

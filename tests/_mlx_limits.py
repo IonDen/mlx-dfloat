@@ -5,7 +5,7 @@ from contextlib import contextmanager
 
 import mlx.core as mx
 
-from mlx_dfloat._memory_caps import compute_safe_caps_gb
+from mlx_dfloat._memory_caps import compute_safe_caps_gb, forget_wired_limit, remember_wired_limit
 from mlx_dfloat.bench.capped import current_limits
 
 GIB = 1024**3
@@ -28,8 +28,10 @@ def mlx_without_wired_cap() -> Iterator[dict[str, int]]:
     """
     before = current_limits()
     mx.set_wired_limit(0)
+    forget_wired_limit(mx)  # a fresh process knows nothing of its wired limit
     try:
         yield {**before, "wired": 0}
     finally:
         mx.set_memory_limit(before["memory"])
         mx.set_wired_limit(before["wired"])
+        remember_wired_limit(mx, before["wired"])

@@ -7,7 +7,16 @@ that report no working-set size.
 
 # The same cap rule as the sibling packages mlx-taef and mlx-quant-fidelity.
 
+import weakref
+from typing import Any
+
 import mlx.core as mx
+
+# The wired limit this package last installed or read, per limits object (``mlx.core`` itself, or a test double).
+# mlx 0.32.2 has no getter: reading the limit means setting it to 0 and back, which the per-call caps avoid once they
+# know it. A wired limit set directly with ``mx.set_wired_limit`` afterwards is not seen; ``forget_wired_limit`` clears
+# the record.
+_KNOWN_WIRED: "weakref.WeakKeyDictionary[Any, int]" = weakref.WeakKeyDictionary()
 
 DESIRED_WIRED_GB = 20
 DESIRED_MEMORY_GB = 22
@@ -62,6 +71,21 @@ def device_string() -> str | None:
         return None
 
 
+def known_wired_limit(limits: Any = mx) -> int | None:
+    """The wired limit in bytes this package last installed or read on ``limits``, or None when it does not know."""
+    return _KNOWN_WIRED.get(limits)
+
+
+def remember_wired_limit(limits: Any, wired_bytes: int) -> None:
+    """Record the wired limit in bytes now in force on ``limits``."""
+    _KNOWN_WIRED[limits] = wired_bytes
+
+
+def forget_wired_limit(limits: Any = mx) -> None:
+    """Drop the record for ``limits`` (after its wired limit was changed outside this package)."""
+    _KNOWN_WIRED.pop(limits, None)
+
+
 def install_memory_caps() -> tuple[int, int]:
     """Apply wired + memory caps for the current device. Idempotent; never raises.
 
@@ -74,8 +98,11 @@ def install_memory_caps() -> tuple[int, int]:
         return (0, 0)
     try:
         mx.set_wired_limit(wired_gb * 1024**3)
+        remember_wired_limit(mx, wired_gb * 1024**3)
     except Exception:
         wired_gb = 0
+        # MLX's default stays in force: recorded, so a call never probes it.
+        remember_wired_limit(mx, 0)
     try:
         mx.set_memory_limit(memory_gb * 1024**3)
     except Exception:
@@ -87,5 +114,8 @@ __all__ = [
     "caps_for_recommended_bytes",
     "compute_safe_caps_gb",
     "device_string",
+    "forget_wired_limit",
     "install_memory_caps",
+    "known_wired_limit",
+    "remember_wired_limit",
 ]

@@ -70,6 +70,20 @@ def test_the_denoise_activation_scales_with_tokens_from_the_reference():
     assert denoise_activation_bytes(c, height=512, width=512, text_tokens=512) == 333_333
 
 
+def test_a_denoise_activation_floor_holds_below_the_reference_and_is_off_by_default():
+    # Bug caught (X3): a family whose step holds a size-independent buffer (ERNIE-Image's float32 copies of a block's
+    # weights) predicted below it at a small image, or the floor applied to every family (the default must leave the
+    # scaled term as it was). 512^2 + 512: 333_333 scaled, floored at 400_000; 1024^2 + 512: 1_000_000 above the floor.
+    floored = _constants(
+        denoise_activation_at_reference=1_000_000, denoise_activation_floor_bytes=400_000
+    )
+    assert denoise_activation_bytes(floored, height=512, width=512, text_tokens=512) == 400_000
+    assert denoise_activation_bytes(floored, height=1024, width=1024, text_tokens=512) == 1_000_000
+    assert _constants().denoise_activation_floor_bytes is None
+    plain = _constants(denoise_activation_at_reference=1_000_000)
+    assert denoise_activation_bytes(plain, height=512, width=512, text_tokens=512) == 333_333
+
+
 SIZES = FamilySizes(compressed=5_000, extras=10, nonblock=300, encoders=8_000, vae=160)
 SMALL_LARGEST = {"a": 400, "b": 200}
 

@@ -420,6 +420,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
         self._plan = plan
         return plan
 
+    @_pipeline.with_call_caps
     def encode(self, *prompts: str) -> None:
         """Encode prompts now, so several generations pay the encoder reload once (drops a resident set first)."""
         self._lifecycle.ensure_embeddings(*prompts)
