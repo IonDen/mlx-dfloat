@@ -1,12 +1,14 @@
 """DFloat11 checkpoint format: config, per-group arrays, validation, discovery."""
 
+import dataclasses
 import json
 import os
 import re
 import stat
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 import mlx.core as mx
 import numpy as np
@@ -41,12 +43,21 @@ MAX_ARRAY_ELEMENTS = 2**31 - 1  # Metal shape buffers and grid sizes are int32
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class DF11Config:
-    """The ``dfloat11_config`` block of a checkpoint's ``config.json``."""
+    """The ``dfloat11_config`` block of a checkpoint's ``config.json``.
+
+    ``row_splits`` maps a stored sub-path (a matrix the checkpoint keeps fused, such as a gate and
+    an up projection stacked by rows) to the names of its equal row blocks, in row order. It is
+    empty for every ``config.json`` checkpoint: only a pinned layout for a config-less file sets
+    it, never a downloaded config.
+    """
 
     version: str
     threads_per_block: int
     bytes_per_thread: int
     pattern_dict: Mapping[str, tuple[str, ...]]
+    row_splits: Mapping[str, tuple[str, ...]] = dataclasses.field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 def _check_pattern(pattern: str, *, source: str) -> None:
@@ -137,6 +148,55 @@ def parse_df11_config(raw: object, *, source: str) -> DF11Config:
         bytes_per_thread=BYTES_PER_THREAD,
         pattern_dict=parsed,
     )
+
+
+_PART_NAME = re.compile(r"[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*")
+
+
+def with_row_splits(
+    config: DF11Config, row_splits: Mapping[str, Sequence[str]], *, source: str
+) -> DF11Config:
+    """Return ``config`` with fused matrices declared as equal row blocks.
+
+    Each key is a sub-path one pattern stores as a single matrix; its value names the row blocks
+    in row order. The names become parameter paths, so they are held to dotted identifiers.
+
+    Raises:
+        DFloatFormatError: A fused sub-path is in no pattern or in more than one, has fewer than
+            two parts, or a part name is malformed, repeated, or collides with another matrix of
+            the same pattern.
+    """
+    taken: dict[str, set[str]] = {}
+    parsed: dict[str, tuple[str, ...]] = {}
+    for fused, parts_in in row_splits.items():
+        owners = [p for p, subs in config.pattern_dict.items() if fused in subs]
+        if not owners:
+            raise DFloatFormatError(
+                f"{source}: row split {short_repr(fused)} is not a matrix of any pattern"
+            )
+        if len(owners) > 1:
+            raise DFloatFormatError(
+                f"{source}: row split {short_repr(fused)} is listed by more than one pattern"
+            )
+        parts = tuple(parts_in)
+        if len(parts) < 2:
+            raise DFloatFormatError(
+                f"{source}: row split {short_repr(fused)} needs at least 2 parts, got {len(parts)}"
+            )
+        names = taken.setdefault(owners[0], set(config.pattern_dict[owners[0]]))
+        for part in parts:
+            if not _PART_NAME.fullmatch(part):
+                raise DFloatFormatError(
+                    f"{source}: row split part {short_repr(part)} is not a dotted name"
+                )
+            if part in names:
+                raise DFloatFormatError(
+                    f"{source}: row split part {short_repr(part)} collides with another matrix "
+                    f"of pattern {short_repr(owners[0])}"
+                )
+            names.add(part)
+        parsed[fused] = parts
+    return dataclasses.replace(config, row_splits=MappingProxyType(parsed))
 
 
 def read_df11_config(model_dir: Path) -> DF11Config:
@@ -352,22 +412,122 @@ def matrix_names_for(group: str, pattern_dict: Mapping[str, tuple[str, ...]]) ->
     return tuple(f"{group}.{sub}.weight" for sub in subs)
 
 
+def row_split_plan(
+    group: str, config: DF11Config
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[tuple[int, int], ...]]:
+    """The stored matrix names of a group, the names it decodes into, and where to cut.
+
+    Returns:
+        ``(stored_names, names, plan)``. ``names`` replaces each fused matrix with its row-block
+        names; ``plan`` holds ``(index of the fused stored matrix, number of parts)`` pairs in
+        stored order. Without fused matrices, ``names == stored_names`` and ``plan`` is empty.
+
+    Raises:
+        DFloatFormatError: As ``matrix_names_for``.
+    """
+    stored = matrix_names_for(group, config.pattern_dict)
+    if not config.row_splits or stored == (f"{group}.weight",):
+        return stored, stored, ()
+    prefix, suffix = f"{group}.", ".weight"
+    names: list[str] = []
+    plan: list[tuple[int, int]] = []
+    for index, name in enumerate(stored):
+        parts = config.row_splits.get(name[len(prefix) : -len(suffix)])
+        if parts:
+            names.extend(f"{prefix}{part}{suffix}" for part in parts)
+            plan.append((index, len(parts)))
+        else:
+            names.append(name)
+    return stored, tuple(names), tuple(plan)
+
+
+def insert_row_splits(
+    split_positions: npt.NDArray[np.int64],
+    n_elements: int,
+    plan: tuple[tuple[int, int], ...],
+    *,
+    name: str,
+) -> npt.NDArray[np.int64]:
+    """Insert the split points that cut fused matrices into their equal row blocks.
+
+    Each ``(k, p)`` cuts stored matrix ``k`` (the segment between the stored split points, with 0
+    and ``n_elements`` as the outer bounds) into ``p`` equal parts. Every cut is computed from
+    the stored bounds, so one plan entry never moves another.
+
+    Raises:
+        DFloatFormatError: The stored split points are not strictly increasing inside
+            ``(0, n_elements)``; or a planned matrix does not exist, is planned twice, has fewer
+            than two parts, or holds an element count that does not divide into equal parts.
+    """
+    stored = np.asarray(split_positions, dtype=np.int64)
+    if not plan:
+        return stored
+    bounds = [0, *(int(s) for s in stored), int(n_elements)]
+    if np.any(np.diff(bounds) <= 0):
+        raise DFloatFormatError(
+            f"{name}: split_positions must be strictly increasing inside (0, {n_elements})"
+        )
+    inserts: list[int] = []
+    seen: set[int] = set()
+    for index, parts in plan:
+        if parts < 2:
+            raise DFloatFormatError(f"{name}: a row split needs at least 2 parts, got {parts}")
+        if index in seen:
+            raise DFloatFormatError(f"{name}: segment {index} is planned twice")
+        seen.add(index)
+        if not 0 <= index < len(bounds) - 1:
+            raise DFloatFormatError(
+                f"{name}: no segment {index} to split (the group stores {len(bounds) - 1} matrices)"
+            )
+        start, length = bounds[index], bounds[index + 1] - bounds[index]
+        if length <= 0 or length % parts:
+            raise DFloatFormatError(
+                f"{name}: segment {index} holds {length} elements, which do not divide into "
+                f"{parts} equal parts"
+            )
+        inserts.extend(start + j * (length // parts) for j in range(1, parts))
+    return np.array(sorted([*bounds[1:-1], *inserts]), dtype=np.int64)
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class DF11Group:
-    """One compressed group: where its six tensors live and which matrices it decodes into."""
+    """One compressed group: where its six tensors live and which matrices it decodes into.
+
+    ``row_plan`` (from ``row_split_plan``) is empty unless the group stores a fused matrix that
+    ``matrix_names`` lists as its row blocks.
+    """
 
     name: str
     matrix_names: tuple[str, ...]
     path: Path
     tensors: Mapping[str, TensorInfo]
+    row_plan: tuple[tuple[int, int], ...] = ()
 
     def load(self) -> GroupArrays:
-        """Memory-map the group's tensors (dtypes checked at discovery) and validate them."""
+        """Memory-map the group's tensors (dtypes checked at discovery) and validate them.
+
+        The returned ``split_positions`` are where the group's matrices split: the stored points
+        plus the cuts of ``row_plan``, one fewer than ``matrix_names``.
+
+        Raises:
+            DFloatFormatError: The arrays are malformed, the row plan does not fit them, or the
+                split points and ``matrix_names`` disagree on the matrix count.
+        """
         raw = {field: read_array(self.path, self.tensors[field]) for field in GROUP_FIELDS}
         positions = np.ascontiguousarray(raw["output_positions"])
         if positions.size % 4:
             raise DFloatFormatError(
                 f"{self.name}: output_positions byte length is not a multiple of 4"
+            )
+        split = np.asarray(raw["split_positions"])
+        if self.row_plan:
+            split = insert_row_splits(
+                split, int(raw["sign_mantissa"].size), self.row_plan, name=self.name
+            )
+        if split.size + 1 != len(self.matrix_names):
+            raise DFloatFormatError(
+                f"{self.name}: split points give {split.size + 1} matrices but "
+                f"{len(self.matrix_names)} names"
             )
         arrays = GroupArrays(
             encoded_exponent=np.asarray(raw["encoded_exponent"]),
@@ -375,7 +535,7 @@ class DF11Group:
             luts=np.asarray(raw["luts"]),
             gaps=np.asarray(raw["gaps"]),
             output_positions=positions.view("<u4").astype(np.uint32),
-            split_positions=np.asarray(raw["split_positions"]),
+            split_positions=split,
         )
         validate_group_arrays(arrays, name=self.name)
         return arrays
