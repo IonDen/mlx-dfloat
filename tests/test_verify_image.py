@@ -877,3 +877,249 @@ def test_ernie_turbo_guidance_1_is_accepted(tmp_path):
     # Bug caught: the refusal firing on Turbo's own 1.0 (or on the default, which resolves to it).
     assert _parse_ernie(tmp_path, tmp_path, "--guidance", "1", model=ERNIE_TURBO).guidance == 1.0
     assert _parse_ernie(tmp_path, tmp_path, model=ERNIE_TURBO).guidance == 1.0
+
+
+# --- Krea 2 ------------------------------------------------------------------------------------------------------
+
+KREA_RAW, KREA_TURBO = "krea-2-raw", "krea-2"
+
+
+def _krea_base(tmp_path, native="raw.safetensors"):
+    """A base snapshot with the native single-file transformer at its root (a link into a blob, as hf lays it out)."""
+    base = tmp_path / "kbase"
+    (base / "blobs").mkdir(parents=True)
+    blob = base / "blobs" / "f99bb0ff"
+    blob.write_bytes(b"\0")
+    (base / native).symlink_to(blob)
+    return base
+
+
+def _parse_krea(tmp_path, base, *extra, model=KREA_RAW, side=("--side", "df11")):
+    return vi.parse_args(
+        [
+            *side,
+            "--model",
+            model,
+            "--df11",
+            str(tmp_path),
+            "--base",
+            str(base),
+            "--out",
+            str(tmp_path / "out"),
+            *extra,
+        ]
+    )
+
+
+@pytest.mark.parametrize("model", [KREA_RAW, KREA_TURBO])
+def test_runner_for_dispatches_krea2_to_its_sides(model):
+    # Bug caught: Krea 2 routed to another family's sides (a wrong-model identity verdict), or no krea2 row (a
+    # KeyError after the df11 side already ran for minutes).
+    assert vi.runner_for(model, "df11") is vi.run_df11_krea2
+    assert vi.runner_for(model, "bf16") is vi.run_bf16_krea2
+
+
+@pytest.mark.parametrize(
+    ("model", "native", "repo"),
+    [
+        (KREA_RAW, "raw.safetensors", "krea/Krea-2-Raw"),
+        (KREA_TURBO, "turbo.safetensors", "krea/Krea-2-Turbo"),
+    ],
+)
+@pytest.mark.parametrize("layout", ["missing", "dangling", "directory", "other_model"])
+def test_krea2_base_problem_names_the_missing_native_file(tmp_path, model, native, repo, layout):
+    # Bug caught: the identity launched on a base without the model's own native transformer file (the bf16 side would
+    # fail after the df11 side's minutes), a dangling link or a directory taken for the file, or Turbo's file accepted
+    # as Raw's reference (the two bases share their encoder and VAE, not the transformer).
+    base = tmp_path / "kbase"
+    base.mkdir()
+    if layout == "dangling":
+        (base / native).symlink_to(base / "gone")
+    elif layout == "directory":
+        (base / native).mkdir()
+    elif layout == "other_model":
+        other = "turbo.safetensors" if native == "raw.safetensors" else "raw.safetensors"
+        (base / other).write_bytes(b"\0")
+    problem = vi.krea2_base_problem(model, base)
+    assert problem == (
+        f"--base {base}: the bf16 side streams the transformer from {native} at the base's root (download "
+        f"{repo}'s {native} first)"
+    )
+
+
+def test_krea2_base_problem_is_none_with_the_native_file_and_for_the_other_families(tmp_path):
+    # Bug caught: a complete base refused (the identity check could never run), or the Krea check applied to another
+    # family's base.
+    assert vi.krea2_base_problem(KREA_RAW, _krea_base(tmp_path)) is None
+    assert vi.krea2_base_problem("qwen-image-2.1", tmp_path) is None
+    assert vi.krea2_base_problem("schnell", tmp_path) is None
+
+
+@pytest.mark.parametrize("side", [("--side", "bf16"), ("--orchestrate",)])
+def test_a_krea_run_that_streams_the_bf16_side_is_refused_without_its_native_file(
+    tmp_path, capsys, side
+):
+    # Bug caught: the check not wired into parse_args for the runs that read the base's transformer.
+    base = tmp_path / "kbase"
+    base.mkdir()
+    with pytest.raises(SystemExit) as info:
+        _parse_krea(tmp_path, base, side=side)
+    assert info.value.code == 2
+    assert "raw.safetensors" in capsys.readouterr().err
+
+
+def test_a_krea_df11_side_needs_no_native_file(tmp_path):
+    # Bug caught: the df11 side refused for a base that holds only the encoder, the VAE and the tokenizer (all it
+    # reads).
+    base = tmp_path / "kbase"
+    base.mkdir()
+    assert _parse_krea(tmp_path, base).model == KREA_RAW
+
+
+def test_krea_raw_cfg_run_is_keyed_with_its_guidance_and_negative_prompt(tmp_path, monkeypatch):
+    # Bug caught: the identity's CFG run (guidance 3.5, two batch-1 calls per step, mflux's " " negative) keyed or
+    # passed to the children without the guidance or the negative prompt, so a stored side of another run is reused;
+    # or the default guidance left None instead of mflux's 1.0 for Raw.
+    monkeypatch.setattr(vi, "source_hash", lambda: "src")
+    base = _krea_base(tmp_path)
+    args = _parse_krea(
+        tmp_path, base, "--guidance", "3.5", "--negative-prompt", " ", side=("--orchestrate",)
+    )
+    key = vi.run_key(args)
+    assert (key["guidance"], key["negative_prompt"]) == (3.5, " ")
+    command = vi.child_command(args, "bf16")
+    assert command[command.index("--guidance") + 1] == "3.5"
+    assert command[command.index("--negative-prompt") + 1] == " "
+    assert _parse_krea(tmp_path, base).guidance == 1.0
+
+
+@pytest.mark.parametrize("guidance", ["3.5", "0.5"])
+def test_krea_turbo_guidance_other_than_1_is_refused(tmp_path, capsys, guidance):
+    # Bug caught: an identity run of Turbo at a guidance off its distilled recipe (CFG at any value but 1.0, 0.5
+    # included), which the check does not cover.
+    with pytest.raises(SystemExit) as info:
+        _parse_krea(tmp_path, tmp_path, "--guidance", guidance, model=KREA_TURBO)
+    assert info.value.code == 2
+    assert "krea-2 runs at guidance 1.0 only in this check" in capsys.readouterr().err
+
+
+def test_krea_turbo_negative_prompt_is_refused_and_guidance_1_accepted(tmp_path, capsys):
+    # Bug caught: a negative prompt keyed for Turbo at 1.0 (no negative branch there), or the refusal firing on 1.0.
+    assert _parse_krea(tmp_path, tmp_path, "--guidance", "1", model=KREA_TURBO).guidance == 1.0
+    with pytest.raises(SystemExit) as info:
+        _parse_krea(tmp_path, tmp_path, "--negative-prompt", " ", model=KREA_TURBO)
+    assert info.value.code == 2
+    assert "there is no negative branch" in capsys.readouterr().err
+
+
+def _tiny_krea_native(path, ckpt, matrices, extras):
+    """The tiny checkpoint's source as a base's native file, under the checkpoint's names: the block matrices BF16,
+    the non-block matrices FP32 holding the same BF16 values (the published file stores five of them that way), the
+    extras BF16."""
+    import numpy as np
+
+    from mlx_dfloat.mflux.krea2.names import NONBLOCK_GROUPS, krea2_name_map
+
+    names = krea2_name_map()
+    tensors = {}
+    for group, per in matrices.items():
+        for name in ckpt.groups[group].matrix_names:
+            if group in NONBLOCK_GROUPS:
+                bits = per[names.param_name(name)].astype(np.uint32) << np.uint32(16)
+                tensors[name] = mx.array(bits).view(mx.float32)
+            else:
+                sub = name.removeprefix(f"{group}.").removesuffix(".weight")
+                tensors[name] = mx.array(per[sub]).view(mx.bfloat16)
+    for name in ckpt.extras:
+        tensors[name] = mx.array(extras[names.param_name(name)]).view(mx.bfloat16)
+    mx.save_safetensors(str(path), tensors)
+
+
+@pytest.mark.mflux
+@pytest.mark.parametrize(
+    ("guidance", "negative"), [(1.0, None), (3.5, "n")], ids=["guidance-1", "cfg"]
+)
+def test_the_krea2_bf16_side_gives_stock_mfluxs_latents_on_a_tiny_checkpoint(
+    tmp_path, monkeypatch, guidance, negative
+):
+    # Bug caught (TT4): the bf16 side's copy of mflux's loop body drifting from mflux's own (the CFG formula, the
+    # stepper's seed, the sigma passed as the timestep, the embeddings swapped), a native tensor not replacing the DF11
+    # value it stands for, or the streamed blocks read under other names. Stock Krea2 over the same BF16 weights, the
+    # same embeddings and seed; equality is bit for bit on the float32 latents, before the heavy identity run.
+    import numpy as np
+    from mflux.models.krea2.model.krea2_text_encoder.prompt_encoder import Krea2PromptEncoder
+    from mflux.utils.apple_silicon import AppleSiliconUtil
+    from tests._krea2_tiny import (
+        TINY,
+        StubTextEncoder,
+        StubTokenizer,
+        StubVAE,
+        stock_krea2,
+        write_tiny_checkpoint,
+    )
+
+    from mlx_dfloat import _layouts
+    from mlx_dfloat.format import open_checkpoint
+    from mlx_dfloat.mflux.krea2 import init as kinit
+    from mlx_dfloat.mflux.krea2 import transformer as ktf
+
+    monkeypatch.setattr(AppleSiliconUtil, "is_m1_or_m2", classmethod(lambda cls: True))
+    rng = np.random.default_rng(11)
+    df11 = tmp_path / "df11"
+    matrices, extras, layout = write_tiny_checkpoint(df11, rng, random_extras=rng)
+    monkeypatch.setattr(_layouts, "KNOWN_LAYOUTS", (layout,))
+    ckpt = open_checkpoint(df11)
+    base = tmp_path / "base"
+    base.mkdir()
+    _tiny_krea_native(base / "raw.safetensors", ckpt, matrices, extras)
+    real_build = ktf.build_transformer
+    monkeypatch.setattr(
+        ktf, "build_transformer", lambda c, **kw: real_build(c, transformer_kwargs=TINY, **kw)
+    )
+    ours_vae, stock_vae = StubVAE(), StubVAE()
+    monkeypatch.setattr(kinit, "load_vae", lambda root: ours_vae)
+    tokenizer = StubTokenizer({"n": 12})
+    embeds, neg = Krea2PromptEncoder.encode_prompt_pair(
+        prompt="p",
+        negative_prompt=negative,
+        guidance=guidance,
+        tokenizer=tokenizer,
+        text_encoder=StubTextEncoder(),
+        prompt_cache={},
+    )
+    out = tmp_path / "out"
+    (out / "df11").mkdir(parents=True)
+    saved = {"embeds": embeds} if neg is None else {"embeds": embeds, "neg_embeds": neg}
+    mx.save_safetensors(str(out / "df11" / "embeds.safetensors"), saved)
+    args = vi.argparse.Namespace(
+        out=out,
+        df11=str(df11),
+        base=str(base),
+        model=KREA_RAW,
+        eval_policy="per-block",
+        seed=3,
+        steps=2,
+        size=64,
+        guidance=guidance,
+    )
+    result = vi.run_bf16_krea2(args, vi.argparse.Namespace(peak_footprint=0))
+    ours = mx.load(str(out / "bf16" / "latents.safetensors"))["latents"]
+    stock = stock_krea2(tokenizer, StubTextEncoder(), stock_vae, matrices, extras)
+    stock.generate_image(
+        seed=3,
+        prompt="p",
+        num_inference_steps=2,
+        height=64,
+        width=64,
+        guidance=guidance,
+        negative_prompt=negative,
+    )
+    (theirs,) = stock_vae.seen
+    assert result["calls_per_step"] == (2 if negative else 1)
+    assert result["replaced_from_base"] == len(ckpt.extras) + 37  # every extra and non-block matrix
+    assert ours.dtype == theirs.dtype == mx.float32
+    assert ours.shape == theirs.shape == (1, 16, 8, 8)
+    assert bool(mx.all(mx.isfinite(theirs)))
+    assert np.array_equal(np.array(ours.view(mx.uint32)), np.array(theirs.view(mx.uint32)))
+    (decoded,) = ours_vae.seen  # the VAE decodes the side's own final latents
+    assert np.array_equal(np.array(decoded.view(mx.uint32)), np.array(ours.view(mx.uint32)))

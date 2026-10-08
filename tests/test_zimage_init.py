@@ -10,7 +10,10 @@ from mlx_dfloat.mflux.flux1 import init as flux_init
 from mlx_dfloat.mflux.zimage.init import (
     BASE_PATTERNS,
     encoder_definition,
+    load_base,
     load_text_encoder,
+    load_tokenizers,
+    load_vae,
     vae_definition,
 )
 
@@ -68,6 +71,30 @@ def test_a_directory_without_the_text_encoder_is_a_format_error(tmp_path):
     # Bug caught: a DF11 checkpoint passed as --base crashing inside mflux's loader with a bare FileNotFoundError.
     with pytest.raises(DFloatFormatError, match="Z-Image base"):
         load_text_encoder(tmp_path)
+
+
+@pytest.mark.mflux
+def test_a_directory_without_the_vae_is_a_format_error(tmp_path):
+    # Bug caught: a DF11 checkpoint passed as --base crashing inside mflux's VAE loader with a bare error instead of
+    # naming what the directory lacks.
+    with pytest.raises(DFloatFormatError, match=r"not a Z-Image base with \['vae'\]"):
+        load_vae(tmp_path)
+
+
+@pytest.mark.mflux
+def test_a_directory_without_the_tokenizers_is_a_format_error(tmp_path):
+    # Bug caught: mflux's tokenizer loader error (FileNotFoundError or RuntimeError) escaping unwrapped, so the user
+    # sees an mflux traceback instead of the base that lacks the files.
+    with pytest.raises(DFloatFormatError, match="no usable Z-Image tokenizers"):
+        load_tokenizers(tmp_path)
+
+
+@pytest.mark.mflux
+def test_load_base_reads_the_vae_first_and_refuses_an_empty_directory(tmp_path):
+    # Bug caught: load_base skipping a component (the refusal would come later, at the first call), or swallowing the
+    # loader's format error.
+    with pytest.raises(DFloatFormatError, match=r"\['vae'\]"):
+        load_base(tmp_path)
 
 
 @pytest.mark.network

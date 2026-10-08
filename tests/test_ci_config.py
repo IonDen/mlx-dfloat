@@ -87,8 +87,8 @@ def test_the_mflux_lane_installs_the_locked_extra_and_proves_it_ran_tests():
     # Every `uv run` names the extra and the group, so no step depends on uv's sync mode keeping
     # what `uv sync --extra mflux` installed.
     uv_runs = [run for run in runs if "uv run" in run]
-    # sanity + lane + five per-model coverage gates + the collection check
-    assert len(uv_runs) == 8
+    # sanity + lane + six per-model and ten per-module coverage gates + the collection check
+    assert len(uv_runs) == 19
     assert all("uv run --extra mflux --group dev " in run for run in uv_runs)
     pytest_runs = [
         shlex.split(run)
@@ -99,13 +99,13 @@ def test_the_mflux_lane_installs_the_locked_extra_and_proves_it_ran_tests():
     assert len(tests) == 1
     assert {"-m", "mflux", "--run-network", "-rs"} <= set(tests[0])
     # model.py has no offline test at all (every test is @pytest.mark.mflux), so only this lane
-    # measures it (the required job's gate omits it; see pyproject.toml). init.py is gated in the
-    # required job (it has real offline tests); this lane only reports its number.
+    # measures it (the required job's gate omits it; see pyproject.toml). The same holds for the
+    # init.py modules, which drive mflux's loaders; each is gated on its own after this step.
     assert "--cov=mlx_dfloat.mflux.flux1.model" in tests[0]
     assert "--cov=mlx_dfloat.mflux.flux1.init" in tests[0]
     assert "--cov-config=.coveragerc-integration" in tests[0]
-    # No combined threshold: on a tokenless runner init.py's live tests skip and would drag a
-    # combined number under 80 %; the per-file step after this one is the lane's gate.
+    # No combined threshold: one module's lines would dilute another's; the per-file steps after
+    # this one are the lane's gates.
     assert not any(arg.startswith("--cov-fail-under") for arg in tests[0])
     guard = [run for run in runs if "--co" in run and "grep -c" in run]
     assert len(guard) == 1
@@ -200,7 +200,7 @@ def test_the_mflux_lane_measures_and_gates_the_ernie_model_module_on_its_own():
     # Bug caught: ernie/model.py (every test @pytest.mark.mflux) omitted from the required job's gate but measured by
     # no job either, so its coverage could fall to zero with every check green; or its gate diluted by the other model
     # modules' lines, or run before the lane's pytest wrote the data; or ERNIE's init.py and transformer.py not
-    # reported in the lane beside its model (measured for consistency, not gated).
+    # measured in the lane beside its model (each is gated on its own, see the test below).
     import tomllib
 
     runs = [step.get("run", "") for step in _integration_job()["steps"]]
@@ -219,6 +219,31 @@ def test_the_mflux_lane_measures_and_gates_the_ernie_model_module_on_its_own():
     assert lane < runs.index(report) < lane + 6
     pyproject = tomllib.loads((CI.parents[2] / "pyproject.toml").read_text())
     assert "src/mlx_dfloat/mflux/ernie/model.py" in pyproject["tool"]["coverage"]["run"]["omit"]
+
+
+def test_the_mflux_lane_measures_and_gates_the_krea2_model_module_on_its_own():
+    # Bug caught: krea2/model.py (every test @pytest.mark.mflux) omitted from the required job's gate but measured by
+    # no job either, so its coverage could fall to zero with every check green; or its gate diluted by the other model
+    # modules' lines, or run before the lane's pytest wrote the data; or Krea 2's init.py and transformer.py not
+    # measured in the lane beside its model (each is gated on its own, see the test below).
+    import tomllib
+
+    runs = [step.get("run", "") for step in _integration_job()["steps"]]
+    lane = next(
+        i
+        for i, run in enumerate(runs)
+        if run.startswith("uv run --extra mflux --group dev pytest")
+        and "--co" not in shlex.split(run)
+    )
+    args = shlex.split(runs[lane])
+    assert "--cov=mlx_dfloat.mflux.krea2.model" in args
+    assert "--cov=mlx_dfloat.mflux.krea2.init" in args
+    assert "--cov=mlx_dfloat.mflux.krea2.transformer" in args
+    report = "uv run --extra mflux --group dev coverage report --include='*/mflux/krea2/model.py' --fail-under=80"
+    assert report in runs
+    assert lane < runs.index(report) < lane + 7  # the sixth per-model gate after the lane
+    pyproject = tomllib.loads((CI.parents[2] / "pyproject.toml").read_text())
+    assert "src/mlx_dfloat/mflux/krea2/model.py" in pyproject["tool"]["coverage"]["run"]["omit"]
 
 
 def _config() -> dict:
@@ -263,3 +288,57 @@ def test_the_workflow_token_is_read_only():
     # repository default (read/write on older defaults), in a workflow whose mflux lane now carries a
     # Hub secret; or a write scope added without a step that needs it.
     assert _config()["permissions"] == {"contents": "read"}
+
+
+# The family modules that drive mflux (its loaders, its transformer classes): their mflux-free tests leave them at
+# 40-60 % in the required job, so that job's gate omits them and the mflux lane gates each one at 80 %, as it does
+# model.py. flux1/transformer.py and zimage/transformer.py stay in the required gate: their offline tests (the seam
+# fakes) cover them past 90 % without mflux, while the lane alone reaches only 57 % of flux1/transformer.py.
+MFLUX_ONLY = [
+    "flux1/init",
+    "zimage/init",
+    "flux2/init",
+    "flux2/transformer",
+    "qwen21/init",
+    "qwen21/transformer",
+    "ernie/init",
+    "ernie/transformer",
+    "krea2/init",
+    "krea2/transformer",
+]
+
+
+def test_the_mflux_only_modules_are_omitted_from_the_required_gate_and_gated_in_the_lane():
+    # Bug caught: a module omitted from the required job's 85 % gate but measured or gated by no job (its coverage
+    # could fall to zero with every check green), a gate diluted by another module's lines, a gate run before the
+    # lane's pytest wrote the data, or a module that runs without mflux (names.py, memory.py, the two seam-covered
+    # transformer.py files) dropped from the required gate.
+    import tomllib
+
+    omit = tomllib.loads((CI.parents[2] / "pyproject.toml").read_text())["tool"]["coverage"]["run"][
+        "omit"
+    ]
+    runs = [step.get("run", "") for step in _integration_job()["steps"]]
+    lane = next(
+        i
+        for i, run in enumerate(runs)
+        if run.startswith("uv run --extra mflux --group dev pytest")
+        and "--co" not in shlex.split(run)
+    )
+    args = shlex.split(runs[lane])
+    collect = next(i for i, run in enumerate(runs) if "--co" in run and "grep -c" in run)
+    for module in MFLUX_ONLY:
+        family, name = module.split("/")
+        assert f"src/mlx_dfloat/mflux/{module}.py" in omit, module
+        assert f"--cov=mlx_dfloat.mflux.{family}.{name}" in args, module
+        report = f"uv run --extra mflux --group dev coverage report --include='*/mflux/{module}.py' --fail-under=80"
+        assert report in runs, module
+        assert lane < runs.index(report) < collect, module
+    for kept in (
+        "flux1/transformer",
+        "zimage/transformer",
+        "krea2/names",
+        "krea2/memory",
+        "ernie/memory",
+    ):
+        assert f"src/mlx_dfloat/mflux/{kept}.py" not in omit, kept
