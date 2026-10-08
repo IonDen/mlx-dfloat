@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 from scripts.verify_checkpoint import VerifyError
 from scripts.verify_remote_group import (
+    GROUP_FIELDS,
     HfRangeSource,
     LocalRangeSource,
     bf16_index,
@@ -928,3 +929,222 @@ def test_a_layout_whose_spot_checks_cannot_run_is_refused(tmp_path, probes, mess
         config_from_source(
             LocalRangeSource(df11), layouts=(dataclasses.replace(layout, probes=probes),)
         )
+
+
+# --- extras: the uncompressed tensors compared by name with their originals ------------------------------------------
+
+# Three BF16 extras with literal bit patterns (1.0, 2.0, -1.0, the smallest denormal; 0.25, -3.0; 1.0078125 ...).
+_EXTRAS = {
+    "first.bias": np.array([0x3F80, 0x4000, 0xBF80, 0x0001], dtype=np.uint16),
+    "norm.scale": np.array([0x3E80, 0xC040], dtype=np.uint16),
+    "mod.lin": np.array([[0x3F81, 0x3F82], [0x3F83, 0x8000]], dtype=np.uint16),
+}
+# An FP32 original of one extra: the two ties and the two near-ties where nearest-even and truncation differ in two
+# of four places. By hand: 0x3F80_8000 (tie, even 0x3F80 below) -> 0x3F80; 0x3F81_8000 (tie, odd 0x3F81) -> 0x3F82;
+# 0x3F80_8001 (just above half) -> 0x3F81; 0x3F80_7FFF (just below half) -> 0x3F80. Truncation: 0x3F80, 0x3F81,
+# 0x3F80, 0x3F80.
+_F32_ORIGINAL = np.array([0x3F808000, 0x3F818000, 0x3F808001, 0x3F807FFF], dtype=np.uint32)
+_F32_AS_DF11 = np.array([0x3F80, 0x3F82, 0x3F81, 0x3F80], dtype=np.uint16)
+
+
+def _extras_pair(tmp_path, *, df11_extras=None, originals=None, single_file=True):
+    """A DF11 checkpoint (one group, `_EXTRAS`) and one original file holding the group's matrix and the extras."""
+    rng = np.random.default_rng(41)
+    q = random_bf16(rng, (4, 6))
+    df11 = write_checkpoint(
+        tmp_path / "d",
+        groups={"blocks.0": [q]},
+        pattern=r"blocks\.\d+",
+        sub_paths=(),
+        extras=_EXTRAS if df11_extras is None else df11_extras,
+        single_file=single_file,
+    )
+    root = tmp_path / "b"
+    root.mkdir()
+    tensors = {"blocks.0.weight": q, **(_EXTRAS if originals is None else originals)}
+    mx.save_safetensors(
+        str(root / "model.safetensors"),
+        {
+            n: mx.array(v).view(mx.float32 if v.dtype == np.uint32 else mx.bfloat16)
+            for n, v in tensors.items()
+        },
+    )
+    return df11, root
+
+
+def _extras_run(tmp_path, df11, bf16, *extra_args):
+    out = tmp_path / "out" / "RESULT.json"
+    code = main([*_argv(df11, bf16, out), *extra_args], source_factory=_local_factory)
+    return code, json.loads(out.read_text())
+
+
+@pytest.mark.parametrize("single_file", [True, False])
+def test_extras_equal_to_bf16_originals_pass_and_are_counted(tmp_path, single_file):
+    # Bug caught: extras never read (a pass with 0 compared), or an extras-only shard of a sharded checkpoint (no group
+    # in it, so absent from the group index) skipped.
+    df11, bf16 = _extras_pair(tmp_path, single_file=single_file)
+    code, result = _extras_run(tmp_path, df11, bf16, "--groups", "none", "--extras")
+    assert code == 0, result
+    assert (result["compared"], result["extras_compared"], result["extras_mismatched"]) == (0, 3, 0)
+    got = [(e["name"], e["n"], e["equal"], e["original_dtype"]) for e in result["extras"]["extras"]]
+    assert got == [
+        ("first.bias", 4, True, "BF16"),
+        ("mod.lin", 4, True, "BF16"),
+        ("norm.scale", 2, True, "BF16"),
+    ]
+    assert result["control"] == "bf16"
+
+
+def test_an_fp32_extra_is_compared_rounded_to_nearest_even(tmp_path):
+    # Bug caught: truncation instead of RNE (two of four differ), or a silent cast without the flag. The control label
+    # must name fp32 although no group matrix was compared (the extras count in it).
+    df11, bf16 = _extras_pair(
+        tmp_path,
+        df11_extras={**_EXTRAS, "mod.lin": _F32_AS_DF11},
+        originals={**_EXTRAS, "mod.lin": _F32_ORIGINAL},
+    )
+    code, result = _extras_run(
+        tmp_path, df11, bf16, "--groups", "none", "--extras", "--cast-fp32-to-bf16"
+    )
+    assert code == 0, result
+    assert result["control"] == "fp32 rounded to bf16 (nearest even)"
+    dtypes = {e["name"]: e["original_dtype"] for e in result["extras"]["extras"]}
+    assert dtypes == {"first.bias": "BF16", "mod.lin": "F32", "norm.scale": "BF16"}
+    code, result = _extras_run(tmp_path, df11, bf16, "--groups", "none", "--extras")
+    assert code == 2
+    assert result["extras"]["status"] == "error"
+    assert "--cast-fp32-to-bf16" in result["extras"]["error"]
+
+
+def test_one_flipped_extra_bit_is_a_mismatch_exit_1(tmp_path):
+    # Bug caught: any / all swapped, or the exit code computed before the extras (the group matrix is equal, so only
+    # the extras can make this run exit 1).
+    flipped = {**_EXTRAS, "norm.scale": _EXTRAS["norm.scale"] ^ np.uint16(0x0001)}
+    df11, bf16 = _extras_pair(tmp_path, df11_extras=flipped)
+    code, result = _extras_run(tmp_path, df11, bf16, "--groups", "first", "--extras")
+    assert code == 1, result
+    assert (result["compared"], result["mismatched"]) == (1, 0)
+    assert (result["extras_compared"], result["extras_mismatched"]) == (3, 1)
+    assert result["extras"]["status"] == "mismatch"
+    assert [e["name"] for e in result["extras"]["extras"] if not e["equal"]] == ["norm.scale"]
+
+
+def test_an_extra_without_an_original_is_an_error_not_a_pass(tmp_path):
+    # Bug caught: an extra with no original skipped (the run passes on the extras that happen to exist).
+    df11, bf16 = _extras_pair(
+        tmp_path, originals={k: v for k, v in _EXTRAS.items() if k != "mod.lin"}
+    )
+    code, result = _extras_run(tmp_path, df11, bf16, "--groups", "none", "--extras")
+    assert code == 2
+    assert result["extras"]["status"] == "error"
+    assert result["extras"]["error"] == "no original for extra mod.lin"
+
+
+def test_an_extra_whose_original_holds_another_element_count_is_an_error_not_a_mismatch(tmp_path):
+    # Bug caught: a size disagreement (a mapping problem) reported as a bit mismatch, or compared by a prefix.
+    longer = {**_EXTRAS, "norm.scale": np.array([0x3E80, 0xC040, 0x3F80], dtype=np.uint16)}
+    df11, bf16 = _extras_pair(tmp_path, originals=longer)
+    code, result = _extras_run(tmp_path, df11, bf16, "--groups", "none", "--extras")
+    assert code == 2
+    assert result["extras"]["error"] == "extra norm.scale: shape (2,), original has (3,)"
+
+
+def test_a_df11_extra_that_is_not_bf16_is_an_error(tmp_path):
+    # Bug caught: an F32 extra in the DF11 file read as two-byte elements and reported as a mismatch (exit 1), or
+    # passed through.
+    df11, bf16 = _extras_pair(tmp_path, df11_extras={}, single_file=False)
+    mx.save_safetensors(
+        str(df11 / "extra.safetensors"), {"first.bias": mx.array([1.0, 2.0], dtype=mx.float32)}
+    )
+    code, result = _extras_run(tmp_path, df11, bf16, "--groups", "none", "--extras")
+    assert code == 2
+    assert result["extras"]["error"] == "extra first.bias is F32, not BF16"
+
+
+def test_without_the_extras_flag_the_result_keeps_its_old_shape(tmp_path):
+    # Bug caught: extras keys written on every run (a merge reading them would count a run that compared none).
+    df11, bf16 = _extras_pair(tmp_path)
+    code, result = _extras_run(tmp_path, df11, bf16, "--groups", "first")
+    assert code == 0, result
+    assert {"extras", "extras_compared", "extras_mismatched"}.isdisjoint(result)
+
+
+def test_extras_with_structural_only_is_refused(tmp_path, capsys):
+    # Bug caught: a structural run accepting --extras and claiming a comparison it cannot make (no original).
+    df11, _ = _extras_pair(tmp_path)
+    argv = [
+        "--df11-repo", str(df11), "--df11-revision", "x", "--structural-only",
+        "--extras", "--out", str(tmp_path / "o.json"),
+    ]  # fmt: skip
+    with pytest.raises(SystemExit) as info:
+        main(argv, source_factory=_local_factory)
+    assert info.value.code == 2
+    assert "--extras" in capsys.readouterr().err
+
+
+def test_groups_none_without_extras_is_refused(tmp_path, capsys):
+    # Bug caught: a run that compares nothing at all exiting 0 (a vacuous pass recorded as parity).
+    df11, bf16 = _extras_pair(tmp_path)
+    with pytest.raises(SystemExit) as info:
+        main(
+            [*_argv(df11, bf16, tmp_path / "o.json"), "--groups", "none"],
+            source_factory=_local_factory,
+        )
+    assert info.value.code == 2
+    assert "--groups none" in capsys.readouterr().err
+
+
+def test_groups_none_selects_nothing_and_mixed_with_a_group_is_refused():
+    # Bug caught: `none` silently dropping the other selectors, or read as a group name.
+    stats = {"blocks.0": {"elements_per_block": 5, "max_code_length": 30}}
+    assert pick_groups(stats, "none") == []
+    for selector in ("none,first", "first,none"):
+        with pytest.raises(KeyError, match="none"):
+            pick_groups(stats, selector)
+
+
+def test_an_extras_only_run_on_a_repository_without_extras_is_an_error(tmp_path):
+    # Bug caught (CC3): `--groups none --extras` on a checkpoint with no extras exiting 0 having compared nothing.
+    df11, bf16 = _extras_pair(tmp_path, df11_extras={}, single_file=False)
+    code, result = _extras_run(tmp_path, df11, bf16, "--groups", "none", "--extras")
+    assert code == 2
+    assert result["extras"]["status"] == "error"
+    assert result["extras"]["error"] == (
+        "the checkpoint holds no extras: --groups none --extras compares nothing"
+    )
+    # With a group selected the same checkpoint passes: the group is compared, and no extras is not an error then.
+    code, result = _extras_run(tmp_path, df11, bf16, "--groups", "first", "--extras")
+    assert code == 0, result
+    assert (result["compared"], result["extras_compared"]) == (1, 0)
+
+
+def test_an_extra_whose_original_has_another_shape_is_an_error_before_its_data_is_read(tmp_path):
+    # Bug caught (CC4): a transposed or reshaped original (same element count) compared byte for byte, a mapping
+    # problem passed off as a pass or a mismatch. mod.lin is 2 x 2 in the checkpoint; its original here is 1 x 4.
+    reshaped = {**_EXTRAS, "mod.lin": _EXTRAS["mod.lin"].reshape(1, 4)}
+    df11, bf16 = _extras_pair(tmp_path, originals=reshaped)
+    code, result = _extras_run(tmp_path, df11, bf16, "--groups", "none", "--extras")
+    assert code == 2
+    assert result["extras"]["error"] == "extra mod.lin: shape (2, 2), original has (1, 4)"
+
+
+def test_a_shard_outside_the_checkpoints_index_is_not_an_extra(tmp_path):
+    # Bug caught (FF4): every safetensors file in the repository read as the checkpoint's (a DF11 repository that also
+    # hosts an encoder file would fail with "no original for extra ..."). The index names the group shard and the
+    # extras shard; vae.safetensors sits next to them, unlisted.
+    df11, bf16 = _extras_pair(tmp_path, single_file=False)
+    weight_map = {
+        **{f"blocks.0.{f}": "blocks_0.safetensors" for f in GROUP_FIELDS},
+        **dict.fromkeys(_EXTRAS, "model.safetensors"),
+    }
+    (df11 / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
+    mx.save_safetensors(
+        str(df11 / "vae.safetensors"), {"decoder.conv.weight": mx.ones((2,), dtype=mx.bfloat16)}
+    )
+    code, result = _extras_run(tmp_path, df11, bf16, "--groups", "none", "--extras")
+    assert code == 0, result
+    assert [e["name"] for e in result["extras"]["extras"]] == [
+        "first.bias",
+        "mod.lin",
+        "norm.scale",
+    ]

@@ -4,7 +4,7 @@ The fixture ``fixtures/qwen-image-2.1-df11-header.bin`` is the first 28,416 byte
 ``qwen_image_2.1_bf16-DF11.safetensors`` in ``mingyi456/Qwen-Image-2.1-DF11-ComfyUI`` at revision
 ``1b22a3a1f96293f3b328d03abe22ab2e51cbd9cc``, exactly as on disk: the u64 little-endian header
 length (28,408) followed by the JSON header. It was range-read on 2026-10-08 (file bytes 0..28415)
-and is byte-identical to the header saved by the 2026-10-07 layout spike.
+and is byte-identical to the header saved by the 2026-10-07 range reads.
 
 The spot-check digests were range-read at the same revision on 2026-10-08, 4096 bytes each (data
 starts at file byte 28,416; ``transformer_blocks.0.sign_mantissa`` at tensor data offset
@@ -23,7 +23,7 @@ starts at file byte 28,416; ``transformer_blocks.0.sign_mantissa`` at tensor dat
 - block 31 element 0 (``attn.to_q``): 7,730,137,195..7,730,141,290.
 - ``modulation.1`` element 0: 163,724,295..163,728,390.
 
-The 2026-10-07 spike matched the sign/mantissa bytes at each of block 0's offsets against the BF16
+A 2026-10-07 byte comparison matched the sign/mantissa bytes at each of block 0's offsets against the BF16
 base (``Qwen/Qwen-Image-2.1``): 4096 of 4096 equal for the expected tensor, at most 29 for any other.
 """
 
@@ -52,7 +52,7 @@ from mlx_dfloat.format import config_for_layout, group_headers, open_checkpoint
 FIXTURE = Path(__file__).parent / "fixtures" / "qwen-image-2.1-df11-header.bin"
 QWEN_REVISION = "1b22a3a1f96293f3b328d03abe22ab2e51cbd9cc"
 QWEN_FILE = "qwen_image_2.1_bf16-DF11.safetensors"
-QWEN_FILE_SIZE = 9_724_491_411  # the 2026-10-07 spike, and the Hub's file size
+QWEN_FILE_SIZE = 9_724_491_411  # the 2026-10-07 range reads, and the Hub's file size
 QWEN_HEADER_SHA256 = "fa5b70707d9d5e08d1c92e40dcdeedd64f72508f88ca942217c6fd419ff5ba5e"
 QWEN_FILE_SHA256 = (
     "fc07ef38e3609b1a38dc8f6ec585ef9921a4d4b5e6f74b744899e4dea91b4e2e"  # the Hub's LFS oid
@@ -137,7 +137,7 @@ def test_the_fixture_is_the_published_header_as_on_disk():
     assert len(data) == 28_416
     assert struct.unpack("<Q", data[:8]) == (
         28_408,
-    )  # the spike: header length 28,408, data at 28,416
+    )  # header length 28,408, data at 28,416 (the 2026-10-07 range reads)
     assert hashlib.sha256(data[8:]).hexdigest() == QWEN_HEADER_SHA256
 
 
@@ -153,7 +153,7 @@ def test_one_changed_header_byte_matches_no_layout():
     assert identify_layout(bytes(raw), known=KNOWN_LAYOUTS) is None
 
 
-def test_the_published_header_groups_as_the_spike_counted():
+def test_the_published_header_groups_as_counted_by_hand():
     # Bug caught: the grouping or the synthesized patterns losing a group, or gate_up not expanded at open time.
     groups, extras = _qwen_groups()
     assert sorted(groups) == sorted(
@@ -182,7 +182,7 @@ def test_the_published_header_groups_as_the_spike_counted():
     )  # 68,694,016 BF16 elements
 
 
-def test_the_qwen_layout_config_is_the_spikes_synthesized_config():
+def test_the_qwen_layout_config_is_the_synthesized_config():
     # Bug caught: a typo in the pattern list or the split table (one matrix would decode under the wrong name).
     layout = QWEN_IMAGE_21_COMFYUI
     assert json.loads(json.dumps(layout.raw_config)) == {
@@ -387,7 +387,7 @@ def test_a_config_less_file_with_an_unknown_header_is_refused_naming_its_digest(
     root, _layout = _tiny(tmp_path)
     digest = hashlib.sha256(read_header_bytes(root / "model.safetensors")[0]).hexdigest()
     with pytest.raises(DFloatFormatError) as err:
-        open_checkpoint(root)  # the default table knows only Qwen-Image 2.1
+        open_checkpoint(root)  # the default table holds only published files, never this tiny one
     # Bug caught too: a refusal that sends users to a maintainer script, or prints the caller's full path.
     assert str(err.value) == (
         f"model.safetensors: this config-less file is not one this version of mlx-dfloat knows "
