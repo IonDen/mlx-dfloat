@@ -1,17 +1,17 @@
 {
  "reason": "memory",
- "footprint": 9974472048,
- "peak_footprint": 9974472048,
+ "footprint": 9945029904,
+ "peak_footprint": 9945029904,
  "ceiling": 9842633386,
- "elapsed": 6.741005958989263,
- "budget": 600.0,
- "rss": 7946649600,
- "mlx_active": 8107075784,
- "mlx_cache": 1349071246,
- "verdict_memory": 9974472048,
+ "elapsed": 4.677221665973775,
+ "budget": 1800.0,
+ "rss": 7467745280,
+ "mlx_active": 9202120,
+ "mlx_cache": 0,
+ "verdict_memory": 9945029904,
  "verdict_counter": "footprint",
- "peak_watched": 9974472048,
- "peak_mlx": 9456147030,
+ "peak_watched": 9945029904,
+ "peak_mlx": 9455087702,
  "context": {
   "model": "z-image-turbo",
   "height": 1024,
@@ -20,6 +20,11 @@
   "steps": 9,
   "tier_gb": 16,
   "label": "CAPPED",
-  "phase": "encode"
+  "limits": {
+   "memory": 10737418240,
+   "cache": 10737418240,
+   "wired": 8589934592
+  },
+  "phase": "set_load"
  }
 }

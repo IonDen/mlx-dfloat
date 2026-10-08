@@ -1,0 +1,140 @@
+{
+ "exit_code": 0,
+ "degenerate": [],
+ "report": {
+  "family": "flux2",
+  "model": "flux2-klein-base-4b",
+  "size": "4b",
+  "df11": {
+   "root": "~/.cache/huggingface/hub/models--mingyi456--FLUX.2-klein-base-4B-DF11/snapshots/b887c73c5cbc3f4d50887a04c41509fb25a0a0f0",
+   "repo_id": null,
+   "revision": "b887c73c5cbc3f4d50887a04c41509fb25a0a0f0"
+  },
+  "base": {
+   "root": "~/.cache/huggingface/hub/models--black-forest-labs--FLUX.2-klein-base-4B/snapshots/a3b4f4849157f664bdbc776fd7453c2783562f4d",
+   "repo_id": null,
+   "revision": "a3b4f4849157f664bdbc776fd7453c2783562f4d"
+  },
+  "eval_policy": "per-block",
+  "cfg_calls_per_step": 2,
+  "predict": "uncompiled",
+  "nonblock_groups": [
+   "context_embedder",
+   "double_stream_modulation_img.linear",
+   "double_stream_modulation_txt.linear",
+   "norm_out.linear",
+   "single_stream_modulation.linear"
+  ],
+  "cache_limit_in_force": 2324335646,
+  "drop_set_before_vae": false,
+  "fit": {
+   "label": "predicted",
+   "phases": {
+    "encode": 8197581550,
+    "denoise": 9168770160,
+    "vae": 13621449840
+   },
+   "peak_phase": "vae",
+   "peak_bytes": 13621449840,
+   "budget_bytes": 24653119488,
+   "fits": true
+  },
+  "sizes": {
+   "compressed": 5239059784,
+   "extras": 22035456,
+   "nonblock": 368050176,
+   "encoders": 6228181504,
+   "vae": 168120878
+  },
+  "peaks": {
+   "label": "sampled at phase boundaries",
+   "encode": {
+    "footprint_start": 406258792,
+    "mlx_peak": 6951380308,
+    "footprint_end": 6674896728,
+    "active_at_start": 22035604
+   },
+   "set_load": {
+    "footprint_start": 6669653848,
+    "mlx_peak": 5645635920,
+    "footprint_end": 6038262968,
+    "active_at_start": 37784712
+   },
+   "denoise": {
+    "footprint_start": 6038262968,
+    "mlx_peak": 7013937606,
+    "footprint_end": 8180175984,
+    "active_at_start": 5392534920
+   },
+   "vae": {
+    "footprint_start": 8120964208,
+    "mlx_peak": 12790625326,
+    "footprint_end": 6188799040,
+    "active_at_start": 5394697644
+   }
+  },
+  "decode_launches": 200,
+  "lifecycle": {
+   "encoder_loads": 0,
+   "encoder_seconds": 0.0,
+   "set_loads": 1,
+   "set_seconds": 9.13032195798587,
+   "forced_set_drops": 0
+  },
+  "versions": {
+   "mlx": "0.32.2",
+   "mflux": "0.20.0"
+  }
+ },
+ "output_shape": [
+  1,
+  4096,
+  128
+ ],
+ "output_dtype": "mlx.core.bfloat16",
+ "footprint_peak_bytes": 13142463552,
+ "mlx_peak_bytes_max_over_phases": 12790625326,
+ "key": {
+  "model": "flux2-klein-base-4b",
+  "seed": 42,
+  "steps": 4,
+  "size": 1024,
+  "prompt": "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water",
+  "guidance": 4.0,
+  "eval_policy": "per-block",
+  "df11": "~/.cache/huggingface/hub/models--mingyi456--FLUX.2-klein-base-4B-DF11/snapshots/b887c73c5cbc3f4d50887a04c41509fb25a0a0f0",
+  "base": "~/.cache/huggingface/hub/models--black-forest-labs--FLUX.2-klein-base-4B/snapshots/a3b4f4849157f664bdbc776fd7453c2783562f4d",
+  "source": "b47022444e49712ac8f17dab3af8bd00045829913f3d8bb97a15f5d46fc2f24f",
+  "mlx": "0.32.2"
+ },
+ "memory_caps_gb": [
+  20,
+  22
+ ],
+ "provenance": {
+  "git": "3b4831901d05879d416ead3f2b66164bde31157e",
+  "source_hash": "b47022444e49712ac8f17dab3af8bd00045829913f3d8bb97a15f5d46fc2f24f",
+  "mlx": "0.32.2",
+  "mflux": "0.20.0",
+  "macos": "27.0.1",
+  "device_info": {
+   "device_name": "Apple M1 Max",
+   "max_recommended_working_set_size": 26800603136,
+   "memory_size": 34359738368,
+   "architecture": "applegpu_g13s",
+   "max_buffer_length": 20100448256,
+   "resource_limit": 499000
+  },
+  "memory_caps_gb": [
+   20,
+   22
+  ],
+  "cache_limit": 32641751449,
+  "cache_memory": 8914108,
+  "power": {
+   "ac": true,
+   "battery_pct": 88
+  },
+  "date": "2026-10-08"
+ }
+}

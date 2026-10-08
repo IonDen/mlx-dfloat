@@ -1,0 +1,48 @@
+{
+ "exit_code": 2,
+ "output": "k.png",
+ "memory_caps_gb": null,
+ "model_kwargs": {
+  "model": "z-image-turbo",
+  "df11_path": null,
+  "base_path": "Tongyi-MAI/Z-Image",
+  "eval_policy": "per-block",
+  "cache_limit": null,
+  "fit_check": true,
+  "budget_bytes": 9842633386
+ },
+ "height": 1024,
+ "width": 1024,
+ "memory_ceiling_bytes": null,
+ "tier_gb": 16,
+ "label": "CAPPED",
+ "watchdog_ceiling_bytes": 9842633386,
+ "limits": {
+  "tier": {
+   "tier_gb": 16,
+   "ram_bytes": 17179869184,
+   "recommended_bytes": 11453246122,
+   "memory_limit_bytes": 10737418240,
+   "cache_limit_bytes": 10737418240,
+   "wired_limit_bytes": 8589934592,
+   "reserve_bytes": 1610612736,
+   "budget_bytes": 11453246122,
+   "ceiling_bytes": 9842633386,
+   "budget_source": "ratio",
+   "is_host": false,
+   "label": "CAPPED"
+  },
+  "effective": {
+   "memory_limit_bytes": 10737418240,
+   "cache_limit_bytes": 10737418240,
+   "wired_limit_bytes": 8589934592
+  },
+  "applied": "tier-caps"
+ },
+ "error": "DFloatResourceError: predicted peak 12.2 GiB in the denoise phase exceeds the budget 9.2 GiB (encode 9.4 GiB, denoise 12.2 GiB, vae 5.3 GiB); pass fit_check=False to run anyway",
+ "footprint_peak_bytes": 481101192,
+ "footprint_peak_label": "OS phys_footprint, sampled every 0.05 s by the watchdog",
+ "watched_peak_bytes": 481101192,
+ "mlx_peak_bytes": 572470,
+ "elapsed_seconds": 3.24
+}

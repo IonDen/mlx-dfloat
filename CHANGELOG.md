@@ -15,11 +15,32 @@ All notable changes to this project are documented here. The format follows
   it.
 - Z-Image-Turbo and Z-Image generation through mflux: `mlx-dfloat generate --model z-image-turbo|z-image` and the
   `DFloatZImage` class. `mlx_dfloat.mflux.DFloatModel(name)` returns a ready model for any registered name. Every
-  Z-Image tensor equals its BF16 original, and Z-Image's final latents match the BF16 transformer's bit for bit.
-  Turbo has no BF16 original: five sampled groups (32 of 271 matrices) equal the FP32 original rounded to BF16.
-  Turbo's latents have not been compared with a reference yet. The default checkpoints are pinned to one commit on
-  the Hub. The measured 32 GB rows peak at about 13 GiB at 1024². A run on the 32 GB Mac under a 16 GB Mac's limits,
-  with the fit check turned off, was stopped by the watchdog while encoding the prompt, so that tier is at risk.
+  compressed matrix and stored tensor of the Z-Image transformer (271 and 250) equals its BF16 original
+  (`bench/results/parity/z-image/full-vs-bf16.json`), and Z-Image's final latents match the BF16 transformer's bit for
+  bit (`bench/results/identity/z-image-1024/compare.json`). Turbo has no BF16 original: its 271 matrices decode on the
+  GPU to the CPU reference's bits, and five sampled groups (32 of 271 matrices) equal the FP32 original rounded to BF16
+  (both records in `bench/results/parity/z-image-turbo/`). Turbo's
+  latents have not been compared with a reference yet. The default checkpoints are pinned to one commit on the Hub.
+  The measured 32 GB runs peak at 13.1–14.3 GiB at 1024². Under a 16 GB Mac's caps on the 32 GB Mac, the fit check
+  refuses Turbo (`bench/results/refusals/z-image-turbo-1024-tier16.json`), and a forced run was stopped by the
+  watchdog after 4.7 s, at the start of loading the transformer weights, so that tier is at risk.
+- FLUX.2 Klein generation through mflux: `mlx-dfloat generate --model` with `flux2-klein-base-4b`, `flux2-klein-4b`,
+  `flux2-klein-base-9b` or `flux2-klein-9b`, and the `DFloatFlux2Klein` class, also returned by `DFloatModel`. Every
+  compressed matrix and stored tensor of the FLUX.2-klein-base-4B transformer (105 and 64) equals its BF16 original
+  (`bench/results/parity/flux2-klein-base-4b/full-vs-bf16.json`), and its final latents match the BF16 transformer's
+  bit for bit (`bench/results/identity/flux2-klein-base-4b-1024/compare.json`). For the other three, the GPU decoder
+  matches the CPU reference on every matrix and sampled groups equal the BF16 originals (29, 41 and 30 matrices;
+  records in `bench/results/parity/flux2-klein-4b/`, `flux2-klein-base-9b/` and `flux2-klein-9b/`); their latents have
+  not been compared. Measured peaks at 1024² on the 32 GB Mac: 11.88 GiB (4B), 12.78 GiB (base 4B), 18.40 GiB (9B),
+  17.60 GiB (base 9B). Under a 16 GB and a 24 GB Mac's caps the base 4B passed (8.15 and 12.29 GiB). Under a 24 GB
+  Mac's caps the fit check refuses the base 9B (`bench/results/refusals/flux2-klein-base-9b-1024-tier24.json`) and a
+  forced run was stopped by the watchdog, so that tier is at risk. A base model and the distilled model of the same
+  size have the same text-encoder and VAE files on the Hub, and the 4B pair the same tokenizer files too.
+- A FLUX.2 Klein base that lacks a text-encoder or VAE tensor is refused with `DFloatFormatError` instead of leaving
+  that weight at its random initial value.
+- A FLUX.2 Klein call warns when the prompt encode holds more memory than the fit estimate allows for it. The
+  estimate counts only the text-encoder layers whose output FLUX.2 Klein reads, so the warning fires if a future mflux
+  runs them all.
 - `scripts.verify_remote_group --cast-fp32-to-bf16` compares a DFloat11 repository with an FP32 original rounded to
   BF16, nearest even.
 
@@ -28,16 +49,36 @@ All notable changes to this project are documented here. The format follows
 - `mlx-dfloat generate --model` accepts `z-image` and `z-image-turbo` besides the FLUX.1 names, and the default step
   count and guidance follow the model. The image identity check (`scripts/verify_image.py`) covers Z-Image and
   refuses Z-Image-Turbo, which has no BF16 original to compare with.
+- `mlx-dfloat generate --model` also accepts the four FLUX.2 Klein names. A distilled FLUX.2 Klein model refuses a
+  `--guidance` other than 1.0, and every FLUX.2 Klein model refuses `--scheduler`, matching mflux's own Klein
+  command. The image identity check covers FLUX.2 Klein.
 - `mlx-dfloat generate --report` records `elapsed_seconds`, and the watchdog's `abort.json` names the phase that was
   running (`build`, `encode`, `set_load`, `denoise` or `vae`). A checkpoint or base taken as a Hub id (the defaults
-  included) prints one line saying it is resolved on the Hub, from the local cache or by download. On the Z-Image base model, `--negative-prompt` warns when guidance
-  is 1 or less, where it has no effect.
+  included) prints one line saying it is resolved on the Hub, from the local cache or by download. On the Z-Image base
+  model, `--negative-prompt` warns when guidance is 1 or less, where it has no effect.
 - The README tier table's MLX column shows the larger of the watchdog's sampled peak and MLX's exact per-phase peak,
   and a row the watchdog stopped shows its peaks as lower bounds.
+- In the README tier table, a run the watchdog stopped under a smaller Mac's limits now names the limits its
+  `abort.json` recorded: mlx-dfloat's caps, MLX's defaults, or "not recorded" for a file that lacks them. The second
+  column is now headed "Working set − reserve", because on those rows it is the watchdog ceiling, not the fit budget.
 - The README starts with what the library is for, a figure of a FLUX.1 run, a comparison with mflux's BF16 and
   8-bit paths, and a Python example.
 - The package summary and keywords name the FLUX.1 use case; `mlx-lm` is no longer a keyword, since no mlx-lm path
   exists yet.
+- The `mlx-dfloat generate --help` text no longer prints reST markup, explains the `--eval-policy` choices, and says
+  "the host's own limits" where it said "the host caps".
+
+### Fixed
+
+- `mlx-dfloat generate --tier` in 0.1.0 ran under MLX's default limits, which could overstate the peak a smaller Mac
+  would see: without the wired cap, MLX allocated more memory for the same FLUX.2 Klein VAE decode, enough to stop
+  runs that pass under the caps. It now installs that Mac's caps (16 GB: 8 GiB wired, 10 GiB memory; 24 GB: 14 and
+  16 GiB), and the watchdog's `abort.json` records the limits in force.
+- `mlx-dfloat generate --tier 16` and `--tier 24` checked the fit against the watchdog ceiling, the working set minus
+  1.5 GiB, which is looser than the budget `generate` applies on a real Mac of that size (the working set minus 2 GiB).
+  The fit check now uses the real Mac's budget: 8.67 GiB at 16 GB and 14.00 GiB at 24 GB. The watchdog ceiling stays
+  at 9.17 and 14.50 GiB. The committed 16 GB and 24 GB results were recorded under the older budget, and none of
+  their outcomes changes under the new one.
 
 ## [0.1.0] - 2026-10-01
 

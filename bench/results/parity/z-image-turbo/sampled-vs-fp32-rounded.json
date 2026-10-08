@@ -1,0 +1,254 @@
+{
+ "df11_repo": "mingyi456/Z-Image-Turbo-DF11",
+ "df11_revision": "422db601eac214d0f1e2cc99e2cf34906e8a7267",
+ "bf16_repo": "Tongyi-MAI/Z-Image-Turbo",
+ "bf16_revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
+ "mode": "parity",
+ "control": "fp32 rounded to bf16 (nearest even)",
+ "exit_code": 0,
+ "compared": 32,
+ "mismatched": 0,
+ "memory_caps_gb": [
+  20,
+  22
+ ],
+ "groups": [
+  {
+   "group": "layers.1",
+   "matrices": [
+    {
+     "name": "layers.1.attention.to_q.weight",
+     "n": 14745600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "layers.1.attention.to_k.weight",
+     "n": 14745600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "layers.1.attention.to_v.weight",
+     "n": 14745600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "layers.1.attention.to_out.0.weight",
+     "n": 14745600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "layers.1.feed_forward.w1.weight",
+     "n": 39321600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "layers.1.feed_forward.w2.weight",
+     "n": 39321600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "layers.1.feed_forward.w3.weight",
+     "n": 39321600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "layers.1.adaLN_modulation.0.weight",
+     "n": 3932160,
+     "equal": true,
+     "original_dtype": "F32"
+    }
+   ],
+   "max_code_length": 29,
+   "n_blocks": 14928,
+   "file": "model.safetensors",
+   "status": "equal"
+  },
+  {
+   "group": "noise_refiner.0",
+   "matrices": [
+    {
+     "name": "noise_refiner.0.attention.to_q.weight",
+     "n": 14745600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "noise_refiner.0.attention.to_k.weight",
+     "n": 14745600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "noise_refiner.0.attention.to_v.weight",
+     "n": 14745600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "noise_refiner.0.attention.to_out.0.weight",
+     "n": 14745600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "noise_refiner.0.feed_forward.w1.weight",
+     "n": 39321600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "noise_refiner.0.feed_forward.w2.weight",
+     "n": 39321600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "noise_refiner.0.feed_forward.w3.weight",
+     "n": 39321600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "noise_refiner.0.adaLN_modulation.0.weight",
+     "n": 3932160,
+     "equal": true,
+     "original_dtype": "F32"
+    }
+   ],
+   "max_code_length": 28,
+   "n_blocks": 15105,
+   "file": "model.safetensors",
+   "status": "equal"
+  },
+  {
+   "group": "context_refiner.0",
+   "matrices": [
+    {
+     "name": "context_refiner.0.attention.to_q.weight",
+     "n": 14745600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "context_refiner.0.attention.to_k.weight",
+     "n": 14745600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "context_refiner.0.attention.to_v.weight",
+     "n": 14745600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "context_refiner.0.attention.to_out.0.weight",
+     "n": 14745600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "context_refiner.0.feed_forward.w1.weight",
+     "n": 39321600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "context_refiner.0.feed_forward.w2.weight",
+     "n": 39321600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "context_refiner.0.feed_forward.w3.weight",
+     "n": 39321600,
+     "equal": true,
+     "original_dtype": "F32"
+    }
+   ],
+   "max_code_length": 27,
+   "n_blocks": 14098,
+   "file": "model.safetensors",
+   "status": "equal"
+  },
+  {
+   "group": "layers.15",
+   "matrices": [
+    {
+     "name": "layers.15.attention.to_q.weight",
+     "n": 14745600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "layers.15.attention.to_k.weight",
+     "n": 14745600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "layers.15.attention.to_v.weight",
+     "n": 14745600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "layers.15.attention.to_out.0.weight",
+     "n": 14745600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "layers.15.feed_forward.w1.weight",
+     "n": 39321600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "layers.15.feed_forward.w2.weight",
+     "n": 39321600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "layers.15.feed_forward.w3.weight",
+     "n": 39321600,
+     "equal": true,
+     "original_dtype": "F32"
+    },
+    {
+     "name": "layers.15.adaLN_modulation.0.weight",
+     "n": 3932160,
+     "equal": true,
+     "original_dtype": "F32"
+    }
+   ],
+   "max_code_length": 28,
+   "n_blocks": 14581,
+   "file": "model.safetensors",
+   "status": "equal"
+  },
+  {
+   "group": "cap_embedder",
+   "matrices": [
+    {
+     "name": "cap_embedder.1.weight",
+     "n": 9830400,
+     "equal": true,
+     "original_dtype": "F32"
+    }
+   ],
+   "max_code_length": 24,
+   "n_blocks": 781,
+   "file": "model.safetensors",
+   "status": "equal"
+  }
+ ]
+}
