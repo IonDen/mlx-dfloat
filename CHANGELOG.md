@@ -13,9 +13,27 @@ All notable changes to this project are documented here. The format follows
   known bits. The same check now runs the first time a process decodes on Metal, once for each write path, and when the
   decode backend is set up; if it fails, the Metal backend refuses to decode and `available_backends()` stops listing
   it.
+- Z-Image-Turbo and Z-Image generation through mflux: `mlx-dfloat generate --model z-image-turbo|z-image` and the
+  `DFloatZImage` class. `mlx_dfloat.mflux.DFloatModel(name)` returns a ready model for any registered name. Every
+  Z-Image tensor equals its BF16 original, and Z-Image's final latents match the BF16 transformer's bit for bit.
+  Turbo has no BF16 original: five sampled groups (32 of 271 matrices) equal the FP32 original rounded to BF16.
+  Turbo's latents have not been compared with a reference yet. The default checkpoints are pinned to one commit on
+  the Hub. The measured 32 GB rows peak at about 13 GiB at 1024². A run on the 32 GB Mac under a 16 GB Mac's limits,
+  with the fit check turned off, was stopped by the watchdog while encoding the prompt, so that tier is at risk.
+- `scripts.verify_remote_group --cast-fp32-to-bf16` compares a DFloat11 repository with an FP32 original rounded to
+  BF16, nearest even.
 
 ### Changed
 
+- `mlx-dfloat generate --model` accepts `z-image` and `z-image-turbo` besides the FLUX.1 names, and the default step
+  count and guidance follow the model. The image identity check (`scripts/verify_image.py`) covers Z-Image and
+  refuses Z-Image-Turbo, which has no BF16 original to compare with.
+- `mlx-dfloat generate --report` records `elapsed_seconds`, and the watchdog's `abort.json` names the phase that was
+  running (`build`, `encode`, `set_load`, `denoise` or `vae`). A checkpoint or base taken as a Hub id (the defaults
+  included) prints one line saying it is resolved on the Hub, from the local cache or by download. On the Z-Image base model, `--negative-prompt` warns when guidance
+  is 1 or less, where it has no effect.
+- The README tier table's MLX column shows the larger of the watchdog's sampled peak and MLX's exact per-phase peak,
+  and a row the watchdog stopped shows its peaks as lower bounds.
 - The README starts with what the library is for, a figure of a FLUX.1 run, a comparison with mflux's BF16 and
   8-bit paths, and a Python example.
 - The package summary and keywords name the FLUX.1 use case; `mlx-lm` is no longer a keyword, since no mlx-lm path
