@@ -1,3 +1,4 @@
+import hashlib
 import json
 import threading
 
@@ -7,6 +8,10 @@ import pytest
 import scripts.verify_checkpoint as vc
 from scripts.verify_checkpoint import main, run_key, verify
 from tests._df11_fixtures import random_bf16, write_bf16_original, write_checkpoint
+
+from mlx_dfloat import _layouts
+from mlx_dfloat._layouts import ContentProbe, SynthesizedLayout
+from mlx_dfloat._safetensors import parse_header, read_header_bytes
 
 KEY = {
     "df11_revision": "a" * 40,
@@ -807,3 +812,81 @@ def test_rate_from_with_the_reference_decoder_is_a_usage_error(pair, tmp_path, c
     assert main(argv) == 2
     assert "--rate-from needs --decoder metal" in capsys.readouterr().err
     assert not (out / "summary.json").exists()
+
+
+def _config_less_fused(tmp_path, monkeypatch):
+    """A config-less single file storing q and concat(gate, up), its pinned layout installed as the only one."""
+    rng = np.random.default_rng(17)
+    q, g, u = (random_bf16(rng, s) for s in [(4, 4), (6, 4), (6, 4)])
+    df11 = write_checkpoint(
+        tmp_path / "df11",
+        groups={"blocks.0": [q, np.concatenate([g, u])]},
+        pattern=r"blocks\.\d+",
+        sub_paths=("q", "gate_up"),
+        single_file=True,
+        extras={"norm.weight": NORM},
+        write_config=False,
+    )
+    file = df11 / "model.safetensors"
+    raw, start, size = read_header_bytes(file)
+    sm = parse_header(raw, data_start=start, file_size=size, source="t")["blocks.0.sign_mantissa"]
+    head = file.read_bytes()[sm.offset : sm.offset + 8]
+    layout = SynthesizedLayout(
+        key="tiny",
+        label="tiny",
+        repo_id="t/t",
+        revision="0" * 40,
+        file_name="model.safetensors",
+        header_sha256=hashlib.sha256(raw).hexdigest(),
+        file_sha256="0" * 64,  # a plain file name here, so the whole-file pin is not consulted
+        groups=1,
+        extras=1,
+        raw_config={
+            "version": "0.5.0",
+            "threads_per_block": [512],
+            "bytes_per_thread": 8,
+            "pattern_dict": {r"blocks\.\d+": ["q", "gate_up"]},
+        },
+        row_splits={"gate_up": ("gate", "up")},
+        probes=(
+            ContentProbe(
+                tensor="blocks.0.sign_mantissa",
+                offset=0,
+                length=8,
+                sha256=hashlib.sha256(head).hexdigest(),
+            ),
+        ),
+    )
+    monkeypatch.setattr(_layouts, "KNOWN_LAYOUTS", (layout,))
+    bf16 = tmp_path / "bf16"
+    bf16.mkdir()
+    originals = {
+        "blocks.0.q.weight": q,
+        "blocks.0.gate.weight": g,
+        "blocks.0.up.weight": u,
+        "norm.weight": NORM,
+    }
+    mx.save_safetensors(
+        str(bf16 / "diffusion_pytorch_model.safetensors"),
+        {k: mx.array(v).view(mx.bfloat16) for k, v in originals.items()},
+    )
+    return df11, bf16
+
+
+def test_a_config_less_fused_checkpoint_against_an_original_with_separate_halves(
+    tmp_path, monkeypatch
+):
+    # Bug caught: the fused matrix compared whole (no original named gate_up: two originals uncovered, exit 2), or
+    # the halves compared against each other's originals (exit 1).
+    df11, bf16 = _config_less_fused(tmp_path, monkeypatch)
+    out = tmp_path / "out"
+    assert verify(df11, bf16, out, key=KEY) == 0
+    s = _summary(out)
+    assert (s["compared"], s["extras_compared"], s["uncovered_originals"]) == (3, 1, [])
+    record = json.loads((out / "groups" / "blocks.0.json").read_text())
+    got = [(m["name"], m["n"], m["equal"]) for m in record["matrices"]]
+    assert got == [  # 4x4, then the 6x4 halves of the stored 12x4 matrix
+        ("blocks.0.q.weight", 16, True),
+        ("blocks.0.gate.weight", 24, True),
+        ("blocks.0.up.weight", 24, True),
+    ]
