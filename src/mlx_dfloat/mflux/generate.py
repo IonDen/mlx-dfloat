@@ -119,7 +119,7 @@ def _add_arguments(p: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         help="denoise steps (default per model, as mflux: schnell 4, dev 25, z-image 50, z-image-turbo 9, "
-        "FLUX.2 Klein base 50, distilled 4)",
+        "FLUX.2 Klein base 50, distilled 4, qwen-image-2.1 40)",
     )
     p.add_argument("--height", type=int, default=1024)
     p.add_argument("--width", type=int, default=1024)
@@ -129,19 +129,20 @@ def _add_arguments(p: argparse.ArgumentParser) -> None:
         default=None,
         help="guidance (default per model, as mflux: FLUX.1 dev 3.5, ignored by schnell and z-image-turbo; "
         "z-image 0, its model card suggests about 4; FLUX.2 Klein 1.0, where the base models take another "
-        "value such as 4 and the distilled ones refuse it)",
+        "value such as 4 and the distilled ones refuse it; Qwen-Image 2.1 1.0, where classifier-free guidance "
+        "needs a value above 1 and --negative-prompt)",
     )
     p.add_argument(
         "--scheduler",
         default=None,
-        help="scheduler (default per model: FLUX.1 linear; FLUX.2 Klein always runs "
+        help="scheduler (default per model: FLUX.1 and Qwen-Image 2.1 linear; FLUX.2 Klein always runs "
         "flow_match_euler_discrete and refuses the flag)",
     )
     p.add_argument(
         "--negative-prompt",
         default=None,
-        help="used by z-image with --guidance above 1; accepted and ignored for the other models, "
-        "as mflux does",
+        help="used by z-image and qwen-image-2.1 with --guidance above 1; accepted and ignored for the "
+        "other models, as mflux does",
     )
     p.add_argument(
         "--output",
@@ -398,9 +399,21 @@ def run(
         )
         print(f"warning: --negative-prompt is ignored: {why}", file=sys.stderr)
     elif args.negative_prompt and (_guidance(args) or 0.0) <= 1.0:
+        default = entry(args.model).default_guidance or 0  # None (Z-Image): mflux's own rule, 0
         print(
             "warning: --negative-prompt has no effect: classifier-free guidance runs only above "
-            "guidance 1.0 (the default is 0). Pass --guidance above 1.0 to enable it.",
+            f"guidance 1.0 (the default is {default}). Pass --guidance above 1.0 to enable it.",
+            file=sys.stderr,
+        )
+    if (
+        entry(args.model).cfg_needs_negative
+        and (_guidance(args) or 0.0) > 1.0
+        and not args.negative_prompt
+    ):
+        print(
+            "warning: --guidance above 1.0 runs no classifier-free guidance for "
+            f"{entry(args.model).label} without --negative-prompt (as mflux); pass --negative-prompt "
+            "to enable it",
             file=sys.stderr,
         )
     output = Path(args.output)
