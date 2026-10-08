@@ -143,11 +143,15 @@ def _parse_entry(
     )
 
 
-def read_header(path: Path) -> dict[str, TensorInfo]:
-    """Read and validate the header of a safetensors file without reading tensor data.
+def read_header_bytes(path: Path) -> tuple[bytes, int, int]:
+    """Read the raw JSON header bytes of a safetensors file, checking only the length prefix.
+
+    Returns:
+        ``(raw, data_start, file_size)``: the header bytes after the 8-byte length, the absolute
+        offset where tensor data begins, and the file size.
 
     Raises:
-        DFloatFormatError: The file cannot be read, or its header is invalid or oversized.
+        DFloatFormatError: The file cannot be read, or its header length is invalid or oversized.
     """
     try:
         file_size = path.stat().st_size
@@ -163,7 +167,17 @@ def read_header(path: Path) -> dict[str, TensorInfo]:
             raw = handle.read(length)
     except OSError as exc:
         raise DFloatFormatError(f"{path}: cannot read file ({exc.strerror or exc})") from exc
-    return parse_header(raw, data_start=8 + length, file_size=file_size, source=path.name)
+    return raw, 8 + length, file_size
+
+
+def read_header(path: Path) -> dict[str, TensorInfo]:
+    """Read and validate the header of a safetensors file without reading tensor data.
+
+    Raises:
+        DFloatFormatError: The file cannot be read, or its header is invalid or oversized.
+    """
+    raw, data_start, file_size = read_header_bytes(path)
+    return parse_header(raw, data_start=data_start, file_size=file_size, source=path.name)
 
 
 def read_array(path: Path, info: TensorInfo) -> npt.NDArray[Any]:
@@ -181,5 +195,6 @@ __all__ = [
     "parse_header",
     "read_array",
     "read_header",
+    "read_header_bytes",
     "short_repr",
 ]

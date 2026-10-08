@@ -1,6 +1,7 @@
 """DFloat11 checkpoint format: config, per-group arrays, validation, discovery."""
 
 import dataclasses
+import hashlib
 import json
 import os
 import re
@@ -14,7 +15,16 @@ import mlx.core as mx
 import numpy as np
 import numpy.typing as npt
 
-from mlx_dfloat._safetensors import TensorInfo, read_array, read_header, short_repr
+from mlx_dfloat import _layouts
+from mlx_dfloat._layouts import SynthesizedLayout, identify_layout
+from mlx_dfloat._safetensors import (
+    TensorInfo,
+    parse_header,
+    read_array,
+    read_header,
+    read_header_bytes,
+    short_repr,
+)
 from mlx_dfloat.errors import DFloatBackendError, DFloatFormatError
 
 SUPPORTED_VERSIONS: frozenset[str] = frozenset({"0.2.0", "0.3.1", "0.3.2", "0.5.0"})
@@ -548,12 +558,21 @@ def load_group_mx(group: DF11Group) -> MxGroup:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class DF11Checkpoint:
-    """A DF11 model directory: its config, compressed groups, and uncompressed extra tensors."""
+    """A DF11 model directory: its config, compressed groups, and uncompressed extra tensors.
+
+    ``config_source`` says where the config came from: ``"config.json"``, or for a config-less
+    single file, the pinned layout that matched it and what was checked: ``"header and spot checks
+    match layout <key> (<repo>@<revision>)"``, plus ``"; file sha256 matches"`` when the file is a
+    blob in the classic per-repo Hugging Face cache (``models--*/blobs/<sha256>``, before
+    huggingface_hub 2.0) whose name equals the layout's pin. The shared blob store of 2.0 and later
+    does not name files by their sha256, so a file read from it carries no whole-file claim.
+    """
 
     root: Path
     config: DF11Config
     groups: Mapping[str, DF11Group]
     extras: Mapping[str, tuple[Path, TensorInfo]]
+    config_source: str = "config.json"
 
 
 def _regular_file(path: Path) -> bool:
@@ -563,23 +582,32 @@ def _regular_file(path: Path) -> bool:
         return False
 
 
-def open_checkpoint(path: str | os.PathLike[str]) -> DF11Checkpoint:
-    """Discover the groups and extras of a DF11 checkpoint directory, reading headers only.
+def config_for_layout(layout: SynthesizedLayout) -> DF11Config:
+    """The typed config a pinned layout supplies, validated like a downloaded one.
 
     Raises:
-        DFloatFormatError: The config is unusable; a shard is not a regular file; a group name is
-            unsafe, a group is incomplete, split across files, or has wrong dtypes/ranks; a tensor
-            name appears in two files; or a group's matrix count disagrees with its pattern.
+        DFloatFormatError: The layout's config or split table is malformed.
     """
-    root = Path(path).expanduser()
-    config = read_df11_config(root)
+    source = f"synthesized config {layout.key}"
+    raw = json.loads(json.dumps(layout.raw_config))  # a private copy in plain dicts and lists
+    return with_row_splits(parse_df11_config(raw, source=source), layout.row_splits, source=source)
+
+
+def group_headers(
+    headers: Mapping[Path, Mapping[str, TensorInfo]], config: DF11Config
+) -> tuple[dict[str, DF11Group], dict[str, tuple[Path, TensorInfo]]]:
+    """Sort the tensors of a checkpoint's files into compressed groups and extras.
+
+    Each group's matrix count is checked against its stored names; the group then carries the
+    names it decodes into and the row plan of any fused matrix (``row_split_plan``).
+
+    Raises:
+        DFloatFormatError: A tensor name appears in two files; a group name is unsafe; a group is
+            incomplete, split across files, or has wrong dtypes/ranks; or its matrix count
+            disagrees with its pattern.
+    """
     owner: dict[str, Path] = {}
-    headers: dict[Path, dict[str, TensorInfo]] = {}
-    for file in sorted(root.glob("*.safetensors")):
-        if not _regular_file(file):
-            raise DFloatFormatError(f"{file.name}: not a regular file")
-        header = read_header(file)
-        headers[file] = header
+    for file, header in headers.items():
         for name in header:
             if name in owner:
                 raise DFloatFormatError(
@@ -611,12 +639,165 @@ def open_checkpoint(path: str | os.PathLike[str]) -> DF11Checkpoint:
                 )
             tensors[field] = info
             claimed.add(full)
-        names = matrix_names_for(group, config.pattern_dict)
+        stored, names, plan = row_split_plan(group, config)
         n_matrices = tensors["split_positions"].shape[0] + 1
-        if n_matrices != len(names):
+        if n_matrices != len(stored):
             raise DFloatFormatError(
-                f"group {group!r}: holds {n_matrices} matrices but its pattern names {len(names)}"
+                f"group {group!r}: holds {n_matrices} matrices but its pattern names {len(stored)}"
             )
-        groups[group] = DF11Group(name=group, matrix_names=names, path=home, tensors=tensors)
+        groups[group] = DF11Group(
+            name=group, matrix_names=names, path=home, tensors=tensors, row_plan=plan
+        )
     extras = {n: (f, headers[f][n]) for n, f in owner.items() if n not in claimed}
+    return groups, extras
+
+
+ISSUES_URL = "https://github.com/IonDen/mlx-dfloat/issues"
+_HF_BLOB_NAME = re.compile(r"[0-9a-f]{64}")
+
+
+def _check_blob_name(file: Path, layout: SynthesizedLayout) -> bool:
+    """Compare a Hugging Face cache blob's name (its LFS sha256) with the pin; True if it matched.
+
+    Only the classic per-repo cache (huggingface_hub before 2.0) names a blob by its sha256: the
+    resolved file is ``models--<org>--<name>/blobs/<sha256>``. Since 2.0 the per-repo blob is a
+    link into a shared store, ``hub/blobs/<2 chars>/<name>``, whose name is not the file's sha256.
+    Returns False when the resolved file is not a classic blob (the shared store, a ``--local-dir``
+    copy, a renamed file), so nothing was checked.
+
+    Raises:
+        DFloatFormatError: The blob name is a sha256 other than the layout's ``file_sha256``.
+    """
+    resolved = file.resolve()
+    blob = resolved.name
+    classic = resolved.parent.name == "blobs" and resolved.parent.parent.name.startswith("models--")
+    if not classic or not _HF_BLOB_NAME.fullmatch(blob):
+        return False
+    if blob != layout.file_sha256:
+        raise DFloatFormatError(
+            f"{file.name}: header matches the known layout {layout.label}, but the file's sha256 "
+            f"(from its Hugging Face cache name) is {blob}, not the {layout.file_sha256} it was "
+            f"checked against; re-download the file, or report it at {ISSUES_URL}."
+        )
+    return True
+
+
+def _check_spot_checks(
+    file: Path, infos: Mapping[str, TensorInfo], layout: SynthesizedLayout
+) -> None:
+    pinned = f"layout {layout.key} ({layout.repo_id}@{layout.revision[:8]})"
+    if not layout.probes:
+        raise DFloatFormatError(f"{file.name}: {pinned} pins no spot check; refused")
+    try:
+        with file.open("rb") as handle:
+            for probe in layout.probes:
+                info = infos.get(probe.tensor)
+                if info is None:
+                    raise DFloatFormatError(
+                        f"{file.name}: {pinned} spot-checks {short_repr(probe.tensor)}, which the "
+                        "file lacks"
+                    )
+                if probe.length <= 0 or not 0 <= probe.offset <= info.nbytes - probe.length:
+                    raise DFloatFormatError(
+                        f"{file.name}: {pinned} spot check of {probe.tensor} at byte "
+                        f"{probe.offset} ({probe.length} bytes) lies outside its {info.nbytes} bytes"
+                    )
+                handle.seek(info.offset + probe.offset)
+                digest = hashlib.sha256(handle.read(probe.length)).hexdigest()
+                if digest != probe.sha256:
+                    raise DFloatFormatError(
+                        f"{file.name}: header matches the known layout {layout.label}, but the "
+                        "stored data differs from the copy it was checked against (sha256 "
+                        f"{digest} at byte {probe.offset} of {probe.tensor}); re-download the "
+                        f"file, or report it at {ISSUES_URL}."
+                    )
+    except OSError as exc:
+        raise DFloatFormatError(f"{file.name}: cannot read file ({exc.strerror or exc})") from exc
+
+
+def _open_config_less(root: Path, layouts: Sequence[SynthesizedLayout]) -> DF11Checkpoint:
+    files = sorted(root.glob("*.safetensors"))
+    if len(files) != 1:
+        raise DFloatFormatError(
+            f"{_label(root)}: no config.json and {len(files)} safetensors files; a config-less "
+            "checkpoint must be a single file"
+        )
+    file = files[0]
+    if not _regular_file(file):
+        raise DFloatFormatError(f"{file.name}: not a regular file")
+    raw, data_start, file_size = read_header_bytes(file)
+    layout = identify_layout(raw, known=layouts)
+    if layout is None:
+        raise DFloatFormatError(
+            f"{file.name}: this config-less file is not one this version of mlx-dfloat knows "
+            f"(header sha256 {hashlib.sha256(raw).hexdigest()}). Use a copy with a config.json "
+            "that has a dfloat11_config block, or open an issue at "
+            f"{ISSUES_URL} with the repo, file name and sha256."
+        )
+    whole_file = _check_blob_name(file, layout)
+    infos = parse_header(raw, data_start=data_start, file_size=file_size, source=file.name)
+    config = config_for_layout(layout)
+    groups, extras = group_headers({file: infos}, config)
+    if len(groups) != layout.groups or len(extras) != layout.extras:
+        raise DFloatFormatError(
+            f"{file.name}: {len(groups)} groups and {len(extras)} extras; layout {layout.key} "
+            f"expects {layout.groups} and {layout.extras}"
+        )
+    _check_spot_checks(file, infos, layout)
+    return DF11Checkpoint(
+        root=root,
+        config=config,
+        groups=groups,
+        extras=extras,
+        config_source=(
+            f"header and spot checks match layout {layout.key} "
+            f"({layout.repo_id}@{layout.revision})"
+            + ("; file sha256 matches" if whole_file else "")
+        ),
+    )
+
+
+def _label(path: Path) -> str:
+    """A path's last component for messages (the caller knows where it lives), or the path itself."""
+    return path.name or str(path)
+
+
+def _has_legacy(root: Path) -> bool:
+    return any(root.glob("*.pkl")) or any(root.glob("*.ptx"))
+
+
+def open_checkpoint(
+    path: str | os.PathLike[str], *, layouts: Sequence[SynthesizedLayout] | None = None
+) -> DF11Checkpoint:
+    """Discover the groups and extras of a DF11 checkpoint directory, reading headers only.
+
+    A directory with a ``config.json`` is read through it and never consults a layout. A
+    directory without one must hold exactly one safetensors file whose header and content match a
+    pinned layout (``layouts``, default: the package's table, read at call time).
+
+    Raises:
+        DFloatFormatError: The path is not a directory, or its ``config.json`` exists but is not
+            a readable regular file; the config is unusable; a shard is not a regular file; a group
+            name is unsafe, a group is incomplete, split across files, or has wrong dtypes/ranks; a
+            tensor name appears in two files; a group's matrix count disagrees with its pattern; or
+            a config-less file matches no layout, fails its spot checks, or holds other group or
+            extra counts than its layout.
+    """
+    root = Path(path).expanduser()
+    if not root.is_dir():
+        raise DFloatFormatError(f"{_label(root)}: not a directory")
+    config_path = root / "config.json"
+    if os.path.lexists(config_path) and not _regular_file(config_path):
+        raise DFloatFormatError(
+            f"{_label(root)}/config.json: exists but is not a readable regular file"
+        )
+    if not os.path.lexists(config_path) and not _has_legacy(root):
+        return _open_config_less(root, _layouts.KNOWN_LAYOUTS if layouts is None else layouts)
+    config = read_df11_config(root)
+    headers: dict[Path, dict[str, TensorInfo]] = {}
+    for file in sorted(root.glob("*.safetensors")):
+        if not _regular_file(file):
+            raise DFloatFormatError(f"{file.name}: not a regular file")
+        headers[file] = read_header(file)
+    groups, extras = group_headers(headers, config)
     return DF11Checkpoint(root=root, config=config, groups=groups, extras=extras)
