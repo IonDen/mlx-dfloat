@@ -12,9 +12,16 @@ from typing import Any
 from mlx_dfloat.bench.capped import GIB
 from mlx_dfloat.bench.results import Summary
 from mlx_dfloat.errors import DFloatFormatError
+from mlx_dfloat.mflux.families import MODELS
 
-_MODEL_NAMES = {"schnell": "FLUX.1-schnell", "dev": "FLUX.1-dev", "krea-dev": "FLUX.1-Krea-dev"}
 _NOT_MEASURED = "not measured"
+_NOT_RECORDED = "not recorded"
+_STOPPED = "stopped by the watchdog"
+
+
+def _model_label(name: str) -> str:
+    """The published label of a registered model name; the name itself when it is not registered."""
+    return MODELS[name].label if name in MODELS else name
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -24,14 +31,15 @@ class TierRow:
     mac_gb: int
     ceiling_bytes: int
     model: str
-    df11_bytes: int
+    df11_bytes: int | None
     watched_peak_bytes: int
     footprint_peak_bytes: int
-    mlx_peak_bytes: int
+    mlx_peak_bytes: int | None
     label: str
     status: str
     limits_note: str
     source: str
+    stopped_after_s: float | None = None  # a run the watchdog stopped: its peaks are lower bounds
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -52,6 +60,20 @@ def _need(mapping: Mapping[str, Any], key: str, where: str) -> Any:
     if key not in mapping:
         raise DFloatFormatError(f"{where} has no {key!r} field")
     return mapping[key]
+
+
+def _mlx_peak(report: Mapping[str, Any]) -> int:
+    """The larger of the watchdog's sampled MLX peak (active + cache) and MLX's exact per-phase peaks.
+
+    The watchdog polls every 0.05 s and can miss a short spike; ``mx.get_peak_memory`` per phase (active only)
+    cannot, so whichever is larger is the better lower bound on what MLX held.
+    """
+    sampled = int(_need(report, "mlx_peak_bytes", "report"))
+    phases = report.get("peaks") or {}
+    exact = [
+        int(v["mlx_peak"]) for v in phases.values() if isinstance(v, Mapping) and "mlx_peak" in v
+    ]
+    return max([sampled, *exact])
 
 
 def tier_row_from_generate_report(report: Mapping[str, Any], *, source: str) -> TierRow:
@@ -79,14 +101,46 @@ def tier_row_from_generate_report(report: Mapping[str, Any], *, source: str) -> 
         df11_bytes=int(_need(sizes, "compressed", "sizes")) + int(_need(sizes, "extras", "sizes")),
         watched_peak_bytes=watched,
         footprint_peak_bytes=int(_need(report, "footprint_peak_bytes", "report")),
-        # The watchdog's MLX peak (active + cache), not a phase's active-only mx.get_peak_memory.
-        mlx_peak_bytes=int(_need(report, "mlx_peak_bytes", "report")),
+        mlx_peak_bytes=_mlx_peak(report),
         label=str(label),
         status="target" if watched <= ceiling else "over",
         limits_note="host caps"
         if _need(limits, "applied", "limits") == "host-caps"
         else "MLX defaults for the tier",
         source=source,
+    )
+
+
+def tier_row_from_abort_artifact(artifact: Mapping[str, Any], *, source: str) -> TierRow:
+    """Build a tier-table row from the abort artifact of a run the watchdog stopped.
+
+    The tier, label and model come from the artifact's run context (``generate`` hands it to its
+    watchdog); the DF11 size was never recorded, and the status says the run was stopped.
+
+    Raises:
+        DFloatFormatError: The artifact has no run context, the context lacks ``model``,
+            ``tier_gb`` or ``label``, or the label is PROOF (the harness proof, not a tier row).
+    """
+    context = artifact.get("context")
+    if not isinstance(context, Mapping):
+        raise DFloatFormatError("the abort artifact records no run context (model, tier_gb, label)")
+    label = _need(context, "label", "abort artifact context")
+    if label == "PROOF":
+        raise DFloatFormatError("a PROOF abort belongs to the harness proof, not the tier table")
+    mlx_peak = artifact.get("peak_mlx")
+    return TierRow(
+        mac_gb=int(_need(context, "tier_gb", "abort artifact context")),
+        ceiling_bytes=int(_need(artifact, "ceiling", "abort artifact")),
+        model=str(_need(context, "model", "abort artifact context")),
+        df11_bytes=None,
+        watched_peak_bytes=int(_need(artifact, "peak_watched", "abort artifact")),
+        footprint_peak_bytes=int(_need(artifact, "peak_footprint", "abort artifact")),
+        mlx_peak_bytes=None if mlx_peak is None else int(mlx_peak),
+        label=str(label),
+        status=_STOPPED,
+        limits_note="host caps" if label != "CAPPED" else "MLX defaults for the tier",
+        source=source,
+        stopped_after_s=float(_need(artifact, "elapsed", "abort artifact")),
     )
 
 
@@ -152,25 +206,44 @@ def _gib(n: int) -> str:
     return f"{n / GIB:.2f} GiB"
 
 
+def _gib_or_unrecorded(n: int | None) -> str:
+    return _NOT_RECORDED if n is None else _gib(n)
+
+
 def _pct(x: float | None) -> str:
     return _NOT_MEASURED if x is None else f"{x * 100:+.1f} %"
 
 
 _TIER_HEADER = (
     "| Mac | Fit budget (budget − reserve) | Model | DF11 size | Peak (watched) | Peak footprint "  # noqa: RUF001
-    "| Peak MLX (active + cache) | Label | Status | Limits | Result |"
+    "| Peak MLX (sampled active + cache, or exact phase peak) | Label | Status | Limits | Result |"
 )
+
+
+def _peaks(r: TierRow) -> tuple[str, str, str]:
+    """The three peak cells; a stopped run's are lower bounds, the watched one with the time it ran."""
+    watched, footprint = _gib(r.watched_peak_bytes), _gib(r.footprint_peak_bytes)
+    mlx = _gib_or_unrecorded(r.mlx_peak_bytes)
+    if r.stopped_after_s is None:
+        return watched, footprint, mlx
+    least = "at least "
+    return (
+        f"{least}{watched} (stopped after {r.stopped_after_s:.1f} s)",
+        least + footprint,
+        mlx if r.mlx_peak_bytes is None else least + mlx,
+    )
 
 
 def render_tier_table(rows: Sequence[TierRow]) -> str:
     """Render the tier table: GiB with two decimals, one row per measured tier."""
     lines = [_TIER_HEADER, "|" + "---|" * 11]
-    lines.extend(
-        f"| {r.mac_gb} GB | {_gib(r.ceiling_bytes)} | {_MODEL_NAMES.get(r.model, r.model)} "
-        f"| {_gib(r.df11_bytes)} | {_gib(r.watched_peak_bytes)} | {_gib(r.footprint_peak_bytes)} "
-        f"| {_gib(r.mlx_peak_bytes)} | {r.label} | {r.status} | {r.limits_note} | `{r.source}` |"
-        for r in rows
-    )
+    for r in rows:
+        watched, footprint, mlx = _peaks(r)
+        lines.append(
+            f"| {r.mac_gb} GB | {_gib(r.ceiling_bytes)} | {_model_label(r.model)} "
+            f"| {_gib_or_unrecorded(r.df11_bytes)} | {watched} "
+            f"| {footprint} | {mlx} | {r.label} | {r.status} | {r.limits_note} | `{r.source}` |"
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -179,7 +252,7 @@ def scenario_title(key: str) -> str:
     m = re.fullmatch(r"flux1-(.+)-(\d+)", key)
     if m is None:
         return key
-    return f"{_MODEL_NAMES.get(m.group(1), m.group(1))}, {m.group(2)}²"
+    return f"{_model_label(m.group(1))}, {m.group(2)}²"
 
 
 def render_overhead_block(

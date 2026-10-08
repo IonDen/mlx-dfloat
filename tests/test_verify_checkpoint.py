@@ -890,3 +890,50 @@ def test_a_config_less_fused_checkpoint_against_an_original_with_separate_halves
         ("blocks.0.gate.weight", 24, True),
         ("blocks.0.up.weight", 24, True),
     ]
+
+
+def test_zimage_layout_single_file_with_a_nonblock_group_against_a_diffusers_index(tmp_path):
+    # Bug caught: no index found when it is named diffusion_pytorch_model.safetensors.index.json (Z-Image's base),
+    # or the one-matrix `cap_embedder` group (pattern list ["1"]) not read as `cap_embedder.1.weight`, which leaves
+    # that original uncovered (exit 2 instead of 0).
+    rng = np.random.default_rng(11)
+    groups = {
+        "noise_refiner.0": [random_bf16(rng, (8, 4)), random_bf16(rng, (4, 8))],
+        "layers.0": [random_bf16(rng, (8, 4)), random_bf16(rng, (4, 8))],
+        "cap_embedder": [random_bf16(rng, (4, 6))],
+    }
+    df11 = write_checkpoint(
+        tmp_path / "df11",
+        groups=groups,
+        patterns={
+            r"noise_refiner\.\d+": ("attention.to_q", "feed_forward.w2"),
+            r"layers\.\d+": ("attention.to_q", "feed_forward.w2"),
+            "cap_embedder": ("1",),
+        },
+        extras={"t_embedder.mlp.0.weight": NORM, "cap_embedder.1.bias": NORM},
+        single_file=True,
+    )
+    originals = {
+        "t_embedder.mlp.0.weight": NORM,
+        "cap_embedder.1.bias": NORM,
+        "cap_embedder.1.weight": groups["cap_embedder"][0],
+    }
+    for g in ("noise_refiner.0", "layers.0"):
+        originals[f"{g}.attention.to_q.weight"], originals[f"{g}.feed_forward.w2.weight"] = groups[
+            g
+        ]
+    bf16 = write_bf16_original(tmp_path / "bf16", originals)
+    (bf16 / "model.safetensors.index.json").rename(
+        bf16 / "diffusion_pytorch_model.safetensors.index.json"
+    )
+    # A tensor sitting in a shard but absent from the index: only a run that reads the index leaves it out. A run
+    # that misses the index falls back to scanning shards and would report it as an uncovered original.
+    shard = bf16 / "model-00002-of-00002.safetensors"
+    held = mx.load(str(shard))
+    held["unindexed.weight"] = mx.array(NORM).view(mx.bfloat16)
+    mx.eval(held)  # mx.load is lazy: read every tensor before the file is overwritten
+    mx.save_safetensors(str(shard), held)
+    out = tmp_path / "out"
+    assert verify(df11, bf16, out, key=KEY) == 0
+    s = _summary(out)
+    assert (s["compared"], s["extras_compared"], s["uncovered_originals"]) == (5, 2, [])

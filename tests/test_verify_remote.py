@@ -11,6 +11,7 @@ from scripts.verify_remote_group import (
     LocalRangeSource,
     bf16_index,
     df11_index,
+    fp32_to_bf16_rne,
     main,
     pick_groups,
     verify_group,
@@ -610,3 +611,111 @@ def test_an_existing_directory_as_out_is_refused_and_left_alone(tmp_path, capsys
     assert (target / "keep.txt").read_text() == "x"
     assert not (tmp_path / "results.previous.json").exists()
     assert "is a directory" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("f32", "bf16"),
+    [
+        (0x3F800000, 0x3F80),  # 1.0
+        (0x3F808000, 0x3F80),  # exact tie, even neighbour below: stays
+        (0x3F818000, 0x3F82),  # exact tie, odd 0x3F81: rounds up to even
+        (0x3F807FFF, 0x3F80),  # just below half
+        (0x3F808001, 0x3F81),  # just above half
+        (0x7F7FFFFF, 0x7F80),  # largest finite float32 rounds to +inf
+        (0xFF800000, 0xFF80),  # -inf
+        (0x80000000, 0x8000),  # -0.0 keeps its sign
+        (0x00000001, 0x0000),  # smallest denormal rounds to +0
+        (0x7FC00001, 0x7FC0),  # NaN -> torch's canonical NaN
+        (0xFFFFFFFF, 0x7FC0),  # negative NaN too
+        (0x7F800001, 0x7FC0),  # the smallest NaN: plain rounding would turn it into +inf (0x7F80)
+    ],
+)
+def test_fp32_to_bf16_rounds_to_nearest_even_like_torch(f32, bf16):
+    # Bug caught: truncation (0x3F808001 -> 0x3F80), ties rounded away from zero (0x3F808000 -> 0x3F81), overflow
+    # wrapping into NaN, or a NaN payload kept (torch writes 0x7FC0).
+    assert int(fp32_to_bf16_rne(np.array([f32], np.uint32))[0]) == bf16
+
+
+def test_finite_values_agree_with_mlx_cast():
+    # Bug caught: an off-by-one in the rounding bias on some exponent range (an independent oracle over 100 000 values).
+    bits = (
+        np.random.default_rng(3).integers(0, 2**32, size=100_000, dtype=np.uint64).astype(np.uint32)
+    )
+    bits = bits[(bits & 0x7F800000) != 0x7F800000]  # finite only
+    ours = fp32_to_bf16_rne(bits)
+    theirs = np.array(mx.array(bits.view(np.float32)).astype(mx.bfloat16).view(mx.uint16))
+    assert np.array_equal(ours, theirs)
+
+
+def _fp32_pair(tmp_path, *, truncate):
+    """A DF11 checkpoint and an FP32 original of the same two matrices.
+
+    The first two elements are ties / near-ties where rounding and truncation differ.
+    """
+    rng = np.random.default_rng(31)
+    f32 = {
+        "blocks.0.q.weight": rng.integers(0x3F000000, 0x40000000, size=(5, 9)).astype(np.uint32),
+        "blocks.0.k.weight": rng.integers(0x3F000000, 0x40000000, size=(3, 9)).astype(np.uint32),
+    }
+    f32["blocks.0.q.weight"].reshape(-1)[:2] = (0x3F818000, 0x3F808001)
+    pick = (lambda b: (b >> 16).astype(np.uint16)) if truncate else fp32_to_bf16_rne
+    mats = {"blocks.0": [pick(f32["blocks.0.q.weight"]), pick(f32["blocks.0.k.weight"])]}
+    df11 = write_checkpoint(
+        tmp_path / "d", groups=mats, pattern=r"blocks\.\d+", sub_paths=("q", "k")
+    )
+    root = tmp_path / "b"
+    root.mkdir()
+    mx.save_safetensors(
+        str(root / "model.safetensors"),
+        {n: mx.array(v.view(np.float32)) for n, v in f32.items()},
+    )
+    return df11, root
+
+
+def test_an_fp32_original_passes_only_with_the_cast_and_a_truncated_checkpoint_fails(tmp_path):
+    # Bug caught: the cast applied on the wrong side, or F32 accepted silently without the flag. Originals are FP32
+    # tie values (0x3F818000 ...); a DF11 built from their RNE bits exits 0 with the flag, 2 without it; a DF11 built
+    # from truncated bits exits 1 with it.
+    df11, bf16 = _fp32_pair(tmp_path / "rne", truncate=False)
+    out = tmp_path / "rne" / "out.json"
+    argv = [*_argv(df11, bf16, out), "--groups", "first"]
+    assert main(argv, source_factory=_local_factory) == 2
+    refusal = json.loads(out.read_text())["groups"][0]["error"]
+    assert "F32" in refusal
+    assert "--cast-fp32-to-bf16" in refusal
+    assert main([*argv, "--cast-fp32-to-bf16"], source_factory=_local_factory) == 0
+    written = json.loads(out.read_text())
+    assert written["control"] == "fp32 rounded to bf16 (nearest even)"
+    assert [m["original_dtype"] for m in written["groups"][0]["matrices"]] == ["F32", "F32"]
+    assert written["compared"] == 2
+    df11, bf16 = _fp32_pair(tmp_path / "trunc", truncate=True)
+    out = tmp_path / "trunc" / "out.json"
+    argv = [*_argv(df11, bf16, out), "--groups", "first", "--cast-fp32-to-bf16"]
+    assert main(argv, source_factory=_local_factory) == 1
+    matrices = json.loads(out.read_text())["groups"][0]["matrices"]
+    assert not next(m for m in matrices if m["name"] == "blocks.0.q.weight")["equal"]
+
+
+def test_a_bf16_original_with_the_cast_flag_stays_bf16_and_records_it(tmp_path):
+    # Bug caught: the flag casting an already-BF16 original (reading it as 4-byte floats), or the control label
+    # claiming a cast that did not happen.
+    df11, bf16, _ = _pair(tmp_path, False)
+    out = tmp_path / "out.json"
+    argv = [*_argv(df11, bf16, out), "--groups", "first", "--cast-fp32-to-bf16"]
+    assert main(argv, source_factory=_local_factory) == 0
+    written = json.loads(out.read_text())
+    assert [m["original_dtype"] for m in written["groups"][0]["matrices"]] == ["BF16", "BF16"]
+    assert written["control"] == "bf16"
+
+
+def test_main_refuses_the_cast_flag_with_structural_only(tmp_path, capsys):
+    # Bug caught: a structural run accepting the flag and claiming an FP32 control it never used.
+    df11, _, _ = _pair(tmp_path, False)
+    argv = [
+        "--df11-repo", str(df11), "--df11-revision", "x", "--structural-only",
+        "--cast-fp32-to-bf16", "--out", str(tmp_path / "o.json"),
+    ]  # fmt: skip
+    with pytest.raises(SystemExit) as info:
+        main(argv, source_factory=_local_factory)
+    assert info.value.code == 2
+    assert "--cast-fp32-to-bf16" in capsys.readouterr().err

@@ -8,6 +8,7 @@ Usage (from the repository root of a synced checkout):
         --bf16-repo black-forest-labs/FLUX.1-schnell --bf16-subdir transformer \
         --groups first,last,max-block,max-code --out RESULT.json
 ``uv run python scripts/verify_remote_group.py ...`` works too.
+``--cast-fp32-to-bf16`` compares against an FP32 original (Z-Image-Turbo's) rounded to BF16, nearest even.
 Exit codes: 0 all sampled matrices equal, 1 a mismatch, 2 an error, 70/71 watchdog abort.
 """
 
@@ -163,16 +164,32 @@ def independent_header(src: RangeSource, path: str) -> tuple[dict, int]:
     return json.loads(src.read(path, 8, length)), 8 + length
 
 
-def bf16_range(meta: object, name: str) -> tuple[int, int, int]:
-    """(start, length, n_elements) of a BF16 original's data, checked before anything is read.
+def fp32_to_bf16_rne(bits: np.ndarray) -> np.ndarray:
+    """BF16 bits of float32 values rounded to nearest even, as torch's ``.to(torch.bfloat16)`` rounds (NaN → 0x7FC0)."""
+    b = bits.astype(np.uint32, copy=False)
+    lsb = (b >> np.uint32(16)) & np.uint32(1)
+    out = ((b.astype(np.uint64) + 0x7FFF + lsb) >> 16).astype(np.uint16)
+    out[(b & np.uint32(0x7FFFFFFF)) > np.uint32(0x7F800000)] = 0x7FC0
+    return out
+
+
+def original_range(meta: object, name: str, *, cast_fp32: bool) -> tuple[int, int, int, str]:
+    """(start, length, n_elements, dtype) of an original's data, checked before anything is read.
 
     The BF16 side is parsed without mlx_dfloat code, so its entries are checked here: a negative
     or shape-inconsistent length would otherwise make a range read pull a whole shard into RAM.
     """
     if not isinstance(meta, dict):
         raise VerifyError(f"original {name}: malformed header entry")
-    if meta.get("dtype") != "BF16":
-        raise VerifyError(f"original {name} is {str(meta.get('dtype'))[:40]}, not BF16")
+    dtype = meta.get("dtype")
+    if dtype != "BF16" and not (cast_fp32 and dtype == "F32"):
+        hint = (
+            " (pass --cast-fp32-to-bf16 to compare against it rounded to BF16)"
+            if dtype == "F32"
+            else ""
+        )
+        raise VerifyError(f"original {name} is {str(dtype)[:40]}, not BF16{hint}")
+    width = 4 if dtype == "F32" else 2
     shape, offsets = meta.get("shape"), meta.get("data_offsets")
     if not isinstance(shape, list) or not all(type(d) is int and d >= 0 for d in shape):
         raise VerifyError(f"original {name}: invalid shape")
@@ -181,10 +198,10 @@ def bf16_range(meta: object, name: str) -> tuple[int, int, int]:
         or len(offsets) != 2
         or not all(type(o) is int for o in offsets)
         or not 0 <= offsets[0] <= offsets[1]
-        or offsets[1] - offsets[0] != 2 * math.prod(shape)
+        or offsets[1] - offsets[0] != width * math.prod(shape)
     ):
         raise VerifyError(f"original {name}: data_offsets do not match its shape")
-    return offsets[0], offsets[1] - offsets[0], math.prod(shape)
+    return offsets[0], offsets[1] - offsets[0], math.prod(shape), dtype
 
 
 def check_small_fields(header: dict[str, TensorInfo], group: str) -> None:
@@ -310,8 +327,12 @@ def verify_group(
     config: DF11Config,
     dindex: dict[str, tuple[str, dict]],
     bindex: dict[str, str],
+    cast_fp32: bool = False,
 ) -> dict:
-    """Decode one group and compare each matrix with its BF16 original (if a source is given)."""
+    """Decode one group and compare each matrix with its BF16 original (if a source is given).
+
+    With ``cast_fp32`` an FP32 original is rounded to BF16 (nearest even) first; a BF16 one is read as is.
+    """
     record: dict = {"group": group, "matrices": [], "max_code_length": None, "n_blocks": None}
     try:
         file, header = dindex[group]
@@ -336,13 +357,21 @@ def verify_group(
             if shard not in header_cache:
                 header_cache[shard] = independent_header(bf16, shard)
             bheader, base = header_cache[shard]
-            start, length, n_original = bf16_range(bheader.get(name), name)
+            start, length, n_original, dtype = original_range(
+                bheader.get(name), name, cast_fp32=cast_fp32
+            )
             if n_original != got.size:
                 # A mapping/format problem, not a bit mismatch (same rule as verify_checkpoint).
                 raise VerifyError(f"{name}: decoded {got.size} elements, original has {n_original}")
-            original = np.frombuffer(bf16.read(shard, base + start, length), "<u2")
+            raw = bf16.read(shard, base + start, length)
+            if dtype == "F32":
+                original = fp32_to_bf16_rne(np.frombuffer(raw, "<u4"))
+            else:
+                original = np.frombuffer(raw, "<u2")
             equal = bool(np.array_equal(got, original))
-            record["matrices"].append({"name": name, "n": int(got.size), "equal": equal})
+            record["matrices"].append(
+                {"name": name, "n": int(got.size), "equal": equal, "original_dtype": dtype}
+            )
         record["status"] = "equal" if all(m["equal"] for m in record["matrices"]) else "mismatch"
     except (DFloatError, VerifyError, KeyError, ValueError) as exc:
         record["status"] = "error"
@@ -379,10 +408,19 @@ def main(
         action="store_true",
         help="decode and validate structure only; no BF16 comparison",
     )
+    parser.add_argument(
+        "--cast-fp32-to-bf16",
+        action="store_true",
+        help="compare an FP32 original rounded to BF16 (nearest even, as torch does); parity mode only",
+    )
     parser.add_argument("--groups", default="first,last,max-block,max-code")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--wall-budget", type=float, default=3 * 3600.0)
     args = parser.parse_args(argv)
+    if args.cast_fp32_to_bf16 and args.structural_only:
+        parser.error(
+            "--cast-fp32-to-bf16 needs a BF16 original; it is not allowed with --structural-only"
+        )
     mode = "structural-only" if args.structural_only else "parity"
     if args.out.is_dir():
         print(f"error: --out {args.out} is a directory; name the result file", file=sys.stderr)
@@ -431,7 +469,15 @@ def main(
                 "max_code_length": max_code_length(luts),
             }
         records = [
-            verify_group(df11, bf16, g, config=config, dindex=dindex, bindex=bindex)
+            verify_group(
+                df11,
+                bf16,
+                g,
+                config=config,
+                dindex=dindex,
+                bindex=bindex,
+                cast_fp32=args.cast_fp32_to_bf16,
+            )
             for g in pick_groups(stats, args.groups)
         ]
         matrices = [m for r in records for m in r["matrices"]]
@@ -446,6 +492,9 @@ def main(
             "bf16_repo": args.bf16_repo,
             "bf16_revision": bf16_rev,
             "mode": mode,
+            "control": "fp32 rounded to bf16 (nearest even)"
+            if any(m.get("original_dtype") == "F32" for m in matrices)
+            else "bf16",
             "exit_code": code,
             "compared": len(matrices),
             "mismatched": mismatched,

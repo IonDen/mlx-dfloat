@@ -1,12 +1,12 @@
-"""Image identity: FLUX.1 latents from a DFloat11 transformer against the same seam streaming the BF16 shards.
+"""Image identity: FLUX.1 or Z-Image latents from a DFloat11 transformer against the same seam streaming the BF16 shards.
 
-The ``df11`` side generates through ``DFloatFlux1`` (the prompt encoded by its own encoders; the
+The ``df11`` side generates through ``DFloatFlux1`` or ``DFloatZImage`` (the prompt encoded by its own encoders; the
 final latents captured by an after-loop callback and saved with the embeddings and the image).
 The ``bf16`` side builds the same seamed transformer with its extras read from the base's BF16
 transformer shards, drives it with a ``StreamingBF16Provider`` (each block's matrices read from
 the shards as the block runs, never all resident) through exactly mflux's loop body on the saved
 embeddings and the same seed, then decodes with the base's VAE. ``compare`` checks the two latent
-files bit for bit (``view(uint32)``) and that the DF11 latents are not degenerate (finite,
+files bit for bit (an unsigned view as wide as the dtype) and that the DF11 latents are not degenerate (finite,
 variance above zero, moved away from the initial noise).
 
 Both sides run under the footprint watchdog. ``--orchestrate`` runs df11 and bf16 as subprocesses,
@@ -14,7 +14,7 @@ one at a time, skipping a side whose ``result.json`` already carries this run's 
 the two sides' saved latents in-process.
 Usage (from the repository root of a synced checkout, ``--group bench``):
     uv run python -m scripts.verify_image --orchestrate --model schnell --df11 DIR --base DIR --out DIR \
-        [--prompt "..."] [--seed 42] [--steps 4] [--size 1024] [--guidance 3.5] [--eval-policy per-block]
+        [--prompt "..."] [--seed 42] [--steps 4] [--size 1024] [--guidance 3.5] [--negative-prompt "..."] [--eval-policy per-block]
 Exit codes: 0 equal and non-degenerate, 1 the latents differ, 2 any error, 70/71 watchdog abort.
 """
 
@@ -24,7 +24,7 @@ import json
 import subprocess
 import sys
 import traceback
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +46,7 @@ try:
     from mlx_dfloat._memory_caps import install_memory_caps
     from mlx_dfloat.format import open_checkpoint
     from mlx_dfloat.integrate.providers import StreamingBF16Provider
+    from mlx_dfloat.mflux.families import MODELS, entry
     from mlx_dfloat.mflux.flux1 import init as base_init
     from mlx_dfloat.mflux.flux1.names import flux_name_map
     from mlx_dfloat.mflux.flux1.transformer import (
@@ -75,6 +76,13 @@ class VerifyImageError(Exception):
 # --- pure parts (unit-tested without mflux) -----------------------------------------------------
 
 
+# Models with no BF16 side to compare against, refused before any side runs.
+NO_BF16_ORIGINAL: dict[str, str] = {
+    "z-image-turbo": "its original transformer is FP32, so there is no BF16 side to compare with; "
+    "check its checkpoint with verify_remote_group --cast-fp32-to-bf16 instead",
+}
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse the command line: one side (``df11``, ``bf16`` or ``compare``), or ``--orchestrate``."""
     p = argparse.ArgumentParser(
@@ -83,7 +91,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--side", choices=(*SIDES, "compare"), help="the one side this process runs")
     mode.add_argument("--orchestrate", action="store_true", help="run df11, bf16, then compare")
-    p.add_argument("--model", choices=("schnell", "dev", "krea-dev"), default="schnell")
+    p.add_argument("--model", choices=tuple(MODELS), default="schnell")
     p.add_argument("--df11", required=True, help="DF11 checkpoint directory")
     p.add_argument(
         "--base", required=True, help="base repository directory (encoders, VAE and transformer)"
@@ -93,12 +101,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--steps", type=int, default=4)
     p.add_argument("--size", type=int, default=1024)
-    p.add_argument("--guidance", type=float, default=3.5)
+    p.add_argument(
+        "--guidance",
+        type=float,
+        default=None,
+        help="guidance (default per model, as mflux: FLUX.1 3.5; Z-Image unset: the model's own rule)",
+    )
+    p.add_argument(
+        "--negative-prompt",
+        default=None,
+        help="the negative prompt (used by z-image, a base model)",
+    )
     p.add_argument("--eval-policy", choices=("per-block", "depth2"), default="per-block")
     p.add_argument(
         "--wall-budget", type=float, default=7200.0, help="seconds before the watchdog aborts"
     )
     args = p.parse_args(argv)
+    if args.model in NO_BF16_ORIGINAL:
+        p.error(f"--model {args.model}: {NO_BF16_ORIGINAL[args.model]}")
+    if args.guidance is None:  # resolved before run_key, so a stored FLUX.1 side keeps its 3.5
+        args.guidance = entry(args.model).default_guidance
     # Absolute paths: the children run with the repository root as their cwd.
     args.df11 = str(Path(args.df11).expanduser().resolve())
     args.base = str(Path(args.base).expanduser().resolve())
@@ -108,7 +130,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def run_key(args: argparse.Namespace) -> dict[str, Any]:
     """This run's resume key: every setting that changes the latents, plus the source and mlx version."""
-    return {
+    key: dict[str, Any] = {
         "model": args.model,
         "seed": args.seed,
         "steps": args.steps,
@@ -121,6 +143,9 @@ def run_key(args: argparse.Namespace) -> dict[str, Any]:
         "source": source_hash(),
         "mlx": mx.__version__,
     }
+    if args.negative_prompt is not None:  # absent when unset: FLUX.1 keys keep their old fields
+        key["negative_prompt"] = args.negative_prompt
+    return key
 
 
 def nondegenerate(latents: mx.array, noise: mx.array) -> list[str]:
@@ -140,13 +165,19 @@ def nondegenerate(latents: mx.array, noise: mx.array) -> list[str]:
     return failed
 
 
+_UNSIGNED_BY_BYTES = {1: mx.uint8, 2: mx.uint16, 4: mx.uint32, 8: mx.uint64}
+
+
 def compare_latents(a: mx.array, b: mx.array) -> bool:
-    """Whether ``a`` and ``b`` share a shape, a dtype and every bit (never a float ``==``, which equates ±0.0)."""
-    return (
-        a.shape == b.shape
-        and a.dtype == b.dtype
-        and bool(mx.array_equal(a.view(mx.uint32), b.view(mx.uint32)))
-    )
+    """Whether ``a`` and ``b`` share a shape, a dtype and every bit (never a float ``==``, which equates ±0.0).
+
+    The bits are compared through the unsigned integer as wide as the dtype (``uint16`` for bf16, ``uint32`` for
+    float32): the latents are bf16 or end float32, and a view of another width fails on an odd length.
+    """
+    if a.shape != b.shape or a.dtype != b.dtype:
+        return False
+    unsigned = _UNSIGNED_BY_BYTES[a.itemsize]
+    return bool(mx.array_equal(a.view(unsigned), b.view(unsigned)))
 
 
 def verdict(*, equal: bool, degenerate: list[str]) -> int:
@@ -158,7 +189,7 @@ def verdict(*, equal: bool, degenerate: list[str]) -> int:
 
 def child_command(args: argparse.Namespace, side: str) -> list[str]:
     """The subprocess argv for one side (never ``--orchestrate``; run with the repository root as cwd)."""
-    return [
+    command = [
         sys.executable,
         "-m",
         "scripts.verify_image",
@@ -180,13 +211,16 @@ def child_command(args: argparse.Namespace, side: str) -> list[str]:
         str(args.steps),
         "--size",
         str(args.size),
-        "--guidance",
-        str(args.guidance),
         "--eval-policy",
         args.eval_policy,
         "--wall-budget",
         str(args.wall_budget),
     ]
+    if args.guidance is not None:
+        command += ["--guidance", str(args.guidance)]
+    if args.negative_prompt is not None:
+        command += ["--negative-prompt", args.negative_prompt]
+    return command
 
 
 def _read_json(path: Path) -> Any | None:
@@ -406,6 +440,174 @@ def run_bf16(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, Any]:
     }
 
 
+# --- the Z-Image sides (mflux-touching; exercised by the identity run, not unit-tested here) ------
+
+
+def run_df11_zimage(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, Any]:
+    """Generate through ``DFloatZImage``, capture the final latents, and save the image, latents and embeddings.
+
+    The embeddings file holds ``cap_feats`` and, when classifier-free guidance ran, ``negative_cap_feats``.
+
+    Raises:
+        VerifyImageError: The after-loop callback never ran (mflux's own loop never called it).
+    """
+    from mflux.models.z_image.latent_creator import ZImageLatentCreator
+
+    from mlx_dfloat.mflux.zimage.model import DFloatZImage
+
+    out_dir = args.out / "df11"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    model = DFloatZImage(
+        args.model, df11_path=args.df11, base_path=args.base, eval_policy=args.eval_policy
+    )
+    capture = _LatentCapture()
+    model.callbacks.register(capture)
+    image = model.generate_image(
+        args.seed,
+        args.prompt,
+        num_inference_steps=args.steps,
+        height=args.size,
+        width=args.size,
+        guidance=args.guidance,
+        negative_prompt=args.negative_prompt,
+    )
+    captured = capture.latents
+    if captured is None:
+        raise VerifyImageError("the after-loop callback never ran; no latents were captured")
+    mx.eval(captured)
+    image.save(str(out_dir / "image.png"), export_json_metadata=False, overwrite=True)
+    mx.save_safetensors(str(out_dir / "latents.safetensors"), {"latents": captured})
+    wanted = model.cfg_prompts(
+        args.prompt, negative_prompt=args.negative_prompt, guidance=args.guidance
+    )
+    embeds = {"cap_feats": model._embeddings[wanted[0]][0]}
+    if len(wanted) > 1:
+        embeds["negative_cap_feats"] = model._embeddings[wanted[1]][0]
+    mx.save_safetensors(str(out_dir / "embeds.safetensors"), embeds)
+    noise = ZImageLatentCreator.create_noise(args.seed, args.size, args.size)
+    degenerate = nondegenerate(captured, noise)
+    report = model.report()
+    return {
+        "exit_code": EXIT_OK if not degenerate else EXIT_ERROR,
+        "degenerate": degenerate,
+        "report": report,
+        "output_shape": list(captured.shape),
+        "output_dtype": str(
+            captured.dtype
+        ),  # bf16, or float32 when the scheduler's arithmetic promoted it
+        "footprint_peak_bytes": max(watchdog.peak_footprint, phys_footprint()),
+        "mlx_peak_bytes_max_over_phases": max_phase_peak(report["peaks"]),
+    }
+
+
+def run_bf16_zimage(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, Any]:
+    """Stream the base's BF16 transformer shards through the seam and mflux's Z-Image loop body, then the VAE.
+
+    Raises:
+        VerifyImageError: The df11 side's saved embeddings are not present yet.
+    """
+    from mflux.models.common.config.config import Config
+    from mflux.models.common.config.model_config import ModelConfig
+    from mflux.models.common.vae.vae_util import VAEUtil
+    from mflux.models.z_image.latent_creator import ZImageLatentCreator
+    from mflux.models.z_image.variants.z_image import ZImage
+    from mflux.utils.image_util import ImageUtil
+
+    from mlx_dfloat.mflux._compile import uncompiled
+    from mlx_dfloat.mflux.zimage import init as zinit
+    from mlx_dfloat.mflux.zimage.names import zimage_name_map
+    from mlx_dfloat.mflux.zimage.transformer import (
+        ZIMAGE_BASE_INDEX,
+        base_extras,
+        build_transformer,
+    )
+
+    out_dir = args.out / "bf16"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    embeds_path = args.out / "df11" / "embeds.safetensors"
+    if not embeds_path.exists():
+        raise VerifyImageError(f"{embeds_path}: run the df11 side first")
+
+    df11_root = Path(args.df11).expanduser()
+    base_root = Path(args.base).expanduser()
+    ckpt = open_checkpoint(df11_root)
+    index = base_transformer_index(base_root / "transformer", index_file=ZIMAGE_BASE_INDEX)
+    build = build_transformer(ckpt, extras=base_extras(index, ckpt), nonblock_from_extras=True)
+    provider = StreamingBF16Provider(
+        index, {n: ckpt.groups[n].matrix_names for n in build.shapes}, zimage_name_map()
+    )
+    build.transformer.attach(
+        provider, build.shapes, eval_policy=args.eval_policy, verify_in_call=True
+    )
+
+    embeds = mx.load(str(embeds_path))
+    text_encodings = embeds["cap_feats"]
+    negative_encodings = embeds.get("negative_cap_feats")  # present only when guidance ran
+
+    model_config = ModelConfig.from_name(model_name=args.model, base_model=None)
+    supports_guidance = bool(model_config.supports_guidance)
+    guidance = args.guidance if supports_guidance and args.guidance is not None else 0.0
+    # mflux z_image.py:69-70: the scheduler default is a function of whether the model supports guidance.
+    scheduler = "flow_match_euler_discrete" if supports_guidance else "linear"
+    config = Config(
+        model_config=model_config,
+        num_inference_steps=args.steps,
+        height=args.size,
+        width=args.size,
+        guidance=guidance,
+        scheduler=scheduler,
+    )
+    latents = ZImageLatentCreator.create_noise(args.seed, args.size, args.size)
+    predict = uncompiled(ZImage._predict, build.transformer)
+    mx.eval(latents, text_encodings)
+
+    for t in config.time_steps:
+        # mflux z_image.py:108-129: sigma, timestep, predict, scheduler step, eval.
+        sigma_t = config.scheduler.sigmas[t].reshape((1,))
+        timestep = mx.ones_like(sigma_t) - sigma_t
+        noise = predict(
+            latents=latents,
+            timestep=timestep,
+            sigmas=config.scheduler.sigmas,
+            text_encodings=text_encodings,
+            negative_encodings=negative_encodings,
+            guidance=config.guidance,
+        )
+        latents = config.scheduler.step(noise=noise, timestep=t, latents=latents)
+        mx.eval(latents)
+        build.transformer.verify_step()
+
+    mx.save_safetensors(str(out_dir / "latents.safetensors"), {"latents": latents})
+
+    vae = zinit.load_vae(base_root)
+    mx.clear_cache()
+    mx.set_cache_limit(0)  # the transformer-shaped buffers cannot serve the decoder
+    unpacked = ZImageLatentCreator.unpack_latents(latents, args.size, args.size)
+    decoded = VAEUtil.decode(vae=vae, latent=unpacked, tiling_config=None)
+    ImageUtil.to_pil(decoded).save(str(out_dir / "image.png"))
+
+    return {
+        "exit_code": EXIT_OK,
+        "reads": provider.reads,
+        "output_shape": list(latents.shape),
+        "output_dtype": str(latents.dtype),
+        "footprint_peak_bytes": max(watchdog.peak_footprint, phys_footprint()),
+        "mlx_peak_bytes_process": int(mx.get_peak_memory()),  # never reset on this side
+    }
+
+
+SIDE_RUNNERS: dict[str, tuple[Callable[..., dict[str, Any]], Callable[..., dict[str, Any]]]] = {
+    "flux1": (run_df11, run_bf16),
+    "zimage": (run_df11_zimage, run_bf16_zimage),
+}
+
+
+def runner_for(model: str, side: str) -> Callable[..., dict[str, Any]]:
+    """The function that runs ``side`` (``df11`` or ``bf16``) for ``model``'s family."""
+    df11_runner, bf16_runner = SIDE_RUNNERS[entry(model).family]
+    return df11_runner if side == "df11" else bf16_runner
+
+
 # --- compare, orchestration and the CLI ----------------------------------------------------------
 
 
@@ -500,7 +702,7 @@ def run_side(args: argparse.Namespace) -> int:
     _move_stale_result_aside(side_dir, key)
     move_stale_abort_aside(side_dir)
     watchdog = Watchdog(side_dir, ceiling=default_ceiling(), budget=args.wall_budget).start()
-    run = run_df11 if side == "df11" else run_bf16
+    run = runner_for(args.model, side)
     try:
         summary = run(args, watchdog)
     except Exception as exc:  # any failure is a tool error (2), never the mismatch code (1)
