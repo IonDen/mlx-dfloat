@@ -7,15 +7,15 @@
 Run [DFloat11](https://github.com/LeanModels/DFloat11) checkpoints on a Mac with
 [MLX](https://github.com/ml-explore/mlx). The weights stay about 30 % smaller than BF16 in memory, and the GPU decodes
 each block back to exactly the same bits just before it runs. Today that means FLUX.1 image generation on a 32 GB Mac;
-Z-Image, FLUX.2 Klein and Qwen-Image-2.1 arrive in the next release.
+Z-Image, FLUX.2 Klein, Qwen-Image-2.1 and ERNIE-Image arrive in the next release.
 
 DFloat11 is lossless compression for BF16 model weights. Each weight is 16 bits. DFloat11 stores the 8 exponent bits
 as a short variable-length code, the same idea a zip file uses, and keeps the other 8 bits (the sign and the
 fraction) exactly as they are. The DFloat11 authors report models at about 70% of their BF16 size with output that is
 bit for bit the same as the original.[^size] Their decoder runs on NVIDIA GPUs only. This project is an independent
 reader and decoder for Apple Silicon. The weights stay compressed in memory, and a Metal kernel decodes each block
-on the GPU as it runs. That is how it generates FLUX.1 images through mflux; Z-Image, FLUX.2 Klein and Qwen-Image-2.1
-follow in the next release.
+on the GPU as it runs. That is how it generates FLUX.1 images through mflux; Z-Image, FLUX.2 Klein, Qwen-Image-2.1 and
+ERNIE-Image follow in the next release.
 
 ```
 one BF16 weight, 16 bits:    s   eeeeeeee   mmmmmmm
@@ -48,9 +48,13 @@ of the three FLUX.1 models; no other Mac has been measured. The numbers are unde
 | A 16 GB Mac, Z-Image-Turbo | CAPPED: at risk. The fit check refuses it, and a forced run was stopped by the watchdog at 9.26 GiB before the transformer ran. See "Generate a Z-Image image". |
 | A 32 GB Mac, Qwen-Image-2.1, with the weights unchanged | mlx-dfloat, from the next release. Peak at 1024²: 20.42 GiB. See "Generate a Qwen-Image-2.1 image". |
 | A 16 GB or 24 GB Mac, Qwen-Image-2.1 | CAPPED: at risk. The fit check refuses it, and forced runs were stopped by the watchdog while the prompt was being encoded, before the transformer ran. See "Generate a Qwen-Image-2.1 image". |
+| A 32 GB Mac, ERNIE-Image or ERNIE-Image-Turbo, with the weights unchanged | mlx-dfloat, from the next release. Peak at 1024²: 16.79 GiB for ERNIE-Image (50 steps), 17.34 GiB for ERNIE-Image-Turbo (8 steps). See "Generate an ERNIE-Image image". |
+| A 24 GB Mac, ERNIE-Image-Turbo | CAPPED: at risk. The fit check refuses it, 0.39 GiB over the budget; a forced run passed with a 14.39 GiB peak, 0.11 GiB under the watchdog ceiling. See "Generate an ERNIE-Image image". |
+| A 24 GB Mac, ERNIE-Image | CAPPED: at risk. The fit check refuses it, and a forced run was stopped by the watchdog. See "Generate an ERNIE-Image image". |
+| A 16 GB Mac, ERNIE-Image or ERNIE-Image-Turbo | CAPPED: at risk. The fit check refuses both, and forced runs were stopped by the watchdog. See "Generate an ERNIE-Image image". |
 | A Mac with room for the BF16 transformer next to everything else | Plain mflux in BF16. There is nothing to decode. |
 | A Mac with less than 32 GB | Not measured. The rows marked CAPPED are runs on the 32 GB Mac under the caps mlx-dfloat installs on a 16 GB or 24 GB Mac; the tables below make no other claim for those Macs. |
-| Another model: an LLM, the original Qwen-Image or Qwen-Image-Edit, FLUX.2-dev, Krea-2 | Not wired up yet. The reader and the decoder handle all four published versions of the DFloat11 format, but generation in 0.1.0 covers FLUX.1 only. The next release adds Z-Image-Turbo, Z-Image, the four FLUX.2 Klein models and Qwen-Image-2.1. |
+| Another model: an LLM, the original Qwen-Image or Qwen-Image-Edit, FLUX.2-dev, Krea-2 | Not wired up yet. The reader and the decoder handle all four published versions of the DFloat11 format, but generation in 0.1.0 covers FLUX.1 only. The next release adds Z-Image-Turbo, Z-Image, the four FLUX.2 Klein models, Qwen-Image-2.1, ERNIE-Image and ERNIE-Image-Turbo. |
 
 ## Status
 
@@ -107,6 +111,17 @@ In the next release (not yet on PyPI):
   ran at 1024² for 4 steps at guidance 4.0. The negative prompt was a single space, so classifier-free guidance ran
   (record: `bench/results/identity/qwen-image-2.1-1024/compare.json`). `scripts/verify_image.py` runs both sides
   without mflux's step compilation.
+- ERNIE-Image and ERNIE-Image-Turbo make 1024² images through mflux, from the command line or from Python. For
+  ERNIE-Image, every one of the 256 compressed matrices and 153 other tensors equals the BF16 original in
+  `baidu/ERNIE-Image` (`bench/results/parity/ernie-image/full-vs-bf16.json`), and the GPU decoder gives the same bits as
+  the CPU reference on all 256 (`bench/results/parity/ernie-image/kernel-vs-reference.json`). Its final latents match,
+  bit for bit, those of the same transformer streaming its BF16 weights one block at a time, and the images match pixel
+  for pixel. That check ran at 1024² for 4 steps at guidance 4.0, so classifier-free guidance ran (record:
+  `bench/results/identity/ernie-image-1024/compare.json`). For ERNIE-Image-Turbo, all 256 compressed matrices equal the
+  BF16 original in `baidu/ERNIE-Image-Turbo` as well, read from the Hub one piece at a time
+  (`bench/results/parity/ernie-image-turbo/full-vs-bf16.json`), and the GPU decoder matches the CPU reference on all
+  256 (`bench/results/parity/ernie-image-turbo/kernel-vs-reference.json`). Turbo's latents were not compared with a
+  reference: that check needs its 16 GB BF16 transformer on disk.
 - `mlx-dfloat generate --tier 16` and `--tier 24` run under the memory caps mlx-dfloat installs on a Mac of that size.
   The 16 GB and 24 GB rows under "Measured numbers" are CAPPED runs on the 32 GB Mac under those caps; no smaller Mac
   was measured.
@@ -123,7 +138,7 @@ pip install "mlx-dfloat[mflux]"
 ```
 
 Without the extra you get the checkpoint reader and the decoder. The `mflux` extra installs mflux 0.20, which the
-`mlx-dfloat generate` command needs for FLUX.1, Z-Image, FLUX.2 Klein and Qwen-Image-2.1 generation.
+`mlx-dfloat generate` command needs for FLUX.1, Z-Image, FLUX.2 Klein, Qwen-Image-2.1 and ERNIE-Image generation.
 
 The parity scripts and the benchmark live in the repository, not in the package, so run them from a checkout with
 [uv](https://docs.astral.sh/uv/):
@@ -175,10 +190,10 @@ result is compared with bits known in advance. It exits 0 when every check passe
 GPU decoder cannot run at all, for example because there is no Metal device. `--json` prints the same report as JSON.
 
 The same check runs automatically the first time a process decodes on the GPU, once for each write path, and when a
-FLUX.1, Z-Image, FLUX.2 Klein or Qwen-Image-2.1 model or the `generate` command sets up its decoder, so a broken GPU
-decoder refuses before any model loads. On an M1 Max the check itself took about 13 ms, measured after the kernel
-pipelines were compiled; the one-time compile took about 0.4 s with a cold shader cache and 0.03 s with a warm one. It
-does not check whether a real model fits in your memory or how fast it runs; the numbers below cover that.
+FLUX.1, Z-Image, FLUX.2 Klein, Qwen-Image-2.1 or ERNIE-Image model or the `generate` command sets up its decoder, so a
+broken GPU decoder refuses before any model loads. On an M1 Max the check itself took about 13 ms, measured after the
+kernel pipelines were compiled; the one-time compile took about 0.4 s with a cold shader cache and 0.03 s with a warm
+one. It does not check whether a real model fits in your memory or how fast it runs; the numbers below cover that.
 
 ### Generate a FLUX.1 image
 
@@ -416,9 +431,12 @@ step calls the transformer once, with no classifier-free guidance. As in mflux, 
 that no classifier-free guidance runs; pass a negative prompt at guidance 1 or below and it warns that the prompt has no
 effect.
 
-The command takes the DFloat11 transformer from that checkpoint and the text encoder, VAE and tokenizer from
-`Qwen/Qwen-Image-2.1`, without downloading that repository's BF16 transformer. Both default repositories are pinned to
-the revisions the measured runs used; a `--df11` or `--base` you pass is used as given.
+The command takes the DFloat11 transformer from that checkpoint (10.9 GB for either model, as listed on the Hub) and the
+text encoder, VAE and tokenizer from the model's BF16 repository. It does not download that repository's BF16
+transformer (16.1 GB) or its prompt enhancer (`pe/`, 7.7 GB); mflux uses neither. The text-encoder file is 7.7 GB and
+also holds a vision model that is never loaded. Both BF16 repositories serve the same text-encoder file, so it is stored
+once. The VAE is 0.17 GB. These sizes are the files as listed on the Hub. The default checkpoints and BF16 repositories
+are pinned to the revisions the measured runs used; a `--df11` or `--base` you pass is used as given.
 
 The same from Python:
 
@@ -460,6 +478,90 @@ Quantisation, LoRA, img2img, mflux's alternative image decoder (`--pid-decode`) 
 FLUX.1. Only text-to-image is on this path; Qwen-Image-2.1's image editing is not. Sizes above 1024² are refused unless
 you pass `--no-fit-check`, because none has been measured.
 
+### Generate an ERNIE-Image image
+
+ERNIE-Image and ERNIE-Image-Turbo run through the same command. Their BF16 repositories (`baidu/ERNIE-Image` and
+`baidu/ERNIE-Image-Turbo`) and the DFloat11 checkpoints (`mingyi456/ERNIE-Image-DF11` and
+`mingyi456/ERNIE-Image-Turbo-DF11`) are ungated on the Hub, so no Hub login is needed. All four list the Apache-2.0
+licence on the Hub ([ERNIE-Image](https://huggingface.co/baidu/ERNIE-Image),
+[ERNIE-Image-Turbo](https://huggingface.co/baidu/ERNIE-Image-Turbo)).
+
+```
+mlx-dfloat generate --model ernie-image-turbo \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024 --report report.json
+mlx-dfloat generate --model ernie-image \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024 --report report.json
+```
+
+The defaults are mflux's own for each model, and they match the steps and guidance each model card recommends at
+1024x1024 ([ERNIE-Image](https://huggingface.co/baidu/ERNIE-Image): 50 steps at guidance 4.0;
+[ERNIE-Image-Turbo](https://huggingface.co/baidu/ERNIE-Image-Turbo): 8 steps at guidance 1.0). ERNIE-Image-Turbo refuses
+any other `--guidance`, as mflux's Turbo command does, and ignores a `--negative-prompt` with a warning. Above guidance
+1, ERNIE-Image runs classifier-free guidance whether or not you pass a negative prompt; without one, mflux uses a single
+space. Each step runs the prompt and the negative prompt together, as one batched transformer call. Both models use the
+`linear` scheduler. An empty or blank `--prompt` is refused for both, as a user error.
+
+The command takes the DFloat11 transformer from that checkpoint, 10.9 GB for either model, and the text encoder, VAE and
+tokenizer from the model's BF16 repository. It does not download that repository's BF16 transformer (16.1 GB) or its
+prompt enhancer (`pe/`, 7.7 GB), which mflux does not use. The text-encoder file is 7.7 GB and also holds a vision model
+that is never loaded. Both BF16 repositories publish the same text-encoder file, and huggingface_hub 2.0's shared cache
+keeps one copy of it for both models. The VAE is 0.17 GB. The default checkpoints and BF16 repositories are pinned to
+the revisions the measured runs used; a `--df11` or `--base` you pass is used as given.
+
+The same from Python:
+
+```python
+from mlx_dfloat.mflux import DFloatModel
+
+model = DFloatModel("ernie-image")
+image = model.generate_image(
+    seed=42,
+    prompt="A stone lighthouse on a rocky shore at dawn",
+    height=1024,
+    width=1024,
+)
+image.save("lighthouse.png")
+```
+
+Left out, `guidance`, `num_inference_steps` and `scheduler` take the same per-model defaults as the command: 4.0 and
+50 steps for ERNIE-Image, 1.0 and 8 steps for ERNIE-Image-Turbo. mflux's own `ErnieImage` class defaults to 1.0 and 8
+steps for both. Unlike the command, the Python class lets ERNIE-Image-Turbo run at another guidance, as mflux's class
+does. An empty or blank prompt is refused here too. Each call runs under the memory caps the command installs, unless
+the process has already set a wired limit.
+
+mflux compiles ERNIE-Image's denoising step on M1 and M2 Max and Ultra chips and on M3 and later. This path runs it
+without that compilation on every chip (see "Generate a Z-Image image" for why). mflux also computes ERNIE-Image's
+timestep conditioning in float32, so the hidden state passed from block to block is float32, not BF16; this path runs
+mflux's own block code, so it does the same. No ERNIE-Image step time is reported, against stock mflux or otherwise.
+
+Measured on an M1 Max (32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0) at 1024², seed 42, with the commands under
+"Measured numbers": ERNIE-Image-Turbo (8 steps at guidance 1.0) peaked at 17.34 GiB and took 2.9 minutes, and
+ERNIE-Image (50 steps at guidance 4.0) peaked at 16.79 GiB and took 29.9 minutes (the `elapsed_seconds` of
+`bench/results/tiers/ernie-image-turbo-1024.json` and `ernie-image-1024.json`). In both runs MLX's own memory peaked
+during the VAE decode, and the compressed transformer stayed loaded through it. The fit estimate, mlx-dfloat's
+prediction of each step's peak memory that it checks before a call, puts the VAE decode at 17.85 GiB, under the 22.96
+GiB budget.
+
+Under a 24 GB Mac's caps (`--tier 24`, run on the 32 GB M1 Max), the fit check refuses ERNIE-Image-Turbo. It predicts
+14.39 GiB for the denoising step against the 14.00 GiB fit budget. A forced run (`--no-fit-check`) passed with a 14.39
+GiB peak in 2.8 minutes, the compressed transformer dropped before the VAE decode
+(`bench/results/tiers/ernie-image-turbo-1024-tier24.json`). That peak is only 0.11 GiB under the 14.50 GiB watchdog
+ceiling. The run's report still shows the earlier 14.03 GiB estimate in its `fit` block, because the estimate was raised
+from this run's peak. Two identical runs under these caps peaked 0.35 GiB apart, at 14.03 and 14.39 GiB, which is why
+the estimate takes the higher one. ERNIE-Image-Turbo on a 24 GB Mac is at risk. No 24 GB Mac was measured.
+
+ERNIE-Image under a 24 GB Mac's caps, and both models under a 16 GB Mac's, are at risk too. The fit check refuses them:
+it predicts 15.2 GiB for ERNIE-Image's denoising step and 14.39 GiB for Turbo's, against budgets of 14.00 GiB at 24 GB
+and 8.67 GiB at 16 GB. Forced runs (`--no-fit-check`) were stopped by the watchdog. ERNIE-Image at 24 GB was stopped in
+the denoising step after 20.6 s, at a 14.80 GiB footprint against the 14.50 GiB ceiling. At 16 GB both were stopped
+while the compressed transformer was loading, against the 9.17 GiB ceiling: Turbo after 18.6 s at 9.22 GiB, ERNIE-Image
+after 23.3 s at 9.44 GiB.
+
+Quantisation, LoRA, img2img, mflux's alternative image decoder (`--pid-decode`) and ControlNet are refused, as for
+FLUX.1. Sizes above 1024² are refused unless you pass `--no-fit-check`, because none has been measured.
+
 ## Measured numbers
 
 The blocks below are generated from the files under `bench/results/` by `scripts/bench_table.py`, and a test fails when
@@ -471,12 +573,13 @@ and 16 GiB), so it sees the limits a user of that Mac runs under. PROOF marks a 
 ceiling, made only to show that the watchdog works; it never appears as a tier row.
 
 The 32 GB rows are MEASURED, on one M1 Max. The 16 GB and 24 GB rows are CAPPED, run on that same Mac:
-FLUX.2-klein-base-4B passed under both, while FLUX.2-klein-base-9B under a 24 GB Mac's caps, Z-Image-Turbo under a
-16 GB Mac's and Qwen-Image-2.1 under both were stopped by the watchdog. The table makes no claim about any Mac it does
-not list. Each row is one `mlx-dfloat generate` run at 1024² with seed 42 (4 steps for FLUX.1-schnell, FLUX.2-klein-4B
-and FLUX.2-klein-9B, 20 for FLUX.1-dev and FLUX.1-Krea-dev, 9 for Z-Image-Turbo, 40 at guidance 1.0 for
-Qwen-Image-2.1, 50 with guidance 4.0 for Z-Image and the two FLUX.2 Klein base models), with `--tier` and `--report`
-writing the file in the last column.
+FLUX.2-klein-base-4B passed under both and ERNIE-Image-Turbo under a 24 GB Mac's caps (a forced run: the fit check
+refuses it), while FLUX.2-klein-base-9B under a 24 GB Mac's caps, Z-Image-Turbo under a 16 GB Mac's, ERNIE-Image-Turbo
+under a 16 GB Mac's, and Qwen-Image-2.1 and ERNIE-Image under both were stopped by the watchdog. The table makes no
+claim about any Mac it does not list. Each row is one `mlx-dfloat generate` run at 1024² with seed 42 (4 steps for
+FLUX.1-schnell, FLUX.2-klein-4B and FLUX.2-klein-9B, 20 for FLUX.1-dev and FLUX.1-Krea-dev, 9 for Z-Image-Turbo, 40 at
+guidance 1.0 for Qwen-Image-2.1, 8 at guidance 1.0 for ERNIE-Image-Turbo, 50 with guidance 4.0 for Z-Image, ERNIE-Image
+and the two FLUX.2 Klein base models), with `--tier` and `--report` writing the file in the last column.
 
 The second column is the Mac's recommended GPU working set minus a reserve. On the 16 GB and 24 GB rows the working
 set is taken as two thirds of that Mac's memory. Two limits come off that working set, with different reserves. The
@@ -565,12 +668,43 @@ In the last two the watchdog stops the run (exit 70) and writes its `abort.json`
 table's copies are in `bench/results/tiers/aborts/`. Without `--no-fit-check` both are refused with exit 2
 (`bench/results/refusals/qwen-image-2.1-1024-tier16.json` and `qwen-image-2.1-1024-tier24.json`).
 
+The ERNIE-Image rows come from these commands, with the same prompt:
+
+```
+mlx-dfloat generate --model ernie-image-turbo --tier 32 \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024 --report bench/results/tiers/ernie-image-turbo-1024.json
+mlx-dfloat generate --model ernie-image --tier 32 \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024 --report bench/results/tiers/ernie-image-1024.json
+mlx-dfloat generate --model ernie-image-turbo --tier 24 --no-fit-check \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024 --report bench/results/tiers/ernie-image-turbo-1024-tier24.json
+mlx-dfloat generate --model ernie-image-turbo --tier 16 --no-fit-check \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024
+mlx-dfloat generate --model ernie-image --tier 16 --no-fit-check \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024
+mlx-dfloat generate --model ernie-image --tier 24 --no-fit-check \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024
+```
+
+In the last three the watchdog stops the run (exit 70) and writes its `abort.json` next to the output image; the
+table's copies are in `bench/results/tiers/aborts/`. Without `--no-fit-check` the last four commands are refused with
+exit 2 (`bench/results/refusals/ernie-image-turbo-1024-tier24.json`, `ernie-image-turbo-1024-tier16.json`,
+`ernie-image-1024-tier16.json` and `ernie-image-1024-tier24.json`).
+
 Measured on an Apple M1 Max, 32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0.
 
 <!-- bench:tier-table -->
 | Mac | Working set − reserve | Model | DF11 size | Peak (watched) | Peak footprint | Peak MLX (sampled active + cache, or exact phase peak) | Label | Status | Limits | Result |
 |---|---|---|---|---|---|---|---|---|---|---|
 | 32 GB | 22.96 GiB | FLUX.1-dev | 15.21 GiB | 19.96 GiB | 19.96 GiB | 19.19 GiB | MEASURED | target | host caps | `bench/results/tiers/dev-1024.json` |
+| 32 GB | 22.96 GiB | ERNIE-Image | 10.17 GiB | 16.79 GiB | 16.79 GiB | 15.21 GiB | MEASURED | target | host caps | `bench/results/tiers/ernie-image-1024.json` |
+| 24 GB | 14.50 GiB | ERNIE-Image-Turbo | 10.17 GiB | 14.39 GiB | 14.39 GiB | 13.35 GiB | CAPPED | target | mlx-dfloat caps for the tier | `bench/results/tiers/ernie-image-turbo-1024-tier24.json` |
+| 32 GB | 22.96 GiB | ERNIE-Image-Turbo | 10.17 GiB | 17.34 GiB | 17.34 GiB | 16.16 GiB | MEASURED | target | host caps | `bench/results/tiers/ernie-image-turbo-1024.json` |
 | 32 GB | 22.96 GiB | FLUX.2-klein-4B | 4.90 GiB | 11.88 GiB | 11.88 GiB | 11.90 GiB | MEASURED | target | host caps | `bench/results/tiers/flux2-klein-4b-1024.json` |
 | 32 GB | 22.96 GiB | FLUX.2-klein-9B | 11.47 GiB | 18.40 GiB | 18.40 GiB | 17.57 GiB | MEASURED | target | host caps | `bench/results/tiers/flux2-klein-9b-1024.json` |
 | 16 GB | 9.17 GiB | FLUX.2-klein-base-4B | 4.90 GiB | 8.15 GiB | 8.15 GiB | 7.61 GiB | CAPPED | target | mlx-dfloat caps for the tier | `bench/results/tiers/flux2-klein-base-4b-1024-tier16.json` |
@@ -582,6 +716,9 @@ Measured on an Apple M1 Max, 32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0.
 | 32 GB | 22.96 GiB | FLUX.1-schnell | 15.19 GiB | 19.78 GiB | 19.78 GiB | 19.03 GiB | MEASURED | target | host caps | `bench/results/tiers/schnell-1024.json` |
 | 32 GB | 22.96 GiB | Z-Image | 7.80 GiB | 13.15 GiB | 13.15 GiB | 12.65 GiB | MEASURED | target | host caps | `bench/results/tiers/z-image-1024.json` |
 | 32 GB | 22.96 GiB | Z-Image-Turbo | 7.80 GiB | 13.11 GiB | 13.11 GiB | 12.20 GiB | MEASURED | target | host caps | `bench/results/tiers/z-image-turbo-1024.json` |
+| 16 GB | 9.17 GiB | ERNIE-Image | not recorded | at least 9.44 GiB (stopped after 23.3 s) | at least 9.44 GiB | at least 9.03 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/ernie-image-1024-tier16.json` |
+| 24 GB | 14.50 GiB | ERNIE-Image | not recorded | at least 14.80 GiB (stopped after 20.6 s) | at least 14.80 GiB | at least 14.25 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/ernie-image-1024-tier24.json` |
+| 16 GB | 9.17 GiB | ERNIE-Image-Turbo | not recorded | at least 9.22 GiB (stopped after 18.6 s) | at least 9.22 GiB | at least 8.75 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/ernie-image-turbo-1024-tier16.json` |
 | 24 GB | 14.50 GiB | FLUX.2-klein-base-9B | not recorded | at least 14.64 GiB (stopped after 28.5 s) | at least 14.64 GiB | at least 14.26 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/flux2-klein-base-9b-1024-tier24.json` |
 | 16 GB | 9.17 GiB | Qwen-Image-2.1 | not recorded | at least 9.28 GiB (stopped after 4.4 s) | at least 8.90 GiB | at least 9.28 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/qwen-image-2.1-1024-tier16.json` |
 | 24 GB | 14.50 GiB | Qwen-Image-2.1 | not recorded | at least 14.59 GiB (stopped after 4.8 s) | at least 14.59 GiB | at least 14.31 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/qwen-image-2.1-1024-tier24.json` |

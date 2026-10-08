@@ -53,6 +53,28 @@ All notable changes to this project are documented here. The format follows
   decode. Under a 16 GB and a 24 GB Mac's caps the fit check refuses it, predicting 14.6 GiB while the prompt is
   encoded (`bench/results/refusals/qwen-image-2.1-1024-tier16.json` and `qwen-image-2.1-1024-tier24.json`), and forced
   runs were stopped by the watchdog in that phase, so both sizes are at risk.
+- ERNIE-Image and ERNIE-Image-Turbo generation through mflux: `mlx-dfloat generate --model
+  ernie-image|ernie-image-turbo` and the `DFloatErnieImage` class, also returned by `DFloatModel`. The text encoder, VAE and tokenizer come from
+  `baidu/ERNIE-Image` and `baidu/ERNIE-Image-Turbo`, pinned to the revisions the measured runs used; their BF16
+  transformers and prompt enhancers are not downloaded. The defaults follow mflux and the model cards: 50 steps at
+  guidance 4.0 for ERNIE-Image, which runs classifier-free guidance as one batched call per step with or without a
+  negative prompt, and 8 steps at guidance 1.0 for ERNIE-Image-Turbo. An empty or blank prompt is refused as a user
+  error.
+- Every compressed matrix and stored tensor of the ERNIE-Image transformer (256 and 153) equals its BF16 original, and
+  the GPU decoder matches the CPU reference on all 256 (both records in `bench/results/parity/ernie-image/`). In a
+  4-step, 1024² run with classifier-free guidance on, the final latents match bit for bit those of the same
+  transformer streaming its BF16 weights one block at a time
+  (`bench/results/identity/ernie-image-1024/compare.json`). ERNIE-Image-Turbo's 256 compressed matrices equal its BF16
+  original too, read from the Hub one piece at a time, and decode on the GPU to the CPU reference's bits (both records
+  in `bench/results/parity/ernie-image-turbo/`); its latents have not been compared with a reference.
+- The measured 32 GB runs peak at 16.79 GiB (ERNIE-Image, 50 steps) and 17.34 GiB (ERNIE-Image-Turbo, 8 steps) at
+  1024² (`bench/results/tiers/ernie-image-1024.json` and `ernie-image-turbo-1024.json`), and keep the compressed
+  transformer loaded through the VAE decode. Under a 24 GB Mac's caps the fit check refuses ERNIE-Image-Turbo,
+  predicting 14.39 GiB against the 14.00 GiB budget; a forced run passed at 14.39 GiB
+  (`bench/results/tiers/ernie-image-turbo-1024-tier24.json`), 0.11 GiB under the watchdog ceiling, so that size is at
+  risk. The fit check also refuses ERNIE-Image at 24 GB and both models at 16 GB (`bench/results/refusals/`), and forced
+  runs were stopped by the watchdog, so those sizes are at risk too.
+- An ERNIE-Image base that lacks a text-encoder or VAE tensor is refused with `DFloatFormatError`.
 - A FLUX.2 Klein base that lacks a text-encoder or VAE tensor is refused with `DFloatFormatError` instead of leaving
   that weight at its random initial value.
 - A FLUX.2 Klein call warns when the prompt encode holds more memory than the fit estimate allows for it. The
@@ -69,6 +91,10 @@ All notable changes to this project are documented here. The format follows
 - `mlx-dfloat generate --model` also accepts the four FLUX.2 Klein names. A distilled FLUX.2 Klein model refuses a
   `--guidance` other than 1.0, and every FLUX.2 Klein model refuses `--scheduler`, matching mflux's own Klein
   command. The image identity check covers FLUX.2 Klein.
+- `mlx-dfloat generate --model` also accepts `ernie-image` and `ernie-image-turbo`. ERNIE-Image-Turbo refuses a
+  `--guidance` other than 1.0 and ignores `--negative-prompt` with a warning, as mflux's Turbo command does. The image
+  identity check covers ERNIE-Image and refuses `--negative-prompt` and a guidance other than 1.0 for
+  ERNIE-Image-Turbo.
 - `mlx-dfloat generate --report` records `elapsed_seconds`, and the watchdog's `abort.json` names the phase that was
   running (`build`, `encode`, `set_load`, `denoise` or `vae`). A checkpoint or base taken as a Hub id (the defaults
   included) prints one line saying it is resolved on the Hub, from the local cache or by download. On the Z-Image base
@@ -82,7 +108,10 @@ All notable changes to this project are documented here. The format follows
   8-bit paths, and a Python example.
 - From Python, every model's `generate_image` runs under the memory caps `mlx-dfloat generate` installs and restores
   MLX's limits when it returns. Before, a Python caller ran at MLX's default limits, with no wired cap, while the fit
-  estimates' VAE terms were measured under the caps. A wired limit the process already set is left alone.
+  estimates' VAE terms were measured under the caps. A wired limit the process already set is left alone. Each model's
+  `encode()` runs under the same caps. The wired limit is read once per process instead of at every call, and a wired
+  cap MLX refuses (a system wired limit lowered below it) leaves the memory cap in place with one warning instead of
+  raising.
 - When a call drops the compressed transformer before the VAE decode, the fit estimate for that step now counts the
   transformer's uncompressed BF16 tensors, which stay loaded. The estimate grows by 6 MB to 137 MB depending on the
   model; at 1024² none of the 16, 24 or 32 GB verdicts changes.
