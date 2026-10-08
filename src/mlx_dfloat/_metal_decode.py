@@ -417,8 +417,8 @@ def ensure_canary(*, force_direct: bool) -> None:
     Cached per write path after a pass; a failure is never cached, so the next call checks again.
 
     Raises:
-        DFloatBackendError: A pipeline cannot be warmed, the packaged canary data is unreadable,
-            or a canary group decodes to wrong bits, reports an error bit, or runs on the wrong
+        DFloatBackendError: A pipeline cannot be warmed, the packaged self-check data is unreadable,
+            or a self-check group decodes to wrong bits, reports an error bit, or runs on the wrong
             write path. The message names the group and, for wrong bits, the first wrong
             element, then the device, the mlx and mlx-dfloat versions and what to report.
     """
@@ -429,7 +429,7 @@ def ensure_canary(*, force_direct: bool) -> None:
         failure = canary_failure(canary, force_direct=force_direct)
         if failure is not None:
             raise DFloatBackendError(
-                f"the Metal decode kernel failed its canary: {failure}. "
+                f"the Metal decode kernel failed its self-check: {failure}. "
                 f"Device: {_device_summary()}; mlx {getattr(mx, '__version__', 'unknown')}; mlx-dfloat {__version__}. "
                 "Run `mlx-dfloat selftest --json` and report it at "
                 "https://github.com/IonDen/mlx-dfloat/issues; "

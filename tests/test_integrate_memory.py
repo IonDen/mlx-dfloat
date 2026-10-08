@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from mlx_dfloat.errors import DFloatIntegrationError
 from mlx_dfloat.integrate import memory
 from mlx_dfloat.integrate.memory import budget_bytes, decoded_bytes, largest_decoded_bytes
 
@@ -45,3 +46,24 @@ def test_budget_bytes_subtracts_the_reserve_from_the_devices_working_set(monkeyp
     # the reserve and returns a nonsense figure instead of refusing the call.
     with pytest.raises(TypeError):
         budget_bytes(1)
+
+
+def test_largest_decoded_bytes_skips_the_named_nonblock_groups():
+    # Bug caught: kind_of("cap_embedder") raising for a checkpoint with a non-block group (every Z-Image plan_call
+    # would fail), or a skipped group counted as a kind.
+    from tests._family_fakes import ZIMAGE_TABLE
+
+    ckpt = SimpleNamespace(
+        groups={
+            "layers.0": _group("layers.0", 100),
+            "noise_refiner.0": _group("noise_refiner.0", 70),
+            "cap_embedder": _group("cap_embedder", 999),
+        }
+    )
+    assert largest_decoded_bytes(ckpt, ZIMAGE_TABLE, skip={"cap_embedder"}) == {
+        "layers": 200,
+        "noise_refiner": 140,
+    }
+    # The default still refuses a group of no kind: skipping is opt-in.
+    with pytest.raises(DFloatIntegrationError):
+        largest_decoded_bytes(ckpt, ZIMAGE_TABLE)

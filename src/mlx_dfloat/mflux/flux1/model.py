@@ -8,7 +8,7 @@ Python API installs no memory caps and no watchdog; the ``mlx-dfloat`` command d
 
 import logging
 import traceback
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -22,7 +22,10 @@ from mlx_dfloat._watchdog import phys_footprint
 from mlx_dfloat.errors import DFloatFormatError, DFloatResourceError, DFloatUnsupportedError
 from mlx_dfloat.format import DF11Checkpoint, MxGroup, open_checkpoint
 from mlx_dfloat.integrate.coverage import load_resident_set
-from mlx_dfloat.integrate.memory import FitEstimate, budget_bytes, largest_decoded_bytes
+from mlx_dfloat.integrate.memory import (
+    CallPlan as CallPlan,
+)
+from mlx_dfloat.integrate.memory import budget_bytes, largest_decoded_bytes
 from mlx_dfloat.integrate.names import NameMap, Shapes
 from mlx_dfloat.integrate.providers import DF11Provider
 from mlx_dfloat.mflux import require_mflux
@@ -58,15 +61,6 @@ MODELS: dict[str, tuple[str, str]] = {
 }
 POLICIES: tuple[str, ...] = ("per-block", "depth2")
 RETAINED_SLACK_BYTES = 2 * 1024**3
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class CallPlan:
-    """What one generate call will do about memory: the cache limit, the estimate, and whether the set is dropped before the VAE decode."""
-
-    cache_limit: int
-    estimate: FitEstimate
-    drop_set_before_vae: bool
 
 
 def _refuse(name: str, reason: str) -> None:
@@ -142,7 +136,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
             DFloatUnsupportedError: ``quantize``, ``lora_paths``, ``lora_scales`` or ``bake_lora=False``
                 (accepted only to refuse), an eval policy other than ``"per-block"`` / ``"depth2"``,
                 or an unknown ``model``.
-            DFloatBackendError: The GPU decoder fails its check on the packaged canary groups (raised before
+            DFloatBackendError: The GPU decoder fails its check on the two packaged self-check groups (raised before
                 anything is resolved or loaded), or Metal is unavailable.
             DFloatFormatError: The checkpoint is not a FLUX.1 DF11 checkpoint, or the base lacks the
                 encoders or is a quantized save.
@@ -165,7 +159,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
         _check_eval_policy(eval_policy)
         if model not in MODELS:
             raise DFloatUnsupportedError(f"model {model!r}: this path runs {sorted(MODELS)}")
-        # The GPU decoder proves itself on the packaged canary groups before anything is resolved, downloaded or
+        # The GPU decoder proves itself on the two packaged self-check groups before anything is resolved, downloaded or
         # loaded, so a broken decoder refuses here and not minutes later at the first block.
         _metal_decode.ensure_canary(force_direct=False)
         from mflux.models.common.config.model_config import ModelConfig
@@ -315,6 +309,11 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
 
     # --- phases -----------------------------------------------------------------------------------
 
+    @property
+    def open_phase(self) -> str | None:
+        """The phase running now (``encode``, ``set_load``, ``denoise`` or ``vae``); None outside them."""
+        return self._open_phase
+
     def _phase_begin(self, name: str) -> None:
         mx.reset_peak_memory()  # resets to zero, not to what is active
         self._open_phase = name
@@ -454,7 +453,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
         if pid_decode:
             _refuse(
                 "pid_decode",
-                "the PiD decoder loads an 8 GB caption encoder next to the compressed set",
+                "mflux's alternative image decoder (PiD) loads an 8 GB caption encoder next to the compressed set",
             )
         plan = self.plan_call(height=height, width=width)
         self._phase_begin("encode")

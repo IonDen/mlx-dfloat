@@ -1,7 +1,8 @@
 """Group-size arithmetic and a phase-structured fit estimate (predictions, labelled as such)."""
 
-from collections.abc import Mapping
+from collections.abc import Container, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import mlx.core as mx
@@ -14,10 +15,17 @@ def decoded_bytes(group: Any) -> int:
     return 2 * int(group.tensors["sign_mantissa"].nbytes)
 
 
-def largest_decoded_bytes(ckpt: Any, name_map: NameMap) -> dict[str, int]:
-    """The largest decoded group per block kind, from the checkpoint headers (nothing is loaded)."""
+def largest_decoded_bytes(
+    ckpt: Any, name_map: NameMap, *, skip: Container[str] = frozenset()
+) -> dict[str, int]:
+    """The largest decoded group per block kind, from the checkpoint headers (nothing is loaded).
+
+    Groups named in ``skip`` (non-block groups, which have no kind) are left out.
+    """
     largest: dict[str, int] = {}
     for name, group in ckpt.groups.items():
+        if name in skip:
+            continue
         kind = name_map.kind_of(name)
         largest[kind] = max(largest.get(kind, 0), decoded_bytes(group))
     return largest
@@ -52,4 +60,23 @@ def fit_estimate(phases: Mapping[str, Mapping[str, int]], *, budget_bytes: int) 
         peak_phase=peak_phase,
         peak_bytes=totals[peak_phase],
         budget_bytes=budget_bytes,
+    )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CallPlan:
+    """What one generate call will do about memory: the cache limit, the estimate, and whether the set is dropped before the VAE decode."""
+
+    cache_limit: int
+    estimate: FitEstimate
+    drop_set_before_vae: bool
+
+
+def safetensors_bytes(root: Path, *subdirs: str) -> int:
+    """The size of every ``*.safetensors`` file directly under each ``root/subdir`` (missing subdirs count zero)."""
+    return sum(
+        p.stat().st_size
+        for sub in subdirs
+        for p in (root / sub).glob("*.safetensors")
+        if p.is_file()
     )

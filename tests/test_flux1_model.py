@@ -629,3 +629,34 @@ def test_upstream_generate_image_runs_through_the_model_on_the_cached_embeddings
     report = model.report()
     assert "vae" in report["peaks"]
     assert report["decode_launches"] == 0
+
+
+def test_open_phase_names_the_phase_running_now_and_none_outside_a_call(tmp_path, monkeypatch):
+    # Bug caught: the watchdog's abort context naming no phase, or a stale one: the phase must follow the call
+    # through encode, set load, the loop and the VAE decode, and be None again once the call returns.
+    from mflux.models.flux.variants.txt2img.flux import Flux1
+
+    model = _fake_model(tmp_path, monkeypatch)
+    assert model.open_phase is None
+    seen = []
+    life = model._lifecycle
+    for attr in ("_encode", "_load_set"):
+        real = getattr(life, attr)
+
+        def wrapped(*args, _real=real, **kwargs):
+            seen.append(model.open_phase)
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(life, attr, wrapped)
+
+    def fake(self, **kwargs):
+        seen.append(self.open_phase)
+        for subscriber in self.callbacks.after_loop_callbacks():
+            subscriber.call_after_loop(seed=1, prompt="p", latents=mx.zeros(1), config=None)
+        seen.append(self.open_phase)
+        return "image"
+
+    monkeypatch.setattr(Flux1, "generate_image", fake)
+    model.generate_image(seed=1, prompt="p", height=256, width=256)
+    assert seen == ["encode", "set_load", "denoise", "vae"]
+    assert model.open_phase is None

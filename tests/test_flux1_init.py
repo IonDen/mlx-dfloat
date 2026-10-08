@@ -11,6 +11,7 @@ from huggingface_hub.errors import (
 )
 
 from mlx_dfloat.errors import DFloatAccessError, DFloatDependencyError, DFloatFormatError
+from mlx_dfloat.mflux import _hub
 from mlx_dfloat.mflux.flux1 import init
 
 
@@ -159,13 +160,13 @@ def test_resolve_downloads_a_hub_id_with_the_patterns_and_wraps_a_gated_refusal(
     snap = tmp_path / "snapshots" / sha
     snap.mkdir(parents=True)
 
-    def fake_download(*, repo_id, allow_patterns):
+    def fake_download(*, repo_id, allow_patterns, revision):
         calls.append((repo_id, tuple(allow_patterns)))
         if repo_id == "gated/repo":
             raise _hub_http_error(GatedRepoError, "no", 403)
         return str(snap)
 
-    monkeypatch.setattr(init, "_snapshot_download", fake_download)
+    monkeypatch.setattr(_hub, "_snapshot_download", fake_download)
     resolved = init.resolve("DFloat11/FLUX.1-schnell-DF11", patterns=init.DF11_PATTERNS)
     assert resolved == init.ResolvedRepo(
         root=snap, repo_id="DFloat11/FLUX.1-schnell-DF11", revision=sha
@@ -173,6 +174,42 @@ def test_resolve_downloads_a_hub_id_with_the_patterns_and_wraps_a_gated_refusal(
     assert calls == [("DFloat11/FLUX.1-schnell-DF11", init.DF11_PATTERNS)]
     with pytest.raises(DFloatAccessError):
         init.resolve("gated/repo", patterns=init.BASE_PATTERNS)
+
+
+def test_resolve_says_on_stderr_when_a_spec_is_fetched_from_the_hub(monkeypatch, tmp_path, capsys):
+    # Bug caught: a mistyped local path (here "models/flux", which does not exist) silently taken as a Hub id and
+    # downloaded, with nothing telling the user why a download started; or the note printed for a real directory.
+    snap = tmp_path / "snapshots" / ("e" * 40)
+    snap.mkdir(parents=True)
+    monkeypatch.setattr(_hub, "_snapshot_download", lambda **kw: str(snap))
+    init.resolve(str(tmp_path), patterns=init.DF11_PATTERNS)
+    assert capsys.readouterr().err == ""
+    init.resolve("models/flux", patterns=init.DF11_PATTERNS)
+    assert (
+        capsys.readouterr().err
+        == "models/flux is not a local path; resolving it on the Hugging Face Hub (local cache or download)\n"
+    )
+
+
+def test_resolve_passes_a_pinned_revision_to_the_download_and_none_by_default(
+    monkeypatch, tmp_path
+):
+    # Bug caught: the pin dropped on the way to snapshot_download (the default checkpoint would follow the
+    # repository's main branch), or a pin invented for a spec that has none.
+    sha = "f" * 40
+    snap = tmp_path / "snapshots" / sha
+    snap.mkdir(parents=True)
+    seen = []
+
+    def fake_download(*, repo_id, allow_patterns, revision):
+        seen.append(revision)
+        return str(snap)
+
+    monkeypatch.setattr(_hub, "_snapshot_download", fake_download)
+    pinned = init.resolve("org/model", patterns=init.DF11_PATTERNS, revision=sha)
+    init.resolve("org/model", patterns=init.DF11_PATTERNS)
+    assert seen == [sha, None]
+    assert pinned.revision == sha
 
 
 class _Meta:

@@ -372,6 +372,36 @@ def test_the_abort_artifact_has_no_context_by_default(tmp_path, monkeypatch):
     assert "context" not in json.loads((tmp_path / "abort.json").read_text())
 
 
+def test_live_context_values_are_read_when_the_abort_fires_not_when_the_watchdog_starts(
+    tmp_path, monkeypatch
+):
+    # Bug caught: the phase frozen into the context at start ("build" for every abort, whatever ran when the
+    # ceiling tripped), or a raising reader leaving the run without its abort artifact.
+    monkeypatch.setattr(wd, "_exit", lambda code: None)
+    state = {"phase": "build"}
+    live = {"phase": lambda: state["phase"], "broken": lambda: 1 / 0}
+    watchdog = Watchdog(
+        tmp_path, ceiling=0, budget=1e9, context={"model": "z-image"}, live_context=live
+    )
+    state["phase"] = "encode"
+    watchdog._fire("memory", dict(_SAMPLE))
+    context = json.loads((tmp_path / "abort.json").read_text())["context"]
+    assert context == {
+        "model": "z-image",
+        "phase": "encode",
+        "broken": "unreadable: ZeroDivisionError",
+    }
+
+
+def test_live_context_alone_still_writes_a_context(tmp_path, monkeypatch):
+    # Bug caught: live values dropped when the caller passed no static context.
+    monkeypatch.setattr(wd, "_exit", lambda code: None)
+    Watchdog(tmp_path, ceiling=0, budget=1e9, live_context={"phase": lambda: None})._fire(
+        "memory", dict(_SAMPLE)
+    )
+    assert json.loads((tmp_path / "abort.json").read_text())["context"] == {"phase": None}
+
+
 def test_an_unsampled_watchdog_has_no_mlx_peak(tmp_path, monkeypatch):
     # Bug caught: an MLX peak of 0 for a watchdog that never sampled (a real run would report a
     # 0-byte MLX peak as a number instead of "not sampled"); the first sample error leaves it None.
