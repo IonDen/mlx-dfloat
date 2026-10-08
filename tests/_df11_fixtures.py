@@ -55,11 +55,13 @@ def write_checkpoint(
     version="0.5.0",
     extras=None,
     single_file=False,
+    write_config=True,
 ):
     """Write a DF11 checkpoint: a shard per group (or one file), config.json, optional BF16 extras.
 
     ``patterns`` (pattern -> sub-paths) replaces the single ``pattern``/``sub_paths`` pair when a
-    checkpoint holds more than one group family.
+    checkpoint holds more than one group family. ``write_config=False`` leaves out config.json
+    (a config-less single-file checkpoint, read through a pinned layout).
     """
     root.mkdir(parents=True, exist_ok=True)
     pattern_dict = (
@@ -75,7 +77,8 @@ def write_checkpoint(
             "pattern_dict": pattern_dict,
         }
     }
-    (root / "config.json").write_text(json.dumps(config))
+    if write_config:
+        (root / "config.json").write_text(json.dumps(config))
     everything = {}
     for group_name, matrices in groups.items():
         tensors = {f"{group_name}.{k}": v for k, v in compress_group(matrices).items()}
