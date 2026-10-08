@@ -1,4 +1,3 @@
-import hashlib
 import json
 import threading
 
@@ -7,11 +6,9 @@ import numpy as np
 import pytest
 import scripts.verify_checkpoint as vc
 from scripts.verify_checkpoint import main, run_key, verify
-from tests._df11_fixtures import random_bf16, write_bf16_original, write_checkpoint
+from tests._df11_fixtures import pin_layout, random_bf16, write_bf16_original, write_checkpoint
 
 from mlx_dfloat import _layouts
-from mlx_dfloat._layouts import ContentProbe, SynthesizedLayout
-from mlx_dfloat._safetensors import parse_header, read_header_bytes
 
 KEY = {
     "df11_revision": "a" * 40,
@@ -827,35 +824,12 @@ def _config_less_fused(tmp_path, monkeypatch):
         extras={"norm.weight": NORM},
         write_config=False,
     )
-    file = df11 / "model.safetensors"
-    raw, start, size = read_header_bytes(file)
-    sm = parse_header(raw, data_start=start, file_size=size, source="t")["blocks.0.sign_mantissa"]
-    head = file.read_bytes()[sm.offset : sm.offset + 8]
-    layout = SynthesizedLayout(
-        key="tiny",
-        label="tiny",
-        repo_id="t/t",
-        revision="0" * 40,
-        file_name="model.safetensors",
-        header_sha256=hashlib.sha256(raw).hexdigest(),
-        file_sha256="0" * 64,  # a plain file name here, so the whole-file pin is not consulted
+    layout = pin_layout(
+        df11 / "model.safetensors",
+        pattern_dict={r"blocks\.\d+": ("q", "gate_up")},
+        row_splits={"gate_up": ("gate", "up")},
         groups=1,
         extras=1,
-        raw_config={
-            "version": "0.5.0",
-            "threads_per_block": [512],
-            "bytes_per_thread": 8,
-            "pattern_dict": {r"blocks\.\d+": ["q", "gate_up"]},
-        },
-        row_splits={"gate_up": ("gate", "up")},
-        probes=(
-            ContentProbe(
-                tensor="blocks.0.sign_mantissa",
-                offset=0,
-                length=8,
-                sha256=hashlib.sha256(head).hexdigest(),
-            ),
-        ),
     )
     monkeypatch.setattr(_layouts, "KNOWN_LAYOUTS", (layout,))
     bf16 = tmp_path / "bf16"

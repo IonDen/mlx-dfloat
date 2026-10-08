@@ -257,6 +257,31 @@ def test_hf_range_source_reads_a_seeked_range():
     assert 0 < length < src.size(shard)
 
 
+def test_hf_range_source_reads_with_huggingface_hubs_seekable_default_only(monkeypatch):
+    # Bug caught: a read-ahead knob reaching huggingface_hub (block_size=0 gives a streaming file whose seek() raises,
+    # so every read past offset 0 fails) when no caller needs one. The fake file system mirrors that: a 0 block size
+    # opens a stream that cannot seek; the default opens a seekable file.
+    import io
+
+    from scripts import verify_remote_group
+
+    data = bytes(range(32))
+
+    class Stream(io.BytesIO):
+        def seek(self, *args):
+            raise ValueError("Cannot seek streaming HF file")
+
+    class FakeFs:
+        def open(self, path, mode, **kwargs):
+            return Stream(data) if kwargs.get("block_size") == 0 else io.BytesIO(data)
+
+    monkeypatch.setattr(verify_remote_group, "HfFileSystem", FakeFs)
+    with pytest.raises(TypeError):
+        HfRangeSource("owner/repo", "0" * 40, block_size=0)
+    src = HfRangeSource("owner/repo", "0" * 40)
+    assert src.read("model.safetensors", 5, 4) == bytes([5, 6, 7, 8])
+
+
 def test_hf_range_source_path_guard_rejects_escapes_and_subdirs():
     # Network-free: constructing HfRangeSource and calling its path guard never touches the Hub.
     src = HfRangeSource("owner/repo", "0" * 40)
@@ -719,3 +744,187 @@ def test_main_refuses_the_cast_flag_with_structural_only(tmp_path, capsys):
         main(argv, source_factory=_local_factory)
     assert info.value.code == 2
     assert "--cast-fp32-to-bf16" in capsys.readouterr().err
+
+
+# --- config-less repositories, read through a pinned layout ----------------------------------------------------------
+
+_FUSED_PATTERN = {r"blocks\.\d+": ("q", "gate_up")}
+_FUSED_SPLITS = {"gate_up": ("gate", "up")}
+_NORM = np.full((4,), 0x3F80, dtype=np.uint16)
+
+
+def _config_less_fused(tmp_path, *, layout_groups=1, layout_extras=1):
+    """A config-less single file storing q (4x4) and concat(gate, up) (12x4), its originals, its pinned layout."""
+    from tests._df11_fixtures import pin_layout
+
+    rng = np.random.default_rng(17)
+    q, g, u = (random_bf16(rng, s) for s in [(4, 4), (6, 4), (6, 4)])
+    df11 = write_checkpoint(
+        tmp_path / "df11",
+        groups={"blocks.0": [q, np.concatenate([g, u])]},
+        pattern=r"blocks\.\d+",
+        sub_paths=("q", "gate_up"),
+        single_file=True,
+        extras={"norm.weight": _NORM},
+        write_config=False,
+    )
+    originals = {"blocks.0.q.weight": q, "blocks.0.gate.weight": g, "blocks.0.up.weight": u}
+    bf16 = write_bf16_original(tmp_path / "bf16", originals)
+    layout = pin_layout(
+        df11 / "model.safetensors",
+        pattern_dict=_FUSED_PATTERN,
+        row_splits=_FUSED_SPLITS,
+        groups=layout_groups,
+        extras=layout_extras,
+    )
+    return df11, bf16, layout
+
+
+def test_a_config_less_repository_is_verified_through_its_layout(tmp_path):
+    # Bug caught: the remote verifier stops at the missing config.json, or compares the stored gate_up whole (no
+    # original of that name: exit 2), or the halves against each other's originals (exit 1).
+    df11, bf16, layout = _config_less_fused(tmp_path)
+    out = tmp_path / "out" / "RESULT.json"
+    code = main(_argv(df11, bf16, out), source_factory=_local_factory, layouts=(layout,))
+    result = json.loads(out.read_text())
+    assert code == 0, result
+    assert result["config_source"] == "layout tiny"
+    got = [(m["name"], m["n"], m["equal"]) for m in result["groups"][0]["matrices"]]
+    assert got == [  # 4x4, then the 6x4 halves of the stored 12x4 matrix
+        ("blocks.0.q.weight", 16, True),
+        ("blocks.0.gate.weight", 24, True),
+        ("blocks.0.up.weight", 24, True),
+    ]
+    assert (result["compared"], result["mismatched"]) == (3, 0)
+
+
+def test_a_config_json_repository_records_where_its_config_came_from(tmp_path):
+    # Bug caught: a repository with a config.json sent through the layout path (or the field left out, so a result
+    # cannot say which config its matrix names came from).
+    df11, bf16, _ = _pair(tmp_path, single_file=True)
+    out = tmp_path / "out" / "RESULT.json"
+    assert main(_argv(df11, bf16, out), source_factory=_local_factory, layouts=()) == 0
+    assert json.loads(out.read_text())["config_source"] == "config.json"
+
+
+def _flip_probed_byte(df11, layout):
+    probe = layout.probes[0]
+    file = df11 / "model.safetensors"
+    from mlx_dfloat._safetensors import read_header
+
+    at = read_header(file)[probe.tensor].offset + probe.offset
+    data = bytearray(file.read_bytes())
+    data[at] ^= 0x01
+    file.write_bytes(bytes(data))
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        # Bug caught: an unknown config-less file verified with a guessed matrix order.
+        ("no layout", "matches no known layout"),
+        # Bug caught: the spot checks skipped on the remote path, so a re-saved file with the same header and other
+        # bytes is read with the pinned order.
+        ("probe byte flipped", "spot check"),
+        # Bug caught: the layout's group and extra counts not checked, so a file holding more or fewer groups passes.
+        ("counts differ", "expects 2 groups and 1 extras"),
+    ],
+)
+def test_a_config_less_repository_is_refused_before_any_decode(tmp_path, capsys, case, message):
+    df11, bf16, layout = _config_less_fused(
+        tmp_path, layout_groups=2 if case == "counts differ" else 1
+    )
+    if case == "probe byte flipped":
+        _flip_probed_byte(df11, layout)
+    out = tmp_path / "out" / "RESULT.json"
+    layouts = () if case == "no layout" else (layout,)
+    assert main(_argv(df11, bf16, out), source_factory=_local_factory, layouts=layouts) == 2
+    assert message in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_a_diffusers_config_without_a_dfloat11_block_is_an_error_not_the_layout_path(tmp_path):
+    # Bug caught: a config.json without dfloat11_config (a diffusers transformer config) treated as "no config" and
+    # the file read through a layout that happens to match.
+    df11, bf16, layout = _config_less_fused(tmp_path)
+    (df11 / "config.json").write_text(json.dumps({"_class_name": "QwenImageTransformer2DModel"}))
+    out = tmp_path / "out" / "RESULT.json"
+    assert main(_argv(df11, bf16, out), source_factory=_local_factory, layouts=(layout,)) == 2
+    assert not out.exists()
+
+
+def test_a_config_less_repository_must_be_one_file(tmp_path):
+    # Bug caught: the first of several safetensors files identified and the rest ignored (their groups never seen).
+    from scripts.verify_remote_group import config_from_source
+
+    df11, _bf16, layout = _config_less_fused(tmp_path)
+    (df11 / "other.safetensors").write_bytes((df11 / "model.safetensors").read_bytes())
+    with pytest.raises(VerifyError, match="2 safetensors files"):
+        config_from_source(LocalRangeSource(df11), layouts=(layout,))
+
+
+def test_a_stored_count_that_disagrees_with_the_pattern_is_an_error_not_a_crash(tmp_path):
+    # Bug caught: a pattern listing three stored matrices for a group that stores two reaching the row-split cut and
+    # the zip (a confusing crash message, or the wrong segment cut) instead of an error record that says so.
+    from mlx_dfloat.format import parse_df11_config, with_row_splits
+
+    df11, bf16, _layout = _config_less_fused(tmp_path)
+    raw = {
+        "version": "0.5.0",
+        "threads_per_block": [512],
+        "bytes_per_thread": 8,
+        "pattern_dict": {r"blocks\.\d+": ["q", "gate_up", "extra"]},
+    }
+    config = with_row_splits(parse_df11_config(raw, source="t"), _FUSED_SPLITS, source="t")
+    d, b = LocalRangeSource(df11), LocalRangeSource(bf16)
+    record = verify_group(
+        d, b, "blocks.0", config=config, dindex=df11_index(d), bindex=bf16_index(b)
+    )
+    assert record["status"] == "error"
+    assert "stores 2 matrices" in record["error"]
+    assert record["matrices"] == []
+
+
+@pytest.mark.network
+def test_the_published_qwen_image_21_file_is_identified_by_range_reads():
+    # Bug caught: the remote path reading the header or the spot checks at the wrong offsets (or not at all), so the
+    # one published config-less file is refused, or accepted without its content checked. Reads the header (28,408
+    # bytes) and nine 4096-byte spot checks, each with huggingface_hub's default read-ahead.
+    from scripts.verify_remote_group import config_from_source
+
+    from mlx_dfloat._layouts import KNOWN_LAYOUTS, QWEN_IMAGE_21_COMFYUI
+
+    layout = QWEN_IMAGE_21_COMFYUI
+    src = HfRangeSource(layout.repo_id, layout.revision)
+    config, source = config_from_source(src, layouts=KNOWN_LAYOUTS)
+    assert source == "layout qwen-image-2.1-comfyui"
+    assert dict(config.row_splits) == {"img_mlp.gate_up": ("img_mlp.gate_layer", "img_mlp.proj")}
+    assert config.pattern_dict[r"transformer_blocks\.\d+"][4] == "img_mlp.gate_up"
+
+
+@pytest.mark.parametrize(
+    ("probes", "message"),
+    [
+        # Bug caught: a layout with no spot check accepted on its header alone (the content never checked).
+        ((), "pins no spot check"),
+        # Bug caught: a spot check of a tensor the file lacks skipped instead of refused.
+        ("missing", "which the file lacks"),
+        # Bug caught: a spot check past its tensor's end read from the next tensor's bytes (or short-read) silently.
+        ("outside", "lies outside its"),
+    ],
+)
+def test_a_layout_whose_spot_checks_cannot_run_is_refused(tmp_path, probes, message):
+    import dataclasses
+
+    from scripts.verify_remote_group import config_from_source
+
+    df11, _bf16, layout = _config_less_fused(tmp_path)
+    probe = layout.probes[0]
+    if probes == "missing":
+        probes = (dataclasses.replace(probe, tensor="blocks.9.sign_mantissa"),)
+    elif probes == "outside":
+        probes = (dataclasses.replace(probe, offset=10**6),)
+    with pytest.raises(VerifyError, match=message):
+        config_from_source(
+            LocalRangeSource(df11), layouts=(dataclasses.replace(layout, probes=probes),)
+        )
