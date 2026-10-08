@@ -6,14 +6,14 @@
 
 Run [DFloat11](https://github.com/LeanModels/DFloat11) checkpoints on a Mac with [MLX](https://github.com/ml-explore/mlx).
 The weights stay about 30 % smaller than BF16 in memory, and the GPU decodes each block back to exactly the same bits
-just before it runs. Today that means FLUX.1 image generation on a 32 GB Mac.
+just before it runs. Today that means FLUX.1 and Z-Image image generation on a 32 GB Mac.
 
 DFloat11 is lossless compression for BF16 model weights. Each weight is 16 bits. DFloat11 stores the 8 exponent bits
 as a short variable-length code, the same idea a zip file uses, and keeps the other 8 bits (the sign and the
 fraction) exactly as they are. The DFloat11 authors report models at about 70% of their BF16 size with output that is
 bit for bit the same as the original.[^size] Their decoder runs on NVIDIA GPUs only. This project is an independent
 reader and decoder for Apple Silicon. The weights stay compressed in memory, and a Metal kernel decodes each block
-on the GPU as it runs. That is how it generates FLUX.1 images through mflux.
+on the GPU as it runs. That is how it generates FLUX.1 and Z-Image images through mflux.
 
 ```
 one BF16 weight, 16 bits:    s   eeeeeeee   mmmmmmm
@@ -37,13 +37,17 @@ of the three FLUX.1 models; no other Mac has been measured. The numbers are unde
 |---|---|
 | A 32 GB Mac, FLUX.1-schnell, FLUX.1-dev or FLUX.1-Krea-dev, and you want the BF16 weights unchanged | mlx-dfloat. Measured peak about 20 GiB at 1024² for all three. The final latents were checked bit for bit against BF16 on FLUX.1-schnell, not yet on the other two. Unpacking makes a denoising step 3.5 % slower on dev and 4.0 % slower on schnell than a control that runs the same graph on weights decoded in advance (Krea-dev's step was not timed). |
 | Less memory or a faster step, and a different image is fine | mflux's own quantised transformer. Its 8-bit mode, the only one measured here, ran a step roughly 1.3 times faster and peaked about 5 GiB lower, under the same 2.5 GB cache limit; mflux's own generate sets no cache limit, so this is not quite its default setup (see "Measured numbers" for why the ratio is rough). It changes the weights and the output; by how much was not measured. |
+| A 32 GB Mac, Z-Image-Turbo or Z-Image, with the weights unchanged | mlx-dfloat (in the next release). Measured peak about 13 GiB at 1024² for both (Turbo 9 steps, base 50 steps with `--guidance 4`). Both models are Apache-2.0 and ungated ([Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image), [Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo)). Z-Image's checks are listed under "Status"; Turbo's differ because it has no BF16 original. Step time against stock mflux was not measured. |
+| A 16 GB Mac, Z-Image-Turbo | At risk. No 16 GB Mac was measured. A run on the 32 GB Mac under a 16 GB Mac's limits, with the fit check turned off (it predicted 12.2 GiB and refused the run), was stopped by the watchdog while encoding the prompt (the abort file names the phase), at 9.29 GiB against a 9.17 GiB ceiling. The BF16 text encoder is 7.5 GiB on disk; MLX held 8.8 GiB at that point. Nothing here says it fits. |
 | A Mac with room for the BF16 transformer next to everything else | Plain mflux in BF16. There is nothing to decode. |
-| A Mac with less than 32 GB | Not measured yet. The tables below make no claim for it. |
-| Another model: an LLM, Qwen-Image, FLUX.2, Krea-2 | Not wired up yet. The reader and the decoder handle every published version of the DFloat11 format, but generation covers FLUX.1 only. |
+| A Mac with less than 32 GB | Not measured yet, apart from the 16 GB Z-Image-Turbo run above. The tables below make no claim for it. |
+| Another model: an LLM, Qwen-Image, FLUX.2, Krea-2 | Not wired up yet. The reader and the decoder handle all four published versions of the DFloat11 format, but generation covers FLUX.1 and Z-Image only. |
 
 ## Status
 
-Pre-alpha: version 0.1.0 is on PyPI. What works today:
+Pre-alpha: version 0.1.0 is on PyPI.
+
+Released in 0.1.0:
 
 - All four published versions of the DFloat11 checkpoint format decode to exactly the BF16 originals: every
   compressed tensor of Qwen3-4B, and sampled blocks of FLUX.1-schnell, FLUX.1-Krea-dev, Qwen-Image-Edit and
@@ -59,6 +63,17 @@ Pre-alpha: version 0.1.0 is on PyPI. What works today:
 - `mlx-dfloat generate`, the parity scripts and the benchmark run under a memory watchdog that stops them when they
   cross its ceiling.
 
+In the next release (not yet on PyPI):
+
+- Z-Image-Turbo and Z-Image make 1024² images through mflux, from the command line or from Python. For Z-Image, every
+  one of the 271 compressed matrices and 250 other tensors equals the BF16 original. Its final latents (1024², 4 steps,
+  guidance 4.0) match bit for bit, and its images pixel for pixel, the same transformer streaming its BF16 weights one
+  block at a time; both sides ran without mflux's step compilation. Z-Image-Turbo has no BF16 original, because its
+  published transformer is FP32. Its 271 matrices decode on the GPU to the same bits as the CPU reference, and five
+  sampled groups (32 of the 271 matrices) equal the FP32 original rounded to BF16, nearest even. Turbo's latents have
+  not been compared with a reference yet.
+- `mlx-dfloat selftest` checks the GPU decoder on your Mac (see "Check the GPU decoder on your Mac").
+
 Earlier step-time numbers, measured with a smaller MLX cache limit, are in the 0.1.0 entry of the changelog.
 
 ## Install
@@ -70,7 +85,7 @@ pip install "mlx-dfloat[mflux]"
 ```
 
 Without the extra you get the checkpoint reader and the decoder. The `mflux` extra installs mflux 0.20, which the
-`mlx-dfloat generate` command needs for FLUX.1 generation.
+`mlx-dfloat generate` command needs for FLUX.1 and Z-Image generation.
 
 The parity scripts and the benchmark live in the repository, not in the package, so run them from a checkout with
 [uv](https://docs.astral.sh/uv/):
@@ -121,8 +136,8 @@ blocks. Each is decoded two ways on the GPU (the staged and direct write paths) 
 result is compared with bits known in advance. It exits 0 when every check passes, 1 when a check fails, and 2 when the
 GPU decoder cannot run at all, for example because there is no Metal device. `--json` prints the same report as JSON.
 
-The same check runs automatically the first time a process decodes on the GPU, once for each write path, and when the
-FLUX.1 model or the `generate` command sets up its decoder, so a broken GPU decoder refuses before any model loads. On
+The same check runs automatically the first time a process decodes on the GPU, once for each write path, and when a
+FLUX.1 or Z-Image model or the `generate` command sets up its decoder, so a broken GPU decoder refuses before any model loads. On
 an M1 Max the check itself took about 13 ms, measured after the kernel pipelines were compiled; the one-time compile
 took about 0.4 s with a cold shader cache and 0.03 s with a warm one. It does not check whether a real model fits in
 your memory or how fast it runs; the numbers below cover that.
@@ -195,10 +210,68 @@ Sizes above 1024² are refused for now, because no run above 1024² has been mea
 (`fit_check=False` in Python) runs them anyway, on a memory estimate that is then an extrapolation.
 
 Quantisation on top of DFloat11 is refused because it would change the exact bits the format exists to preserve;
-LoRA, img2img and ControlNet are refused because this path does not implement them; PiD decoding is refused
-because it would need an 8 GB caption encoder resident next to the compressed transformer. `--negative-prompt` is
+LoRA, img2img and ControlNet are refused because this path does not implement them. mflux's alternative image
+decoder (`--pid-decode`) is refused because it would need an 8 GB caption encoder resident next to the compressed
+transformer. `--negative-prompt` is
 accepted and ignored, matching mflux's own FLUX.1 behavior. The command never overwrites an existing output file;
 it picks a new name instead, and the report names the file it wrote.
+
+### Generate a Z-Image image
+
+Z-Image-Turbo (9 steps) and Z-Image (the base model, 50 steps) run through the same command. Both are Apache-2.0 and
+ungated on the Hub ([Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image),
+[Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo)), so no Hub login is needed:
+
+```
+mlx-dfloat generate --model z-image-turbo \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --base Tongyi-MAI/Z-Image --seed 42 --height 1024 --width 1024 --report report.json
+```
+
+For the base model use `--model z-image --steps 50 --guidance 4`. Without `--guidance` the base model runs at 0, as
+mflux does; its model card suggests about 4.
+
+`--base Tongyi-MAI/Z-Image` takes Turbo's text encoder, tokenizer and VAE from the base model's repository. They are
+the same weight files (the Hub lists the same hashes for them), so one download serves both models. The VAE's `config.json` differs only in metadata (`_diffusers_version` and
+`_name_or_path`). The measured Turbo runs used `--base Tongyi-MAI/Z-Image`; generation from Turbo's own default
+base, `Tongyi-MAI/Z-Image-Turbo`, has not been run here.
+
+The same from Python:
+
+```python
+from mlx_dfloat.mflux import DFloatModel
+
+model = DFloatModel("z-image-turbo")  # or "z-image"
+image = model.generate_image(
+    seed=42,
+    prompt="A stone lighthouse on a rocky shore at dawn",
+    num_inference_steps=9,
+    height=1024,
+    width=1024,
+)
+image.save("lighthouse.png")
+```
+
+The DFloat11 transformer of each model is 7.8 GiB (8.4 GB) compressed. The BF16 text encoder is 7.5 GiB on disk, and
+MLX's own peak while encoding the prompt was 8.4–8.6 GiB in the 32 GB runs; the VAE and tokenizer are small. mflux compiles Z-Image's denoising
+step into one GPU program on M1 and M2 Max and Ultra chips and on M3 and later. This path runs the step without that
+compilation on every chip, because it unpacks each block's weights just before the block runs, and a compiled step
+cannot pause between blocks to do that. What that costs against stock mflux was not measured: the only Mac measured
+here is an M1 Max, and no Z-Image step time is reported.
+
+Measured on an M1 Max (32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0) at 1024², seed 42, one image per model:
+Z-Image-Turbo (9 steps) peaked at 13.11 GiB and Z-Image (50 steps, guidance 4.0) at 13.15 GiB. In both runs MLX's own memory
+peaked during the VAE decode.
+
+On a 16 GB Mac, Z-Image-Turbo is at risk. No 16 GB Mac was measured: the run behind that row was simulated on the
+32 GB M1 Max with a 16 GB Mac's MLX limits and watchdog ceiling (`--tier 16`) and with `--no-fit-check`, because the fit
+check predicted a 12.2 GiB peak against the 9.17 GiB budget and refused the run. The watchdog stopped it after 6.7 s,
+while it was encoding the prompt (the abort file names the phase), at 9.29 GiB against the 9.17 GiB ceiling. The BF16 text encoder is 7.5 GiB on disk,
+and MLX held 8.8 GiB in that phase. The transformer was never reached, so this run says nothing about whether it would
+fit.
+
+Quantisation, LoRA, img2img, mflux's alternative image decoder (`--pid-decode`) and ControlNet are refused, as for
+FLUX.1. Sizes above 1024² are refused unless you pass `--no-fit-check`, because none has been measured.
 
 ## Measured numbers
 
@@ -211,21 +284,47 @@ there, so its peak is not understated.
 PROOF marks a run under a deliberately low watchdog ceiling, made only to show that the watchdog works; it never
 appears as a tier row.
 
-So far there are only 32 GB rows, and all of them are MEASURED, on one M1 Max. The table makes no claim about any
-Mac it does not list. Each row is one `mlx-dfloat generate` run at 1024² with seed 42 (4 steps for FLUX.1-schnell,
-20 for FLUX.1-dev and FLUX.1-Krea-dev), with `--tier 32` and `--report` writing the file in the last column. The
+The 32 GB rows are MEASURED, on one M1 Max, and one 16 GB row is CAPPED: a run under a 16 GB Mac's limits that the
+watchdog stopped. The table makes no claim about any Mac it does not list. Each row is one `mlx-dfloat generate` run
+at 1024² with seed 42 (4 steps for FLUX.1-schnell, 20 for FLUX.1-dev and FLUX.1-Krea-dev, 9 for Z-Image-Turbo, 50
+with guidance 4.0 for Z-Image), with `--tier` and `--report` writing the file in the last column. The
 fit budget is the Mac's recommended GPU working set minus a 2 GiB reserve, the same budget `generate` uses to decide
 whether a run fits. "Peak (watched)" is the larger of the process footprint the OS reports and MLX's active plus
-cached memory, and a row's status is "target" when it stayed under the fit budget. The fit budget is not where the
+cached memory, and a row's status is "target" when it stayed under the fit budget. "Peak MLX" is the larger of two
+readings: the watchdog's sample of MLX's active plus cached memory, taken every 0.05 s, and MLX's own exact peak of
+active memory in each phase of the run, which also catches a short spike between two samples. A row the watchdog
+stopped shows its peaks as lower bounds, since the run never got to its own peak. The fit budget is not where the
 watchdog stops a run on these rows. On the host's own tier the watchdog aborts at physical memory minus 4 GiB, 28 GiB
 on this Mac (`watchdog_ceiling_bytes` in each file). On a CAPPED row the two are the same number.
 
+The three Z-Image rows come from these commands. The reports do not store the prompt, so these commands reuse the lighthouse
+prompt from "Generate a Z-Image image".
+
+```
+mlx-dfloat generate --model z-image-turbo --base Tongyi-MAI/Z-Image --tier 32 \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024 --report bench/results/tiers/z-image-turbo-1024.json
+mlx-dfloat generate --model z-image --steps 50 --guidance 4 --tier 32 \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024 --report bench/results/tiers/z-image-1024.json
+mlx-dfloat generate --model z-image-turbo --base Tongyi-MAI/Z-Image --tier 16 --no-fit-check \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024
+```
+
+The last one ends with exit 70 and writes the watchdog's `abort.json` next to the output image.
+
+Measured on an Apple M1 Max, 32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0.
+
 <!-- bench:tier-table -->
-| Mac | Fit budget (budget − reserve) | Model | DF11 size | Peak (watched) | Peak footprint | Peak MLX (active + cache) | Label | Status | Limits | Result |
+| Mac | Fit budget (budget − reserve) | Model | DF11 size | Peak (watched) | Peak footprint | Peak MLX (sampled active + cache, or exact phase peak) | Label | Status | Limits | Result |
 |---|---|---|---|---|---|---|---|---|---|---|
 | 32 GB | 22.96 GiB | FLUX.1-dev | 15.21 GiB | 19.96 GiB | 19.96 GiB | 19.19 GiB | MEASURED | target | host caps | `bench/results/tiers/dev-1024.json` |
 | 32 GB | 22.96 GiB | FLUX.1-Krea-dev | 15.21 GiB | 20.04 GiB | 20.04 GiB | 19.19 GiB | MEASURED | target | host caps | `bench/results/tiers/krea-dev-1024.json` |
 | 32 GB | 22.96 GiB | FLUX.1-schnell | 15.19 GiB | 19.78 GiB | 19.78 GiB | 19.03 GiB | MEASURED | target | host caps | `bench/results/tiers/schnell-1024.json` |
+| 32 GB | 22.96 GiB | Z-Image | 7.80 GiB | 13.15 GiB | 13.15 GiB | 12.65 GiB | MEASURED | target | host caps | `bench/results/tiers/z-image-1024.json` |
+| 32 GB | 22.96 GiB | Z-Image-Turbo | 7.80 GiB | 13.11 GiB | 13.11 GiB | 12.20 GiB | MEASURED | target | host caps | `bench/results/tiers/z-image-turbo-1024.json` |
+| 16 GB | 9.17 GiB | Z-Image-Turbo | not recorded | at least 9.29 GiB (stopped after 6.7 s) | at least 9.29 GiB | at least 8.81 GiB | CAPPED | stopped by the watchdog | MLX defaults for the tier | `bench/results/tiers/aborts/z-image-turbo-1024-tier16.json` |
 <!-- /bench:tier-table -->
 
 The overhead block times one 1024² denoise step, five timed steps after two warm-up steps in each of three rounds,

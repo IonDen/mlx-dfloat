@@ -1,0 +1,126 @@
+{
+ "exit_code": 0,
+ "output": "/tmp/s2/z-image.png",
+ "memory_caps_gb": [
+  20,
+  22
+ ],
+ "model_kwargs": {
+  "model": "z-image",
+  "df11_path": null,
+  "base_path": null,
+  "eval_policy": "per-block",
+  "cache_limit": null,
+  "fit_check": true
+ },
+ "height": 1024,
+ "width": 1024,
+ "memory_ceiling_bytes": null,
+ "tier_gb": 32,
+ "label": "MEASURED",
+ "watchdog_ceiling_bytes": 30064771072,
+ "limits": {
+  "tier": {
+   "tier_gb": 32,
+   "ram_bytes": 34359738368,
+   "recommended_bytes": 26800603136,
+   "memory_limit_bytes": 32641751449,
+   "cache_limit_bytes": 25460572979,
+   "wired_limit_bytes": 0,
+   "reserve_bytes": 2147483648,
+   "budget_bytes": 26800603136,
+   "ceiling_bytes": 24653119488,
+   "budget_source": "device",
+   "is_host": true,
+   "label": "MEASURED"
+  },
+  "effective": {
+   "memory_limit_bytes": 23622320128,
+   "cache_limit_bytes": 32641751449,
+   "wired_limit_bytes": 21474836480
+  },
+  "applied": "host-caps"
+ },
+ "family": "zimage",
+ "model": "z-image",
+ "df11": {
+  "root": "~/.cache/huggingface/hub/models--mingyi456--Z-Image-DF11/snapshots/36d582560630bfe2f5b78183c4164c66d6919e5b",
+  "repo_id": "mingyi456/Z-Image-DF11",
+  "revision": "36d582560630bfe2f5b78183c4164c66d6919e5b"
+ },
+ "base": {
+  "root": "~/.cache/huggingface/hub/models--Tongyi-MAI--Z-Image/snapshots/04cc4abb7c5069926f75c9bfde9ef43d49423021",
+  "repo_id": "Tongyi-MAI/Z-Image",
+  "revision": "04cc4abb7c5069926f75c9bfde9ef43d49423021"
+ },
+ "eval_policy": "per-block",
+ "cfg_calls_per_step": 2,
+ "predict": "uncompiled",
+ "nonblock_groups": [
+  "cap_embedder"
+ ],
+ "cache_limit_in_force": 2311752734,
+ "drop_set_before_vae": false,
+ "fit": {
+  "label": "predicted",
+  "phases": {
+   "encode": 10143248230,
+   "denoise": 13101538864,
+   "vae": 13054789110
+  },
+  "peak_phase": "denoise",
+  "peak_bytes": 13101538864,
+  "budget_bytes": 24653119488,
+  "fits": true
+ },
+ "sizes": {
+  "compressed": 8369046600,
+  "extras": 6088832,
+  "nonblock": 19660800,
+  "encoders": 8044982000,
+  "vae": 167666902
+ },
+ "peaks": {
+  "label": "sampled at phase boundaries",
+  "encode": {
+   "footprint_start": 480806256,
+   "mlx_peak": 9177190600,
+   "footprint_end": 8999754928,
+   "active_at_start": 6580692
+  },
+  "set_load": {
+   "footprint_start": 8999754928,
+   "mlx_peak": 8401205524,
+   "footprint_end": 8883658144,
+   "active_at_start": 11823560
+  },
+  "denoise": {
+   "footprint_start": 8883658144,
+   "mlx_peak": 10637496516,
+   "footprint_end": 11312586144,
+   "active_at_start": 8387910856
+  },
+  "vae": {
+   "footprint_start": 11312586144,
+   "mlx_peak": 13578549138,
+   "footprint_end": 9279348200,
+   "active_at_start": 8389484140
+  }
+ },
+ "decode_launches": 3400,
+ "lifecycle": {
+  "encoder_loads": 0,
+  "encoder_seconds": 0.0,
+  "set_loads": 1,
+  "set_seconds": 16.110344999993686,
+  "forced_set_drops": 0
+ },
+ "versions": {
+  "mlx": "0.32.2",
+  "mflux": "0.20.0"
+ },
+ "footprint_peak_bytes": 14115020240,
+ "footprint_peak_label": "OS phys_footprint, sampled every 0.05 s by the watchdog",
+ "watched_peak_bytes": 14115020240,
+ "mlx_peak_bytes": 13099464594
+}
