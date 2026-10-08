@@ -169,7 +169,8 @@ def fit_for(
 
     ``height`` and ``width`` scale the VAE transient (above 1024²) and, with ``text_tokens``, the
     denoise activation term. ``vae_with_set=False`` plans the VAE phase after the compressed set has
-    been dropped (what a call does when the resident variant would not fit).
+    been dropped (what a call does when the resident variant would not fit); the extras stay, as the
+    transformer's own BF16 parameters loaded once at construction.
     """
     phases = flux_phases(
         compressed_bytes=sizes.compressed,
@@ -188,5 +189,4 @@ def fit_for(
     )
     if not vae_with_set:
         phases["vae"].pop("compressed")
-        phases["vae"].pop("extras")
     return fit_estimate(phases, budget_bytes=budget)

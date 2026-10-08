@@ -78,7 +78,8 @@ def check_klein_groups(ckpt: Any) -> dict[str, int]:
                 )
             continue
         kind, _dot, idx = name.partition(".")
-        if kind not in seen or not (idx.isascii() and idx.isdigit()):
+        # A zero-padded index ("01") is refused: the seam asks for the group by its canonical name.
+        if kind not in seen or not (idx.isascii() and idx.isdigit() and idx == str(int(idx))):
             raise DFloatFormatError(
                 f"{name}: not a FLUX.2 Klein block group (blocks: {', '.join(RUN_ORDER)}; non-block groups "
                 f"accepted: {', '.join(NONBLOCK_GROUPS)})"

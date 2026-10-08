@@ -154,8 +154,8 @@ def test_depth2_doubles_the_in_flight_decoded_buffer():
 
 
 def test_fit_for_sums_the_phases_and_drops_the_set_from_the_vae_phase_when_asked():
-    # Bug caught: vae_with_set=False keeping the compressed set / extras / non-block bytes in the VAE phase, or the
-    # constants not the measured ones. Hand sums (denoise at 1024², 512 tokens):
+    # Bug caught: vae_with_set=False keeping the compressed set / non-block bytes in the VAE phase or dropping the
+    # extras (they stay on the transformer when the set goes), or the constants not the measured ones. Hand sums (denoise at 1024², 512 tokens):
     #   8_000_000_000 + 6_000_000 + 20_000_000 + 360_000_000 + 2_300_000_000 + 1_523_200_242 + 510_030_936
     #   = 12_719_231_178 ; vae with set: 8_026_000_000 + 160_000_000 + 5_042_526_170 + 510_030_936 = 13_738_557_106.
     sizes = ZImageSizes(
@@ -182,8 +182,8 @@ def test_fit_for_sums_the_phases_and_drops_the_set_from_the_vae_phase_when_asked
     assert kept.phases["encode"] == 8_000_000_000 + 1_500_000_000 + 510_030_936
     assert kept.peak_phase == "vae"
     dropped = fit_for(vae_with_set=False, **common)
-    # 160_000_000 + 5_042_526_170 + 510_030_936
-    assert dropped.phases["vae"] == 5_712_557_106
+    # 6_000_000 + 160_000_000 + 5_042_526_170 + 510_030_936
+    assert dropped.phases["vae"] == 5_718_557_106
     assert dropped.peak_phase == "denoise"
     assert dropped.phases["denoise"] == kept.phases["denoise"]
 

@@ -158,6 +158,15 @@ def test_check_accepts_a_checkpoint_without_nonblock_groups(tmp_path):
     assert check_klein_groups(_ckpt(tmp_path, nonblock=())) == {DOUBLE: 2, SINGLE: 3}
 
 
+def test_check_refuses_a_zero_padded_block_index(tmp_path):
+    # Bug caught: single_transformer_blocks.01 counted as block 1 (int("01") == 1), then the seam asks the provider
+    # for single_transformer_blocks.1, a group the checkpoint does not have.
+    with pytest.raises(
+        DFloatFormatError, match=r"single_transformer_blocks\.01: not a FLUX\.2 Klein block"
+    ):
+        check_klein_groups(_ckpt(tmp_path, singles=("0", "01", "2")))
+
+
 def test_check_refuses_a_hole_in_the_single_blocks(tmp_path):
     # Bug caught: a missing single block run as placeholders (zero-size matmul at that depth).
     with pytest.raises(DFloatFormatError, match="not contiguous"):

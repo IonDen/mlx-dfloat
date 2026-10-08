@@ -370,11 +370,12 @@ def test_fit_for_can_plan_the_vae_phase_with_the_set_dropped():
         text_tokens=256,
         vae_with_set=False,
     )
-    assert dropped.phases["vae"] == SCHNELL_SIZES.vae + VAE_TRANSIENT_BYTES + OVERHEAD_BYTES
+    # The extras stay on the transformer when the set goes (_unload_set detaches the provider only).
     assert (
-        resident.phases["vae"] - dropped.phases["vae"]
-        == SCHNELL_SIZES.compressed + SCHNELL_SIZES.extras
+        dropped.phases["vae"]
+        == SCHNELL_SIZES.extras + SCHNELL_SIZES.vae + VAE_TRANSIENT_BYTES + OVERHEAD_BYTES
     )
+    assert resident.phases["vae"] - dropped.phases["vae"] == SCHNELL_SIZES.compressed
     assert dropped.phases["denoise"] == resident.phases["denoise"]
     assert not resident.fits
     assert dropped.fits

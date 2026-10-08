@@ -171,8 +171,9 @@ def fit_for(
 ) -> FitEstimate:
     """The phase estimate for one generate call against ``budget`` (a prediction, labelled as such by the caller).
 
-    ``vae_with_set=False`` plans the VAE phase after the compressed set has been dropped (compressed,
-    extras and the decoded non-block weight all leave with it).
+    ``vae_with_set=False`` plans the VAE phase after the compressed set has been dropped: the compressed
+    groups and the decoded non-block weight leave with it; the extras stay (the transformer's own BF16
+    parameters, loaded once at construction).
     """
     phases = zimage_phases(
         compressed_bytes=sizes.compressed,
@@ -191,6 +192,6 @@ def fit_for(
         ),
     )
     if not vae_with_set:
-        for term in ("compressed", "extras", "nonblock"):
+        for term in ("compressed", "nonblock"):
             phases["vae"].pop(term)
     return fit_estimate(phases, budget_bytes=budget)

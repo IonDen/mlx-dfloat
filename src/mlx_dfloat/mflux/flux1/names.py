@@ -63,7 +63,8 @@ def check_flux_groups(ckpt: Any) -> tuple[int, int]:
     seen: dict[str, set[int]] = {DOUBLE_PREFIX: set(), SINGLE_PREFIX: set()}
     for name, group in ckpt.groups.items():
         kind, _dot, idx = name.partition(".")
-        if kind not in seen or not (idx.isascii() and idx.isdigit()):
+        # A zero-padded index ("01") is refused: the seam asks for the group by its canonical name.
+        if kind not in seen or not (idx.isascii() and idx.isdigit() and idx == str(int(idx))):
             raise DFloatFormatError(f"{name}: not a FLUX block group")
         n = len(group.matrix_names)
         if n != MATRICES_PER_KIND[kind]:
