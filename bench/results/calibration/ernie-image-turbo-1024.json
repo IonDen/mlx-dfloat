@@ -1,0 +1,97 @@
+{
+ "model": "ernie-image-turbo",
+ "purpose": "the 1024² run the ERNIE-Image memory constants were calibrated on (mlx_dfloat.mflux.ernie.memory); one record per CFG batch size",
+ "df11": "mingyi456/ERNIE-Image-Turbo-DF11@27f84b44a3b78fcfaaadbaeeeae7cc7f7d75153b",
+ "base": "baidu/ERNIE-Image-Turbo@bc68c81e2a1730a394d5fc9fae70713dee940140",
+ "prompt": "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water",
+ "size": 1024,
+ "seed": 42,
+ "text_tokens": 26,
+ "batch": 1,
+ "device": "Apple M1 Max, 32 GB",
+ "macos": "27.0.1",
+ "versions": {
+  "mlx": "0.32.2",
+  "mflux": "0.20.0"
+ },
+ "git": "a771e58b2d12142d484a6564b12484a523dc6595",
+ "footprint_peaks_label": "OS phys_footprint in bytes, the peak of each phase; for the MEASURED, identity and CAPPED runs the run's watched peak, reached in the phase named",
+ "sizes_label": "FamilySizes as mlx_dfloat.mflux.ernie.memory.sizes_for computes them: encoders is the language model's evaluated layers (its last layer never runs), not the 6_858_012_672 B of every language-model tensor",
+ "overhead_from": "derisk-turbo-1",
+ "constants_from": {
+  "encode": "derisk-turbo-1",
+  "denoise": "capped-24-gb-2",
+  "vae": "derisk-turbo-1"
+ },
+ "runs": [
+  {
+   "label": "derisk-turbo-1",
+   "date": "2026-10-08",
+   "run": "the de-risk run: one step at guidance 1.0 (one prompt, batch 1), at the planner's limit for the probe's allowance, the VAE decode on the resident set",
+   "steps": 1,
+   "cache_limit": 2600000000,
+   "footprint_peaks": {
+    "encode": 7335614536,
+    "denoise": 14974035520,
+    "vae": 19163080232
+   },
+   "after_build": {
+    "footprint": 644400592,
+    "mlx_active": 27961608,
+    "mlx_cache": 4806
+   },
+   "mlx_encode_held": 6629405444,
+   "sizes": {
+    "compressed": 10894810183,
+    "extras": 27961600,
+    "nonblock": 335544320,
+    "encoders": 6625216512,
+    "vae": 168120878
+   }
+  },
+  {
+   "label": "measured-8-steps",
+   "date": "2026-10-08",
+   "run": "the MEASURED row (mlx-dfloat generate --tier 32): 8 steps at guidance 1.0, the VAE decode on the resident set; bench/results/tiers/ernie-image-turbo-1024.json",
+   "steps": 8,
+   "cache_limit": 2600000000,
+   "footprint_peaks": {
+    "vae": 18621424880
+   }
+  },
+  {
+   "label": "capped-24-gb-1",
+   "date": "2026-10-08",
+   "run": "the first CAPPED 24 GB run (mlx-dfloat generate --tier 24, git 5e2e7c2): 8 steps at guidance 1.0 under a 24 GB Mac's caps, the set dropped before the VAE decode; its watched peak, reached in the denoise phase",
+   "steps": 8,
+   "cache_limit": 2600000000,
+   "footprint_peaks": {
+    "denoise": 15069554288
+   },
+   "sizes": {
+    "compressed": 10894810183,
+    "extras": 27961600,
+    "nonblock": 335544320,
+    "encoders": 6625216512,
+    "vae": 168120878
+   }
+  },
+  {
+   "label": "capped-24-gb-2",
+   "date": "2026-10-08",
+   "run": "the second CAPPED 24 GB run (mlx-dfloat generate --tier 24 --no-fit-check, git f4cd325): 8 steps at guidance 1.0 under a 24 GB Mac's caps, the set dropped before the VAE decode; its watched peak, reached in the denoise phase",
+   "steps": 8,
+   "cache_limit": 2600000000,
+   "footprint_peaks": {
+    "denoise": 15446156600
+   },
+   "sizes": {
+    "compressed": 10894810183,
+    "extras": 27961600,
+    "nonblock": 335544320,
+    "encoders": 6625216512,
+    "vae": 168120878
+   }
+  }
+ ]
+}

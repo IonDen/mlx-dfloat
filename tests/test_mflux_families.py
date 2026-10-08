@@ -12,7 +12,7 @@ def test_importing_the_registry_does_not_import_mflux():
     # Bug caught: a family module imported at registry import time (the CLI's --help would need mflux).
     code = "import sys, mlx_dfloat.mflux.families as f; assert 'mflux' not in sys.modules; print(len(f.MODELS))"
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
-    assert out.stdout.strip() == "10"
+    assert out.stdout.strip() == "12"
 
 
 def test_resolving_an_adapter_module_and_importing_the_package_loads_no_mlx():
@@ -21,6 +21,19 @@ def test_resolving_an_adapter_module_and_importing_the_package_loads_no_mlx():
     # loaded mlx.core there, and mlx's native types registered twice (the CI lane aborted with exit 134).
     code = (
         "import importlib.util, sys; importlib.util.find_spec('mlx_dfloat.mflux.flux1.model'); "
+        "import mlx_dfloat.mflux; print('mlx.core' in sys.modules)"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "False"
+
+
+def test_resolving_the_ernie_coverage_specs_loads_no_mlx():
+    # Bug caught: an eager import in mlx_dfloat/mflux/ernie/__init__.py. The mflux lane's
+    # --cov=mlx_dfloat.mflux.ernie.model / .init / .transformer resolve those specs (importing the ernie package) when
+    # coverage starts; MLX loaded there registers its native types twice and the lane aborts (exit 134).
+    code = (
+        "import importlib.util, sys; "
+        "[importlib.util.find_spec(f'mlx_dfloat.mflux.ernie.{m}') for m in ('model', 'init', 'transformer')]; "
         "import mlx_dfloat.mflux; print('mlx.core' in sys.modules)"
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
@@ -87,6 +100,12 @@ def test_an_unknown_name_is_refused_with_the_known_ones():
         # cli/parser/parsers.py:180 (scheduler "linear"); qwen_image_21.py:89 (a second call per step above 1.0 with
         # a negative prompt, which mflux takes from --negative-prompt, parsers.py:177).
         ("qwen-image-2.1", "qwen21", 40, 1.0, "linear", True, True),
+        # mflux 0.20.0 cli/defaults/defaults.py:35-36 (50 and 8 steps); ernie_image_generate.py:22 (guidance 4.0) and
+        # ernie_image_turbo_generate.py:42-45 (1.0 only); "linear" (ernie_image_generate.py:33-34,
+        # ernie_image.py:64-65). CFG is one batch-2 call (ernie_image.py:239-250), so never a second call; Turbo's
+        # command ignores --negative-prompt (ernie_image_turbo_generate.py:10-12).
+        ("ernie-image", "ernie", 50, 4.0, "linear", False, True),
+        ("ernie-image-turbo", "ernie", 8, 1.0, "linear", False, False),
     ],
 )
 def test_the_entries_carry_the_mflux_defaults(
@@ -181,6 +200,9 @@ def test_only_the_distilled_klein_models_fix_their_guidance():
         "flux2-klein-base-9b": None,
         "flux2-klein-9b": 1.0,
         "qwen-image-2.1": None,
+        # mflux 0.20.0 ernie_image_turbo_generate.py:42-45: any guidance but 1.0 is an error for Turbo.
+        "ernie-image-turbo": 1.0,
+        "ernie-image": None,
     }
 
 
@@ -202,15 +224,17 @@ def test_the_qwen_entry_names_its_published_repos_and_pinned_checkpoint():
     )
 
 
-def test_the_qwen_base_is_pinned_to_the_revision_the_measured_runs_used_and_no_other_base_is():
-    # Bug caught: the Qwen base (text encoder, VAE, tokenizer) following whatever lands on main instead of the snapshot
-    # the identity check and the MEASURED row ran on (d26bb61, bench/results/tiers/qwen-image-2.1-1024.json), or a pin
-    # set on a family whose base no recorded run names.
-    assert (
-        families.entry("qwen-image-2.1").base_revision == "d26bb61231c349cf6b7896fa83353113880e1ba3"
-    )
-    assert {n for n, e in families.MODELS.items() if e.base_revision is not None} == {
-        "qwen-image-2.1"
+def test_pinned_bases_are_the_snapshots_the_recorded_runs_used_and_no_other_base_is():
+    # Bug caught: a base (text encoder, VAE, tokenizer) following whatever lands on main instead of the snapshot its
+    # recorded runs used (Qwen-Image 2.1: d26bb61, bench/results/tiers/qwen-image-2.1-1024.json; ERNIE-Image and
+    # ERNIE-Image-Turbo: the snapshots their parity and de-risk runs read, 2026-10-08), or a pin set on a family whose
+    # base no recorded run names.
+    assert {
+        n: e.base_revision for n, e in families.MODELS.items() if e.base_revision is not None
+    } == {
+        "qwen-image-2.1": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "ernie-image": "5346b31d68c9c23758ba56ef8be5e9dc174c7f99",
+        "ernie-image-turbo": "bc68c81e2a1730a394d5fc9fae70713dee940140",
     }
 
 
@@ -297,3 +321,43 @@ def test_the_family_loaders_return_the_real_classes_and_maps():
     assert families.FAMILIES["qwen21"].load_model_class() is DFloatQwenImage21
     # mflux 0.20.0 Qwen21Transformer._forward (qwen21_transformer.py:96-100): one block list.
     assert families.FAMILIES["qwen21"].load_name_map().kinds == ("transformer_blocks",)
+
+
+def test_the_ernie_entries_name_their_published_repos_and_pinned_checkpoints():
+    # Bug caught: a swapped repository or a pin copied onto the wrong model (the checkpoint verified here swapped for
+    # whatever lands on main).
+    got = {
+        n: (e.label, e.df11_repo, e.df11_revision, e.base_repo)
+        for n, e in families.MODELS.items()
+        if e.family == "ernie"
+    }
+    assert got == {
+        "ernie-image": (
+            "ERNIE-Image",
+            "mingyi456/ERNIE-Image-DF11",
+            "c2dd30ad7dd5a928df2309581b282337f7cdb41f",
+            "baidu/ERNIE-Image",
+        ),
+        "ernie-image-turbo": (
+            "ERNIE-Image-Turbo",
+            "mingyi456/ERNIE-Image-Turbo-DF11",
+            "27f84b44a3b78fcfaaadbaeeeae7cc7f7d75153b",
+            "baidu/ERNIE-Image-Turbo",
+        ),
+    }
+
+
+@pytest.mark.mflux
+def test_the_ernie_family_loads_its_class_and_one_kind_map():
+    # Bug caught: the ernie loader pointing at another family's class or map, or the class's own MODELS drifting
+    # from the registry.
+    from mlx_dfloat.mflux.ernie.model import MODELS as ERNIE
+    from mlx_dfloat.mflux.ernie.model import DFloatErnieImage
+
+    assert families.FAMILIES["ernie"].load_model_class() is DFloatErnieImage
+    assert families.FAMILIES["ernie"].load_name_map().kinds == ("layers",)
+    assert families.family_of("ernie-image") is families.FAMILIES["ernie"]
+    assert ERNIE == {
+        "ernie-image": ("mingyi456/ERNIE-Image-DF11", "baidu/ERNIE-Image"),
+        "ernie-image-turbo": ("mingyi456/ERNIE-Image-Turbo-DF11", "baidu/ERNIE-Image-Turbo"),
+    }

@@ -119,7 +119,7 @@ def _add_arguments(p: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         help="denoise steps (default per model, as mflux: schnell 4, dev 25, z-image 50, z-image-turbo 9, "
-        "FLUX.2 Klein base 50, distilled 4, qwen-image-2.1 40)",
+        "FLUX.2 Klein base 50, distilled 4, qwen-image-2.1 40, ernie-image 50, ernie-image-turbo 8)",
     )
     p.add_argument("--height", type=int, default=1024)
     p.add_argument("--width", type=int, default=1024)
@@ -130,18 +130,19 @@ def _add_arguments(p: argparse.ArgumentParser) -> None:
         help="guidance (default per model, as mflux: FLUX.1 dev 3.5, ignored by schnell and z-image-turbo; "
         "z-image 0, its model card suggests about 4; FLUX.2 Klein 1.0, where the base models take another "
         "value such as 4 and the distilled ones refuse it; Qwen-Image 2.1 1.0, where classifier-free guidance "
-        "needs a value above 1 and --negative-prompt)",
+        "needs a value above 1 and --negative-prompt; ERNIE-Image 4.0 (classifier-free guidance above 1, with or "
+        "without --negative-prompt); ERNIE-Image-Turbo 1.0 only)",
     )
     p.add_argument(
         "--scheduler",
         default=None,
-        help="scheduler (default per model: FLUX.1 and Qwen-Image 2.1 linear; FLUX.2 Klein always runs "
+        help="scheduler (default per model: FLUX.1, Qwen-Image 2.1 and ERNIE-Image linear; FLUX.2 Klein always runs "
         "flow_match_euler_discrete and refuses the flag)",
     )
     p.add_argument(
         "--negative-prompt",
         default=None,
-        help="used by z-image and qwen-image-2.1 with --guidance above 1; accepted and ignored for the "
+        help="used by z-image, qwen-image-2.1 and ernie-image with --guidance above 1; accepted and ignored for the "
         "other models, as mflux does",
     )
     p.add_argument(
@@ -283,6 +284,20 @@ def ceiling_for(
     return (default_ceiling_bytes if limits.is_host else limits.ceiling_bytes), limits, limits.label
 
 
+def empty_prompt_refusal(args: argparse.Namespace) -> str | None:
+    """Why an empty or blank ``--prompt`` is refused for this model, or None.
+
+    ERNIE-Image refuses an empty or blank prompt as a user error (its tokenizer gives an empty prompt no tokens at all,
+    not even a start token); the other families' mflux pipelines encode an empty prompt as it is.
+    """
+    if entry(args.model).family != "ernie" or args.prompt.strip():
+        return None
+    return (
+        f"--prompt {args.prompt!r}: an empty or blank prompt is refused as a user error (an empty prompt gives "
+        "ERNIE-Image's tokenizer no tokens at all)"
+    )
+
+
 def _steps(args: argparse.Namespace) -> int:
     """The denoise steps this call runs: ``--steps``, else the model's mflux default."""
     return int(args.steps) if args.steps is not None else entry(args.model).default_steps
@@ -386,7 +401,7 @@ def run(
     between them).
     """
     started = clock()
-    refused = refused_option(args) or fixed_guidance_refusal(args)
+    refused = refused_option(args) or fixed_guidance_refusal(args) or empty_prompt_refusal(args)
     if refused is not None:
         print(f"error: {refused}", file=sys.stderr)
         return EXIT_ERROR

@@ -97,6 +97,18 @@ def _qwen21_names() -> NameMap:
     return qwen21_name_map()
 
 
+def _ernie_class() -> type:
+    from mlx_dfloat.mflux.ernie.model import DFloatErnieImage
+
+    return DFloatErnieImage
+
+
+def _ernie_names() -> NameMap:
+    from mlx_dfloat.mflux.ernie.names import ernie_name_map
+
+    return ernie_name_map()
+
+
 FAMILIES: dict[str, FamilySpec] = {
     "flux1": FamilySpec(
         name="flux1",
@@ -124,6 +136,12 @@ FAMILIES: dict[str, FamilySpec] = {
         refused_flags={},
         load_model_class=_qwen21_class,
         load_name_map=_qwen21_names,
+    ),
+    "ernie": FamilySpec(
+        name="ernie",
+        refused_flags={},
+        load_model_class=_ernie_class,
+        load_name_map=_ernie_names,
     ),
 }
 
@@ -261,6 +279,43 @@ MODELS: dict[str, ModelEntry] = {
             # The snapshot the identity check and the MEASURED row ran on.
             base_revision="d26bb61231c349cf6b7896fa83353113880e1ba3",
         ),
+        # mflux 0.20.0: 8 steps (cli/defaults/defaults.py:36); guidance 1.0 only, any other is an error
+        # (models/ernie_image/cli/ernie_image_turbo_generate.py:42-45), and --negative-prompt is ignored (:10-12, 40);
+        # scheduler "linear" (ernie_image.py:64-65).
+        ModelEntry(
+            name="ernie-image-turbo",
+            family="ernie",
+            label="ERNIE-Image-Turbo",
+            df11_repo="mingyi456/ERNIE-Image-Turbo-DF11",
+            df11_revision="27f84b44a3b78fcfaaadbaeeeae7cc7f7d75153b",
+            base_repo="baidu/ERNIE-Image-Turbo",
+            default_steps=8,
+            default_guidance=1.0,
+            default_scheduler="linear",
+            cfg_two_calls=False,
+            uses_negative_prompt=False,
+            fixed_guidance=1.0,
+            # The snapshot the parity, de-risk and MEASURED runs used (text encoder, VAE, tokenizer).
+            base_revision="bc68c81e2a1730a394d5fc9fae70713dee940140",
+        ),
+        # mflux 0.20.0: 50 steps (cli/defaults/defaults.py:35); guidance 4.0 (models/ernie_image/cli/
+        # ernie_image_generate.py:22, 30-31); scheduler "linear" (:33-34). Classifier-free guidance runs above 1.0
+        # with or without a negative prompt, as one batch-2 transformer call (ernie_image.py:164-168, 239-250).
+        ModelEntry(
+            name="ernie-image",
+            family="ernie",
+            label="ERNIE-Image",
+            df11_repo="mingyi456/ERNIE-Image-DF11",
+            df11_revision="c2dd30ad7dd5a928df2309581b282337f7cdb41f",
+            base_repo="baidu/ERNIE-Image",
+            default_steps=50,
+            default_guidance=4.0,
+            default_scheduler="linear",
+            cfg_two_calls=False,  # CFG runs as one batch-2 call (ernie_image.py:239-250)
+            uses_negative_prompt=True,
+            # The snapshot the parity, identity, de-risk and MEASURED runs used.
+            base_revision="5346b31d68c9c23758ba56ef8be5e9dc174c7f99",
+        ),
     )
 }
 
@@ -289,7 +344,7 @@ def DFloatModel(name: str, /, **kwargs: Any) -> Any:  # noqa: N802
 
     Imports mflux. ``DFloatModel("z-image-turbo")`` returns a ``DFloatZImage``; ``DFloatModel("schnell")`` a
     ``DFloatFlux1``; ``DFloatModel("flux2-klein-4b")`` a ``DFloatFlux2Klein``; ``DFloatModel("qwen-image-2.1")`` a
-    ``DFloatQwenImage21``.
+    ``DFloatQwenImage21``; ``DFloatModel("ernie-image")`` a ``DFloatErnieImage``.
 
     Args:
         name: A registered model name, such as ``"schnell"`` or ``"z-image-turbo"``.

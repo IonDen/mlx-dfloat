@@ -1,0 +1,133 @@
+{
+ "exit_code": 0,
+ "output": "ernie-image.png",
+ "memory_caps_gb": [
+  20,
+  22
+ ],
+ "model_kwargs": {
+  "model": "ernie-image",
+  "df11_path": "~/.cache/huggingface/hub/models--mingyi456--ERNIE-Image-DF11/snapshots/c2dd30ad7dd5a928df2309581b282337f7cdb41f",
+  "base_path": "~/.cache/huggingface/hub/models--baidu--ERNIE-Image/snapshots/5346b31d68c9c23758ba56ef8be5e9dc174c7f99",
+  "eval_policy": "per-block",
+  "cache_limit": null,
+  "fit_check": true
+ },
+ "height": 1024,
+ "width": 1024,
+ "memory_ceiling_bytes": null,
+ "tier_gb": 32,
+ "label": "MEASURED",
+ "watchdog_ceiling_bytes": 30064771072,
+ "limits": {
+  "tier": {
+   "tier_gb": 32,
+   "ram_bytes": 34359738368,
+   "recommended_bytes": 26800603136,
+   "memory_limit_bytes": 32641751449,
+   "cache_limit_bytes": 25460572979,
+   "wired_limit_bytes": 0,
+   "reserve_bytes": 2147483648,
+   "budget_bytes": 26800603136,
+   "ceiling_bytes": 24653119488,
+   "fit_budget_bytes": 24653119488,
+   "budget_source": "device",
+   "is_host": true,
+   "label": "MEASURED"
+  },
+  "effective": {
+   "memory_limit_bytes": 23622320128,
+   "cache_limit_bytes": 32641751449,
+   "wired_limit_bytes": 21474836480
+  },
+  "applied": "host-caps"
+ },
+ "family": "ernie",
+ "model": "ernie-image",
+ "df11": {
+  "root": "~/.cache/huggingface/hub/models--mingyi456--ERNIE-Image-DF11/snapshots/c2dd30ad7dd5a928df2309581b282337f7cdb41f",
+  "repo_id": null,
+  "revision": "c2dd30ad7dd5a928df2309581b282337f7cdb41f",
+  "config_source": "config.json"
+ },
+ "base": {
+  "root": "~/.cache/huggingface/hub/models--baidu--ERNIE-Image/snapshots/5346b31d68c9c23758ba56ef8be5e9dc174c7f99",
+  "repo_id": null,
+  "revision": "5346b31d68c9c23758ba56ef8be5e9dc174c7f99"
+ },
+ "eval_policy": "per-block",
+ "eval_policy_status": "measured",
+ "cfg_batch": 2,
+ "text_tokens": 26,
+ "predict": "uncompiled",
+ "nonblock_groups": [
+  "adaLN_modulation.1",
+  "final_norm.linear",
+  "time_embedding"
+ ],
+ "cache_limit_in_force": 3600000000,
+ "drop_set_before_vae": false,
+ "fit": {
+  "label": "predicted",
+  "phases": {
+   "encode": 7271583948,
+   "denoise": 16361874888,
+   "vae": 19163020656
+  },
+  "peak_phase": "vae",
+  "peak_bytes": 19163020656,
+  "budget_bytes": 24653119488,
+  "fits": true
+ },
+ "sizes": {
+  "compressed": 10894750607,
+  "extras": 27961600,
+  "nonblock": 335544320,
+  "encoders": 6625216512,
+  "vae": 168120878
+ },
+ "peaks": {
+  "label": "sampled at phase boundaries",
+  "encode": {
+   "footprint_start": 642647528,
+   "mlx_peak": 6683031170,
+   "footprint_end": 6920067144,
+   "active_at_start": 27962176
+  },
+  "set_load": {
+   "footprint_start": 6920067144,
+   "mlx_peak": 11259611992,
+   "footprint_end": 11994408512,
+   "active_at_start": 28289424
+  },
+  "denoise": {
+   "footprint_start": 11994408512,
+   "mlx_peak": 14181492084,
+   "footprint_end": 15734679008,
+   "active_at_start": 11026621584
+  },
+  "vae": {
+   "footprint_start": 15734646240,
+   "mlx_peak": 16335375078,
+   "footprint_end": 12168980008,
+   "active_at_start": 11032978796
+  }
+ },
+ "decode_launches": 1800,
+ "lifecycle": {
+  "encoder_loads": 0,
+  "encoder_seconds": 0.0,
+  "set_loads": 1,
+  "set_seconds": 22.896248666977044,
+  "forced_set_drops": 0
+ },
+ "versions": {
+  "mlx": "0.32.2",
+  "mflux": "0.20.0"
+ },
+ "footprint_peak_bytes": 18032961064,
+ "footprint_peak_label": "OS phys_footprint, sampled every 0.05 s by the watchdog",
+ "watched_peak_bytes": 18032961064,
+ "mlx_peak_bytes": 15532329081,
+ "elapsed_seconds": 1791.188
+}

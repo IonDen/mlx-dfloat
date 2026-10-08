@@ -1271,3 +1271,109 @@ def test_qwen_refuses_the_common_flags_before_anything_loads(flag, tmp_path, cap
     )
     assert (code, watchdogs, log) == (2, [], [])
     assert flag[0] in capsys.readouterr().err
+
+
+# --- ERNIE-Image ------------------------------------------------------------------------------------------------
+
+
+def test_ernie_steps_follow_mflux_per_variant():
+    # Bug caught: an ERNIE model on another model's steps (mflux 0.20.0 cli/defaults/defaults.py:35-36: ernie-image 50,
+    # ernie-image-turbo 8).
+    steps = {
+        m: gen._steps(gen.build_parser().parse_args(["--model", m, "--prompt", "p"]))
+        for m in ("ernie-image", "ernie-image-turbo")
+    }
+    assert steps == {"ernie-image": 50, "ernie-image-turbo": 8}
+
+
+def test_turbo_guidance_other_than_1_is_refused_before_the_build(tmp_path, capsys):
+    # Bug caught (Review Focus 1, command half): --guidance 4 reaching ERNIE-Image-Turbo (mflux's turbo command errors,
+    # ernie_image_turbo_generate.py:42-45), or the refusal coming after the caps or the build.
+    built = []
+    args = gen.build_parser().parse_args(
+        [
+            "--model",
+            "ernie-image-turbo",
+            "--prompt",
+            "p",
+            "--guidance",
+            "4",
+            "--output",
+            str(tmp_path / "o.png"),
+        ]
+    )
+    code = gen.run(
+        args,
+        model_factory=lambda **kw: built.append(kw),
+        install_caps=lambda: pytest.fail("caps installed before the refusal"),
+        watchdog_factory=lambda *a, **k: pytest.fail("watchdog started before the refusal"),
+        resolve_output=_resolve,
+        **_host_kwargs(),
+    )
+    assert (code, built) == (2, [])
+    assert (
+        "error: --guidance: ERNIE-Image-Turbo is a distilled model and runs at guidance 1.0 only"
+        in capsys.readouterr().err
+    )
+
+
+def test_turbo_negative_prompt_warns_it_is_ignored(tmp_path, capsys):
+    # Bug caught: a negative_prompt keyword sent to Turbo (mflux's turbo command ignores it with a warning,
+    # ernie_image_turbo_generate.py:10-12, 40), or the warning missing.
+    call = _generate_kwargs("ernie-image-turbo", tmp_path, "--negative-prompt", "blurry")
+    assert "negative_prompt" not in call
+    assert (call["guidance"], call["num_inference_steps"], call["scheduler"]) == (1.0, 8, "linear")
+    assert (
+        "warning: --negative-prompt is ignored: this model has no negative branch"
+        in capsys.readouterr().err
+    )
+
+
+@pytest.mark.parametrize(
+    ("extra", "negative"), [([], None), (["--negative-prompt", "blurry"], "blurry")]
+)
+def test_ernie_base_passes_guidance_4_and_the_negative_prompt_by_default(
+    tmp_path, capsys, extra, negative
+):
+    # Bug caught: the base run at mflux's class default 1.0 (no CFG: not mflux's ernie-image command,
+    # ernie_image_generate.py:22, 30-31), the negative prompt dropped, or a Qwen-style "no CFG without
+    # --negative-prompt" warning (ERNIE runs CFG with mflux's " " negative).
+    call = _generate_kwargs("ernie-image", tmp_path, *extra)
+    assert (call["guidance"], call["num_inference_steps"], call["scheduler"]) == (4.0, 50, "linear")
+    assert call["negative_prompt"] == negative
+    assert "warning" not in capsys.readouterr().err
+
+
+def test_ernie_base_negative_prompt_at_guidance_1_warns_with_its_default_4(tmp_path, capsys):
+    # Bug caught: the "no effect" warning quoting another model's default (Z-Image's 0, Qwen's 1.0).
+    _generate_kwargs("ernie-image", tmp_path, "--guidance", "1", "--negative-prompt", "blurry")
+    err = capsys.readouterr().err
+    assert "warning: --negative-prompt has no effect" in err
+    assert "(the default is 4.0)" in err
+
+
+@pytest.mark.parametrize("model", ["ernie-image", "ernie-image-turbo"])
+@pytest.mark.parametrize("prompt", ["", "   "])
+def test_an_empty_ernie_prompt_is_refused_before_anything_loads(model, prompt, tmp_path, capsys):
+    # Bug caught: an empty or blank prompt reaching ERNIE-Image (its tokenizer gives "" no tokens: a zero-length text
+    # through the transformer), or the refusal coming after the caps, the watchdog or the build.
+    log = []
+    code, watchdogs = _run(
+        ["--model", model, "--prompt", prompt, "--output", str(tmp_path / "o.png")],
+        log,
+        tmp_path,
+        factory=lambda **kw: pytest.fail("built"),
+        install_caps=lambda: pytest.fail("caps installed before the refusal"),
+    )
+    assert (code, watchdogs, log) == (2, [], [])
+    assert "an empty or blank prompt is refused as a user error" in capsys.readouterr().err
+
+
+def test_an_empty_prompt_is_still_passed_to_the_other_families(tmp_path):
+    # Bug caught: the ERNIE refusal applied to every model (mflux encodes an empty prompt for the others).
+    log = []
+    code, _ = _run(
+        ["--model", "schnell", "--prompt", "", "--output", str(tmp_path / "o.png")], log, tmp_path
+    )
+    assert code == 0
+    assert log[0][1]["prompt"] == ""
