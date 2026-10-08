@@ -1,0 +1,30 @@
+{
+ "reason": "memory",
+ "footprint": 9558646368,
+ "peak_footprint": 9558646368,
+ "ceiling": 9842633386,
+ "elapsed": 4.377274958009366,
+ "budget": 1800.0,
+ "rss": 9139568640,
+ "mlx_active": 9949674348,
+ "mlx_cache": 14371993,
+ "verdict_memory": 9964046341,
+ "verdict_counter": "mlx",
+ "peak_watched": 9964046341,
+ "peak_mlx": 9964046341,
+ "context": {
+  "model": "qwen-image-2.1",
+  "height": 1024,
+  "width": 1024,
+  "seed": 42,
+  "steps": 40,
+  "tier_gb": 16,
+  "label": "CAPPED",
+  "limits": {
+   "memory": 10737418240,
+   "cache": 10737418240,
+   "wired": 8589934592
+  },
+  "phase": "encode"
+ }
+}

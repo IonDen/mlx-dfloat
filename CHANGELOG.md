@@ -36,6 +36,23 @@ All notable changes to this project are documented here. The format follows
   Mac's caps the fit check refuses the base 9B (`bench/results/refusals/flux2-klein-base-9b-1024-tier24.json`) and a
   forced run was stopped by the watchdog, so that tier is at risk. A base model and the distilled model of the same
   size have the same text-encoder and VAE files on the Hub, and the 4B pair the same tokenizer files too.
+- Qwen-Image-2.1 generation through mflux: `mlx-dfloat generate --model qwen-image-2.1` and the `DFloatQwenImage21`
+  class, also returned by `DFloatModel`. The text encoder, VAE and tokenizer come from `Qwen/Qwen-Image-2.1`, pinned
+  to the revision the measured runs used. The defaults follow mflux: 40 steps, guidance 1.0, the `linear` scheduler.
+  Classifier-free guidance runs only with a guidance above 1.0 and a negative prompt, and the command warns when one
+  comes without the other.
+- The default Qwen-Image-2.1 checkpoint, `mingyi456/Qwen-Image-2.1-DF11-ComfyUI`, is one ComfyUI file with no
+  `config.json`. The reader opens it through a layout pinned to that file's revision and refuses a file without a
+  `config.json` that it does not know.
+- Every compressed matrix and stored tensor of the Qwen-Image-2.1 transformer (225 and 72) equals its BF16 original,
+  and the GPU decoder matches the CPU reference on all 225 (both records in `bench/results/parity/qwen-image-2.1/`).
+  The final latents match the BF16 transformer's bit for bit with classifier-free guidance on
+  (`bench/results/identity/qwen-image-2.1-1024/compare.json`).
+- The measured 32 GB Qwen-Image-2.1 run peaks at 20.42 GiB at 1024² over 40 steps
+  (`bench/results/tiers/qwen-image-2.1-1024.json`) and keeps the compressed transformer loaded through the VAE
+  decode. Under a 16 GB and a 24 GB Mac's caps the fit check refuses it, predicting 14.6 GiB while the prompt is
+  encoded (`bench/results/refusals/qwen-image-2.1-1024-tier16.json` and `qwen-image-2.1-1024-tier24.json`), and forced
+  runs were stopped by the watchdog in that phase, so both sizes are at risk.
 - A FLUX.2 Klein base that lacks a text-encoder or VAE tensor is refused with `DFloatFormatError` instead of leaving
   that weight at its random initial value.
 - A FLUX.2 Klein call warns when the prompt encode holds more memory than the fit estimate allows for it. The
@@ -63,6 +80,12 @@ All notable changes to this project are documented here. The format follows
   column is now headed "Working set − reserve", because on those rows it is the watchdog ceiling, not the fit budget.
 - The README starts with what the library is for, a figure of a FLUX.1 run, a comparison with mflux's BF16 and
   8-bit paths, and a Python example.
+- From Python, every model's `generate_image` runs under the memory caps `mlx-dfloat generate` installs and restores
+  MLX's limits when it returns. Before, a Python caller ran at MLX's default limits, with no wired cap, while the fit
+  estimates' VAE terms were measured under the caps. A wired limit the process already set is left alone.
+- When a call drops the compressed transformer before the VAE decode, the fit estimate for that step now counts the
+  transformer's uncompressed BF16 tensors, which stay loaded. The estimate grows by 6 MB to 137 MB depending on the
+  model; at 1024² none of the 16, 24 or 32 GB verdicts changes.
 - The package summary and keywords name the FLUX.1 use case; `mlx-lm` is no longer a keyword, since no mlx-lm path
   exists yet.
 - The `mlx-dfloat generate --help` text no longer prints reST markup, explains the `--eval-policy` choices, and says
@@ -77,8 +100,8 @@ All notable changes to this project are documented here. The format follows
 - `mlx-dfloat generate --tier 16` and `--tier 24` checked the fit against the watchdog ceiling, the working set minus
   1.5 GiB, which is looser than the budget `generate` applies on a real Mac of that size (the working set minus 2 GiB).
   The fit check now uses the real Mac's budget: 8.67 GiB at 16 GB and 14.00 GiB at 24 GB. The watchdog ceiling stays
-  at 9.17 and 14.50 GiB. The committed 16 GB and 24 GB results were recorded under the older budget, and none of
-  their outcomes changes under the new one.
+  at 9.17 and 14.50 GiB. The committed 16 GB and 24 GB FLUX.2 Klein and Z-Image-Turbo results were recorded under the
+  older budget, and none of their outcomes changes under the new one.
 
 ## [0.1.0] - 2026-10-01
 

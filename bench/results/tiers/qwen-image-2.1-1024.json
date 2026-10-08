@@ -1,0 +1,131 @@
+{
+ "exit_code": 0,
+ "output": "qwen-image-2.1.png",
+ "memory_caps_gb": [
+  20,
+  22
+ ],
+ "model_kwargs": {
+  "model": "qwen-image-2.1",
+  "df11_path": "~/.cache/huggingface/hub/models--mingyi456--Qwen-Image-2.1-DF11-ComfyUI/snapshots/1b22a3a1f96293f3b328d03abe22ab2e51cbd9cc",
+  "base_path": "~/.cache/huggingface/hub/models--Qwen--Qwen-Image-2.1/snapshots/d26bb61231c349cf6b7896fa83353113880e1ba3",
+  "eval_policy": "per-block",
+  "cache_limit": null,
+  "fit_check": true
+ },
+ "height": 1024,
+ "width": 1024,
+ "memory_ceiling_bytes": null,
+ "tier_gb": 32,
+ "label": "MEASURED",
+ "watchdog_ceiling_bytes": 30064771072,
+ "limits": {
+  "tier": {
+   "tier_gb": 32,
+   "ram_bytes": 34359738368,
+   "recommended_bytes": 26800603136,
+   "memory_limit_bytes": 32641751449,
+   "cache_limit_bytes": 25460572979,
+   "wired_limit_bytes": 0,
+   "reserve_bytes": 2147483648,
+   "budget_bytes": 26800603136,
+   "ceiling_bytes": 24653119488,
+   "fit_budget_bytes": 24653119488,
+   "budget_source": "device",
+   "is_host": true,
+   "label": "MEASURED"
+  },
+  "effective": {
+   "memory_limit_bytes": 23622320128,
+   "cache_limit_bytes": 32641751449,
+   "wired_limit_bytes": 21474836480
+  },
+  "applied": "host-caps"
+ },
+ "family": "qwen21",
+ "model": "qwen-image-2.1",
+ "df11": {
+  "root": "~/.cache/huggingface/hub/models--mingyi456--Qwen-Image-2.1-DF11-ComfyUI/snapshots/1b22a3a1f96293f3b328d03abe22ab2e51cbd9cc",
+  "repo_id": null,
+  "revision": "1b22a3a1f96293f3b328d03abe22ab2e51cbd9cc",
+  "config_source": "header and spot checks match layout qwen-image-2.1-comfyui (mingyi456/Qwen-Image-2.1-DF11-ComfyUI@1b22a3a1f96293f3b328d03abe22ab2e51cbd9cc)"
+ },
+ "base": {
+  "root": "~/.cache/huggingface/hub/models--Qwen--Qwen-Image-2.1/snapshots/d26bb61231c349cf6b7896fa83353113880e1ba3",
+  "repo_id": null,
+  "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3"
+ },
+ "eval_policy": "per-block",
+ "eval_policy_status": "measured",
+ "cfg_calls_per_step": 1,
+ "text_tokens": 33,
+ "predict": "uncompiled",
+ "nonblock_groups": [
+  "modulation.1"
+ ],
+ "cache_limit_in_force": 2731761634,
+ "drop_set_before_vae": false,
+ "fit": {
+  "label": "predicted",
+  "phases": {
+   "encode": 15662823906,
+   "denoise": 13939106072,
+   "vae": 22788580400
+  },
+  "peak_phase": "vae",
+  "peak_bytes": 22788580400,
+  "budget_bytes": 24653119488,
+  "fits": true
+ },
+ "sizes": {
+  "compressed": 9587103379,
+  "extras": 137388032,
+  "nonblock": 134217728,
+  "encoders": 15136811008,
+  "vae": 1350989512
+ },
+ "peaks": {
+  "label": "sampled at phase boundaries",
+  "encode": {
+   "footprint_start": 611714344,
+   "mlx_peak": 15353361928,
+   "footprint_end": 13554035800,
+   "active_at_start": 146825876
+  },
+  "set_load": {
+   "footprint_start": 13554035800,
+   "mlx_peak": 9869450888,
+   "footprint_end": 10343883224,
+   "active_at_start": 147219592
+  },
+  "denoise": {
+   "footprint_start": 10343883224,
+   "mlx_peak": 11503639112,
+   "footprint_end": 12186051032,
+   "active_at_start": 9775978888
+  },
+  "vae": {
+   "footprint_start": 12172665304,
+   "mlx_peak": 21171435010,
+   "footprint_end": 15541412888,
+   "active_at_start": 9779206710
+  }
+ },
+ "decode_launches": 1280,
+ "lifecycle": {
+  "encoder_loads": 0,
+  "encoder_seconds": 0.0,
+  "set_loads": 1,
+  "set_seconds": 13.601246499980334,
+  "forced_set_drops": 0
+ },
+ "versions": {
+  "mlx": "0.32.2",
+  "mflux": "0.20.0"
+ },
+ "footprint_peak_bytes": 21929337856,
+ "footprint_peak_label": "OS phys_footprint, sampled every 0.05 s by the watchdog",
+ "watched_peak_bytes": 21929337856,
+ "mlx_peak_bytes": 19963475458,
+ "elapsed_seconds": 413.966
+}

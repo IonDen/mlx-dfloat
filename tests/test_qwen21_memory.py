@@ -15,10 +15,15 @@ encode held 66_567_800 over the language model. The committed MEASURED record
 
 The denoise term is re-derived at the planner's limit (2026-10-08, the first one-step de-risk run at that limit, in
 the cache-limit A/B; same model, prompt, size, seed and guidance): denoise footprint peak 13_939_106_072 at the
-2_731_761_634 limit. The VAE term covers the highest of nine 1024² VAE-phase footprint peaks (21.76-22.79 GB; MLX's VAE
-peak was the same in every de-risk run): 22_788_580_400, from the second one-step run of the A/B at the old limit.
+2_731_761_634 limit. The VAE term covers the highest of eleven 1024² VAE-phase footprint peaks (21.76-22.79 GB; MLX's
+VAE peak was the same in every de-risk run): 22_788_580_400, from the second one-step run of the A/B at the old limit.
+
+The calibration runs' phase peaks are committed in ``bench/results/calibration/qwen-image-2.1-1024.json`` (each run's
+label, date, cache limit and footprint peaks; ``constants_from`` names the run each term was derived from), and the
+tests below read them from there.
 """
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -52,9 +57,17 @@ CACHE_LIMIT = 2_731_761_634
 # The de-risk run's limit: the block + the shared 1.5e9 allowance at 4096 + 256 tokens, rescaled to 4096 + 33.
 CALIBRATION_CACHE_LIMIT = 1_859_346_402
 TEXT_TOKENS = 33  # the de-risk prompt's (the negative " " is 9)
-# The denoise peak is the first one-step A/B run's at CACHE_LIMIT; the VAE peak the highest of the nine 1024² samples
-# (the second A/B run at the old limit); the encode peak the first de-risk run's.
-MEASURED = {"encode": 15_857_938_288, "denoise": 13_939_106_072, "vae": 22_788_580_400}
+REPO = Path(__file__).resolve().parents[1]
+CALIBRATION = json.loads((REPO / "bench/results/calibration/qwen-image-2.1-1024.json").read_text())
+CALIBRATION_RUNS = {run["label"]: run for run in CALIBRATION["runs"]}
+# The phase peaks the constants were derived from: the denoise peak is the first one-step A/B run's at CACHE_LIMIT;
+# the VAE peak the highest of the eleven 1024² samples (the second A/B run at the old limit); the encode peak the first
+# de-risk run's.
+MEASURED = {
+    phase: CALIBRATION_RUNS[label]["footprint_peaks"][phase]
+    for phase, label in CALIBRATION["constants_from"].items()
+}
+VAE_SAMPLES = {label: run["footprint_peaks"]["vae"] for label, run in CALIBRATION_RUNS.items()}
 # This Mac (M1 Max 32 GB): mx.device_info()["max_recommended_working_set_size"] and the RAM, from the de-risk record.
 RECOMMENDED_32 = 26_800_603_136
 RAM_32 = 34_359_738_368
@@ -230,8 +243,30 @@ def _plan(budget, *, fit_check=True, cache_limit_override=None):
 
 
 # The constants are calibrated on the de-risk run, so at its working point the estimate equals the measurement by
-# construction: the in-sample checks are exact. Whether the model predicts is decided by runs not used for calibration
-# (OUT_OF_SAMPLE below).
+# construction: the in-sample checks are exact. No Qwen-Image 2.1 run outside the calibration exists yet (another size
+# or prompt length), so whether the model predicts away from 1024² and 33 tokens is not tested.
+
+
+def test_the_calibration_record_holds_the_runs_the_constants_name():
+    # Bug caught: the committed record and the constants drifting apart (a re-derived term whose run is not recorded,
+    # or a record edit that moves a peak): the three source peaks are the literals the constants were derived from.
+    assert CALIBRATION["constants_from"] == {
+        "encode": "derisk-1",
+        "denoise": "ab-new-limit-1",
+        "vae": "ab-old-limit-2",
+    }
+    assert MEASURED == {"encode": 15_857_938_288, "denoise": 13_939_106_072, "vae": 22_788_580_400}
+    assert CALIBRATION_RUNS["ab-new-limit-1"]["cache_limit"] == CACHE_LIMIT
+
+
+def test_the_vae_term_covers_every_1024_sample_and_equals_the_highest():
+    # Bug caught: the VAE transient derived from one run instead of the highest of the eleven samples (a fit check that
+    # under-predicts the runs it was calibrated on: the first de-risk run alone puts the phase 648_937_376 B low), or a
+    # sample dropped from the record.
+    assert len(VAE_SAMPLES) == 11
+    fit = _fit()
+    assert fit.phases["vae"] == max(VAE_SAMPLES.values())
+    assert all(peak <= fit.phases["vae"] for peak in VAE_SAMPLES.values())
 
 
 def test_the_estimate_at_1024_equals_the_calibration_run_phase_for_phase():
@@ -358,29 +393,55 @@ def test_the_encode_warning_is_silent_at_the_bound_and_names_the_prompt_length_o
     assert "more of the encoder than its language model" in message
 
 
-# Watched (footprint) peaks of two 1024² runs with more steps than the one-step calibration runs, both on the 33-token
-# de-risk prompt, at the planner's cache limit (2026-10-08): the MEASURED row (`mlx-dfloat generate
-# --tier 32`, 40 steps, no CFG) and the identity check's df11 side (4 steps, guidance 4 with CFG); the values are the
-# `footprint_peak_bytes` of the committed `bench/results/tiers/qwen-image-2.1-1024.json` and
-# `bench/results/identity/qwen-image-2.1-1024/df11-result.json`. Both peak in the VAE
-# decode with the set resident, whose estimate at 1024² is the calibration value itself (the VAE transient is floored
-# there), so they test that the step count and guidance do not grow the 1024² peak, not any scaling term: no run at
-# another size or prompt length is measured yet. Both are among the nine samples the VAE term covers, so the check is
-# one-sided: the VAE phase varies by about 1 GiB run to run, and a run under the estimate is not the bug.
-STEPS_AND_CFG_RUNS = [
-    pytest.param(21_832_147_968, id="measured-40-steps"),
-    pytest.param(22_065_292_384, id="identity-df11-4-steps-cfg"),
+# The two committed 1024² records with more steps than the one-step calibration runs, both on the 33-token de-risk
+# prompt: the MEASURED row (`mlx-dfloat generate --tier 32`, 40 steps, no CFG) and the identity check's df11 side
+# (4 steps, guidance 4 with CFG). Each is re-estimated with the current constants from its own report (its sizes, the
+# cache limit in force, its text tokens, its policy and its VAE strategy), so a re-run that changes the record is
+# checked against the code as it stands. Both peak in the VAE decode with the set resident, whose estimate at 1024² is
+# the calibration value itself (the VAE transient is floored there): they test that the step count and guidance do not
+# grow the 1024² peak, not any scaling term. The check is one-sided: the VAE phase varies by about 1 GiB run to run,
+# and a run under the estimate is not the bug.
+STEPS_AND_CFG_RECORDS = [
+    pytest.param("bench/results/tiers/qwen-image-2.1-1024.json", id="measured-40-steps"),
+    pytest.param(
+        "bench/results/identity/qwen-image-2.1-1024/df11-result.json",
+        id="identity-df11-4-steps-cfg",
+    ),
 ]
 
 
-@pytest.mark.parametrize("measured", STEPS_AND_CFG_RUNS)
-def test_the_1024_peak_does_not_grow_with_steps_or_guidance_beyond_the_calibrated_vae_phase(
-    measured,
-):
+def _record_run(path):
+    """A committed record's report, its height and width, and its watched (footprint) peak."""
+    record = json.loads((REPO / path).read_text())
+    if (
+        "report" in record
+    ):  # verify_image's df11 side: the model's report under "report", the size in the key
+        size = record["key"]["size"]
+        return record["report"], size, size, record["footprint_peak_bytes"]
+    return record, record["height"], record["width"], record["watched_peak_bytes"]
+
+
+@pytest.mark.parametrize("path", STEPS_AND_CFG_RECORDS)
+def test_a_committed_1024_record_peaks_within_the_current_estimate_in_the_vae_phase(path):
     # Bug caught: a 1024² peak that grows with the step count or with classifier-free guidance (a second transformer
-    # call per step holding its activations into the VAE decode) while the estimate stays at the one-step value: a run
-    # more than 0.25 GiB over the prediction, or the estimate peaking in another phase. Also red when the VAE term
-    # under-predicts these runs: a one-step transient (9_860_776_704) puts the identity run 0.50 GiB over.
-    fit = _fit()
+    # call per step holding its activations into the VAE decode) while the estimate stays at the one-step value: a
+    # recorded run more than 0.25 GiB over the current prediction, or the estimate peaking in another phase. Also red
+    # when the VAE term under-predicts these runs: 1 GiB less of VAE transient puts the identity run 0.08 GiB over.
+    report, height, width, watched = _record_run(path)
+    c = qmem.CONSTANTS
+    tokens = report["text_tokens"]
+    fit = fit_for(
+        c,
+        sizes=FamilySizes(**report["sizes"]),
+        largest=LARGEST,
+        policy=report["eval_policy"],
+        cache_limit=report["cache_limit_in_force"],
+        allowance=activation_allowance(c, height=height, width=width, text_tokens=tokens),
+        budget=report["fit"]["budget_bytes"],
+        height=height,
+        width=width,
+        text_tokens=tokens,
+        vae_with_set=not report["drop_set_before_vae"],
+    )
     assert fit.peak_phase == "vae"
-    assert measured <= fit.peak_bytes + GIB // 4
+    assert watched <= fit.peak_bytes + GIB // 4

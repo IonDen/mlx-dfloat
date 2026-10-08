@@ -1,0 +1,49 @@
+{
+ "exit_code": 2,
+ "output": "q.png",
+ "memory_caps_gb": null,
+ "model_kwargs": {
+  "model": "qwen-image-2.1",
+  "df11_path": "~/.cache/huggingface/hub/models--mingyi456--Qwen-Image-2.1-DF11-ComfyUI/snapshots/1b22a3a1f96293f3b328d03abe22ab2e51cbd9cc",
+  "base_path": "~/.cache/huggingface/hub/models--Qwen--Qwen-Image-2.1/snapshots/d26bb61231c349cf6b7896fa83353113880e1ba3",
+  "eval_policy": "per-block",
+  "cache_limit": null,
+  "fit_check": true,
+  "budget_bytes": 15032385536
+ },
+ "height": 1024,
+ "width": 1024,
+ "memory_ceiling_bytes": null,
+ "tier_gb": 24,
+ "label": "CAPPED",
+ "watchdog_ceiling_bytes": 15569256448,
+ "limits": {
+  "tier": {
+   "tier_gb": 24,
+   "ram_bytes": 25769803776,
+   "recommended_bytes": 17179869184,
+   "memory_limit_bytes": 17179869184,
+   "cache_limit_bytes": 16320875724,
+   "wired_limit_bytes": 15032385536,
+   "reserve_bytes": 1610612736,
+   "budget_bytes": 17179869184,
+   "ceiling_bytes": 15569256448,
+   "fit_budget_bytes": 15032385536,
+   "budget_source": "ratio",
+   "is_host": false,
+   "label": "CAPPED"
+  },
+  "effective": {
+   "memory_limit_bytes": 17179869184,
+   "cache_limit_bytes": 16320875724,
+   "wired_limit_bytes": 15032385536
+  },
+  "applied": "tier-caps"
+ },
+ "error": "DFloatResourceError: predicted peak 14.6 GiB in the encode phase exceeds the budget 14.0 GiB (encode 14.6 GiB, denoise 13.0 GiB, vae 12.2 GiB); pass fit_check=False to run anyway",
+ "footprint_peak_bytes": 613549328,
+ "footprint_peak_label": "OS phys_footprint, sampled every 0.05 s by the watchdog",
+ "watched_peak_bytes": 613549328,
+ "mlx_peak_bytes": 147446258,
+ "elapsed_seconds": 3.289
+}
