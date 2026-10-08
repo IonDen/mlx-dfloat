@@ -452,3 +452,115 @@ def test_each_family_has_its_own_pair_of_side_runners():
     assert vi.runner_for("krea-dev", "bf16") is vi.run_bf16
     assert vi.runner_for("z-image", "df11") is vi.run_df11_zimage
     assert vi.runner_for("z-image-turbo", "bf16") is vi.run_bf16_zimage
+
+
+KLEIN = ("flux2-klein-base-4b", "flux2-klein-4b", "flux2-klein-base-9b", "flux2-klein-9b")
+
+
+def _klein_base(tmp_path, *, distilled):
+    """A base snapshot's model_index.json as BFL publishes it: the distilled repos add ``"is_distilled": true``."""
+    root = tmp_path / ("distilled" if distilled else "base")
+    root.mkdir(exist_ok=True)
+    index = {"_class_name": "Flux2KleinPipeline", "_diffusers_version": "0.37.0.dev0"}
+    if distilled:
+        index["is_distilled"] = True
+    (root / "model_index.json").write_text(json.dumps(index))
+    return root
+
+
+def _parse_klein(tmp_path, model, base, *extra):
+    return vi.parse_args(
+        [
+            "--side",
+            "df11",
+            "--model",
+            model,
+            "--df11",
+            str(tmp_path),
+            "--base",
+            str(base),
+            "--out",
+            str(tmp_path / "out"),
+            *extra,
+        ]
+    )
+
+
+@pytest.mark.parametrize("model", KLEIN)
+def test_runner_for_dispatches_klein_names_to_the_flux2_sides(model):
+    # Bug caught: Klein routed to the FLUX.1 or Z-Image sides (a wrong-model identity verdict), or no flux2 row
+    # (a KeyError after the df11 side already ran for minutes).
+    assert vi.runner_for(model, "df11") is vi.run_df11_flux2
+    assert vi.runner_for(model, "bf16") is vi.run_bf16_flux2
+
+
+@pytest.mark.parametrize(
+    ("model", "distilled"),
+    [
+        ("flux2-klein-base-4b", False),
+        ("flux2-klein-4b", True),
+        ("flux2-klein-base-9b", False),
+        ("flux2-klein-9b", True),
+    ],
+)
+def test_every_klein_model_has_a_bf16_side_with_its_own_variants_base(tmp_path, model, distilled):
+    # Bug caught: a Klein model refused like Z-Image-Turbo although all four BF16 originals exist (the distilled
+    # repos ship BF16 transformers of the base repos' exact sizes), or the guidance left None in the key instead of
+    # mflux's 1.0 (flux2_generate.py:63-64), which the bf16 side's Config cannot take.
+    args = _parse_klein(tmp_path, model, _klein_base(tmp_path, distilled=distilled))
+    assert args.model == model
+    assert args.guidance == 1.0
+    command = vi.child_command(args, "bf16")
+    assert command[command.index("--guidance") + 1] == "1.0"
+
+
+@pytest.mark.parametrize(
+    ("model", "distilled", "repo"),
+    [
+        ("flux2-klein-4b", False, "black-forest-labs/FLUX.2-klein-4B"),
+        ("flux2-klein-9b", False, "black-forest-labs/FLUX.2-klein-9B"),
+        ("flux2-klein-base-4b", True, "black-forest-labs/FLUX.2-klein-base-4B"),
+        ("flux2-klein-base-9b", True, "black-forest-labs/FLUX.2-klein-base-9B"),
+    ],
+)
+def test_a_klein_base_of_the_other_variant_is_refused_at_parse_time(
+    tmp_path, capsys, model, distilled, repo
+):
+    # Bug caught: a distilled model checked against the base repo's transformer (the encoder and VAE are the same,
+    # so `generate` accepts it, but the bf16 side would stream the other transformer): exit 1, a false mismatch
+    # verdict after minutes of compute, instead of a usage error before any side runs.
+    with pytest.raises(SystemExit) as info:
+        _parse_klein(tmp_path, model, _klein_base(tmp_path, distilled=distilled))
+    assert info.value.code == 2
+    assert repo in capsys.readouterr().err
+
+
+def test_a_klein_base_without_its_model_index_is_refused_and_flux_needs_none(tmp_path, capsys):
+    # Bug caught: a Klein run on a directory whose variant cannot be told (the false-mismatch case above slips
+    # through), or the check applied to FLUX.1 / Z-Image bases (which never needed the file).
+    with pytest.raises(SystemExit) as info:
+        _parse_klein(tmp_path, "flux2-klein-base-4b", tmp_path)
+    assert info.value.code == 2
+    err = capsys.readouterr().err
+    # Bug caught (review 2026-10-08): the message naming only the exception class, not what to pass instead (the
+    # repository's full snapshot: the bf16 side streams its transformer/ too).
+    assert "missing model_index.json" in err
+    assert "pass the full snapshot of black-forest-labs/FLUX.2-klein-base-4B" in err
+    assert "transformer/" in err
+    assert _parse(tmp_path, "--model", "schnell").model == "schnell"
+    assert _parse(tmp_path, "--model", "z-image").model == "z-image"
+
+
+def test_a_negative_prompt_is_refused_for_klein(tmp_path, capsys):
+    # Bug caught: --negative-prompt accepted for Klein, stored in the run key and ignored by both sides (mflux's
+    # Flux2Klein always encodes its own blank negative " ", flux2_klein.py:75-79): a key that lies about the run.
+    with pytest.raises(SystemExit) as info:
+        _parse_klein(
+            tmp_path,
+            "flux2-klein-base-4b",
+            _klein_base(tmp_path, distilled=False),
+            "--negative-prompt",
+            "blurry",
+        )
+    assert info.value.code == 2
+    assert "--negative-prompt" in capsys.readouterr().err

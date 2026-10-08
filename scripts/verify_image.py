@@ -1,7 +1,7 @@
-"""Image identity: FLUX.1 or Z-Image latents from a DFloat11 transformer against the same seam streaming the BF16 shards.
+"""Image identity: DFloat11 latents (FLUX.1, Z-Image, FLUX.2 Klein) against the same seam streaming the BF16 weights.
 
-The ``df11`` side generates through ``DFloatFlux1`` or ``DFloatZImage`` (the prompt encoded by its own encoders; the
-final latents captured by an after-loop callback and saved with the embeddings and the image).
+The ``df11`` side generates through ``DFloatFlux1``, ``DFloatZImage`` or ``DFloatFlux2Klein`` (the prompt encoded by
+its own encoders; the final latents captured by an after-loop callback and saved with the embeddings and the image).
 The ``bf16`` side builds the same seamed transformer with its extras read from the base's BF16
 transformer shards, drives it with a ``StreamingBF16Provider`` (each block's matrices read from
 the shards as the block runs, never all resident) through exactly mflux's loop body on the saved
@@ -11,7 +11,10 @@ variance above zero, moved away from the initial noise).
 
 Both sides run under the footprint watchdog. ``--orchestrate`` runs df11 and bf16 as subprocesses,
 one at a time, skipping a side whose ``result.json`` already carries this run's key, then compares
-the two sides' saved latents in-process.
+the two sides' saved latents in-process. For FLUX.2 Klein, ``--base`` is the snapshot of the model's own BF16
+repository (a distilled model's transformer lives in the distilled repository, not in the base one). The Klein
+bf16 side's copy of mflux's loop body is measurement glue, run by the identity check and not unit-tested: the df11
+side runs mflux's own loop, so a drift between the two shows as a false mismatch (exit 1), never as a false pass.
 Usage (from the repository root of a synced checkout, ``--group bench``):
     uv run python -m scripts.verify_image --orchestrate --model schnell --df11 DIR --base DIR --out DIR \
         [--prompt "..."] [--seed 42] [--steps 4] [--size 1024] [--guidance 3.5] [--negative-prompt "..."] [--eval-policy per-block]
@@ -83,6 +86,40 @@ NO_BF16_ORIGINAL: dict[str, str] = {
 }
 
 
+def klein_base_problem(model: str, base: Path) -> str | None:
+    """Why ``base`` cannot be a FLUX.2 Klein model's BF16 side, or None (and None for every other family).
+
+    The base and distilled Klein repositories share the text encoder and VAE but not the transformer, which the
+    bf16 side streams from ``base``. BFL's ``model_index.json`` marks a distilled repository with
+    ``"is_distilled": true``; mflux tells the variants apart by the name (``flux2_generate.py:74``: distilled = no
+    "base" in the model name), and so does this check with the registry's repository name.
+    """
+    e = entry(model)
+    if e.family != "flux2":
+        return None
+    distilled = "base" not in e.base_repo.lower()
+    index_path = base / "model_index.json"
+    try:
+        index = json.loads(index_path.read_text())
+    except FileNotFoundError:
+        return (
+            f"--base {base}: missing model_index.json: pass the full snapshot of {e.base_repo} (the bf16 side also "
+            "needs its transformer/; the model_index.json tells a base from a distilled transformer)"
+        )
+    except (OSError, ValueError) as exc:
+        return (
+            f"{index_path}: {type(exc).__name__}; the bf16 side needs the snapshot of {e.base_repo} "
+            "(its model_index.json tells a base from a distilled transformer)"
+        )
+    if not isinstance(index, dict) or bool(index.get("is_distilled", False)) != distilled:
+        found = "distilled" if isinstance(index, dict) and index.get("is_distilled") else "base"
+        return (
+            f"--base {base} holds a {found} FLUX.2 Klein transformer, but {e.label} is "
+            f"{'distilled' if distilled else 'a base model'}: pass the snapshot of {e.base_repo}"
+        )
+    return None
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse the command line: one side (``df11``, ``bf16`` or ``compare``), or ``--orchestrate``."""
     p = argparse.ArgumentParser(
@@ -105,7 +142,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--guidance",
         type=float,
         default=None,
-        help="guidance (default per model, as mflux: FLUX.1 3.5; Z-Image unset: the model's own rule)",
+        help="guidance (default per model, as mflux: FLUX.1 3.5; Z-Image unset: the model's own rule; "
+        "FLUX.2 Klein 1.0, base models with CFG at 4)",
     )
     p.add_argument(
         "--negative-prompt",
@@ -119,6 +157,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = p.parse_args(argv)
     if args.model in NO_BF16_ORIGINAL:
         p.error(f"--model {args.model}: {NO_BF16_ORIGINAL[args.model]}")
+    if entry(args.model).family == "flux2" and args.negative_prompt is not None:
+        p.error(
+            f"--negative-prompt: {args.model} takes none (mflux's FLUX.2 Klein encodes its own blank negative)"
+        )
+    problem = klein_base_problem(args.model, Path(args.base).expanduser())
+    if problem is not None:
+        p.error(f"--model {args.model}: {problem}")
     if args.guidance is None:  # resolved before run_key, so a stored FLUX.1 side keeps its 3.5
         args.guidance = entry(args.model).default_guidance
     # Absolute paths: the children run with the repository root as their cwd.
@@ -596,9 +641,171 @@ def run_bf16_zimage(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, A
     }
 
 
+# --- the FLUX.2 Klein sides (mflux-touching; exercised by the identity run, not unit-tested here) -----
+
+
+def run_df11_flux2(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, Any]:
+    """Generate through ``DFloatFlux2Klein``, capture the final latents, and save the image, latents and embeddings.
+
+    The embeddings file holds ``prompt_embeds`` and ``text_ids`` and, when classifier-free guidance ran (a guidance
+    above 1.0), ``negative_prompt_embeds`` and ``negative_text_ids`` for mflux's blank negative.
+
+    Raises:
+        VerifyImageError: The after-loop callback never ran (mflux's own loop never called it).
+    """
+    from mflux.models.flux2.latent_creator.flux2_latent_creator import Flux2LatentCreator
+
+    from mlx_dfloat.mflux.flux2.model import DFloatFlux2Klein
+
+    out_dir = args.out / "df11"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    model = DFloatFlux2Klein(
+        args.model, df11_path=args.df11, base_path=args.base, eval_policy=args.eval_policy
+    )
+    capture = _LatentCapture()
+    model.callbacks.register(capture)
+    image = model.generate_image(
+        args.seed,
+        args.prompt,
+        num_inference_steps=args.steps,
+        height=args.size,
+        width=args.size,
+        guidance=args.guidance,
+    )
+    captured = capture.latents
+    if captured is None:
+        raise VerifyImageError("the after-loop callback never ran; no latents were captured")
+    mx.eval(captured)
+    image.save(str(out_dir / "image.png"), export_json_metadata=False, overwrite=True)
+    mx.save_safetensors(str(out_dir / "latents.safetensors"), {"latents": captured})
+    wanted = model.cfg_prompts(args.prompt, guidance=args.guidance)
+    prompt_embeds, text_ids = model._embeddings[wanted[0]]
+    embeds = {"prompt_embeds": prompt_embeds, "text_ids": text_ids}
+    if len(wanted) > 1:
+        embeds["negative_prompt_embeds"], embeds["negative_text_ids"] = model._embeddings[wanted[1]]
+    mx.save_safetensors(str(out_dir / "embeds.safetensors"), embeds)
+    noise = Flux2LatentCreator.prepare_packed_latents(
+        seed=args.seed, height=args.size, width=args.size, batch_size=1
+    )[0]
+    degenerate = nondegenerate(captured, noise)
+    report = model.report()
+    return {
+        "exit_code": EXIT_OK if not degenerate else EXIT_ERROR,
+        "degenerate": degenerate,
+        "report": report,
+        "output_shape": list(captured.shape),
+        "output_dtype": str(captured.dtype),
+        "footprint_peak_bytes": max(watchdog.peak_footprint, phys_footprint()),
+        "mlx_peak_bytes_max_over_phases": max_phase_peak(report["peaks"]),
+    }
+
+
+def run_bf16_flux2(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, Any]:
+    """Stream the base's BF16 transformer through the seam and mflux's FLUX.2 Klein loop body, then the VAE.
+
+    The transformer is one file (4B) or shards with an index (9B); its five non-block matrices load as plain BF16
+    weights, the blocks stream as they run.
+
+    Raises:
+        VerifyImageError: The df11 side's saved embeddings are not present yet.
+    """
+    from mflux.models.common.config.config import Config
+    from mflux.models.common.config.model_config import ModelConfig
+    from mflux.models.flux2.latent_creator.flux2_latent_creator import Flux2LatentCreator
+    from mflux.models.flux2.variants.txt2img.flux2_klein import Flux2Klein
+    from mflux.utils.image_util import ImageUtil
+
+    from mlx_dfloat.mflux._compile import uncompiled
+    from mlx_dfloat.mflux.flux2 import init as finit
+    from mlx_dfloat.mflux.flux2 import transformer as ktf
+    from mlx_dfloat.mflux.flux2.names import klein_name_map
+
+    out_dir = args.out / "bf16"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    embeds_path = args.out / "df11" / "embeds.safetensors"
+    if not embeds_path.exists():
+        raise VerifyImageError(f"{embeds_path}: run the df11 side first")
+
+    df11_root = Path(args.df11).expanduser()
+    base_root = Path(args.base).expanduser()
+    ckpt = open_checkpoint(df11_root)
+    index = ktf.base_transformer_files_index(base_root / "transformer")
+    model_config = ModelConfig.from_name(model_name=args.model, base_model=None)
+    names = klein_name_map()
+    build = ktf.build_transformer(
+        ckpt,
+        transformer_overrides=model_config.transformer_overrides,
+        name_map=names,
+        extras=ktf.base_extras(index, ckpt),
+        nonblock_from_extras=True,
+    )
+    provider = StreamingBF16Provider(
+        index, {n: ckpt.groups[n].matrix_names for n in build.shapes}, names
+    )
+    build.transformer.attach(
+        provider, build.shapes, eval_policy=args.eval_policy, verify_in_call=True
+    )
+
+    embeds = mx.load(str(embeds_path))
+    prompt_embeds, text_ids = embeds["prompt_embeds"], embeds["text_ids"]
+    negative_prompt_embeds = embeds.get("negative_prompt_embeds")  # present only when guidance ran
+    negative_text_ids = embeds.get("negative_text_ids")
+    config = Config(
+        model_config=model_config,
+        num_inference_steps=args.steps,
+        height=args.size,
+        width=args.size,
+        guidance=args.guidance,
+        scheduler="flow_match_euler_discrete",
+    )
+    latents, latent_ids, latent_height, latent_width = Flux2LatentCreator.prepare_packed_latents(
+        seed=args.seed, height=args.size, width=args.size, batch_size=1
+    )
+    predict = uncompiled(Flux2Klein._predict, build.transformer)
+    mx.eval(latents, prompt_embeds, text_ids)
+
+    for t in config.time_steps:
+        # mflux flux2_klein.py:91-112: predict, scheduler step, eval.
+        noise = predict(
+            latents=latents,
+            latent_ids=latent_ids,
+            prompt_embeds=prompt_embeds,
+            text_ids=text_ids,
+            negative_prompt_embeds=negative_prompt_embeds,
+            negative_text_ids=negative_text_ids,
+            guidance=args.guidance,
+            timestep=config.scheduler.timesteps[t],
+        )
+        latents = config.scheduler.step(
+            noise=noise, timestep=t, latents=latents, sigmas=config.scheduler.sigmas
+        )
+        mx.eval(latents)
+        build.transformer.verify_step()
+
+    mx.save_safetensors(str(out_dir / "latents.safetensors"), {"latents": latents})
+
+    vae = finit.load_vae(base_root)
+    mx.clear_cache()
+    mx.set_cache_limit(0)  # the transformer-shaped buffers cannot serve the decoder
+    # mflux flux2_klein.py:117-129: unpatchify to (B, C, H, W) and decode without tiling.
+    packed = latents.reshape(latents.shape[0], latent_height, latent_width, latents.shape[-1])
+    decoded = vae.decode_packed_latents(packed.transpose(0, 3, 1, 2), tiling_config=None)
+    ImageUtil.to_pil(decoded).save(str(out_dir / "image.png"))
+
+    return {
+        "exit_code": EXIT_OK,
+        "reads": provider.reads,
+        "output_shape": list(latents.shape),
+        "output_dtype": str(latents.dtype),
+        "footprint_peak_bytes": max(watchdog.peak_footprint, phys_footprint()),
+        "mlx_peak_bytes_process": int(mx.get_peak_memory()),  # never reset on this side
+    }
+
+
 SIDE_RUNNERS: dict[str, tuple[Callable[..., dict[str, Any]], Callable[..., dict[str, Any]]]] = {
     "flux1": (run_df11, run_bf16),
     "zimage": (run_df11_zimage, run_bf16_zimage),
+    "flux2": (run_df11_flux2, run_bf16_flux2),
 }
 
 
