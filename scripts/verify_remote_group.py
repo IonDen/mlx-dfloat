@@ -9,17 +9,22 @@ Usage (from the repository root of a synced checkout):
         --groups first,last,max-block,max-code --out RESULT.json
 ``uv run python scripts/verify_remote_group.py ...`` works too.
 ``--cast-fp32-to-bf16`` compares against an FP32 original (Z-Image-Turbo's) rounded to BF16, nearest even.
+A repository without a ``config.json`` (a single-file ComfyUI export) is read through a pinned layout: its header
+sha256 and spot checks of its stored bytes, fetched by range reads, must match one; a fused stored matrix is then cut
+into its row blocks and each block compared with the original of its own name.
 Exit codes: 0 all sampled matrices equal, 1 a mismatch, 2 an error, 70/71 watchdog abort.
 """
 
 import argparse
+import dataclasses
+import hashlib
 import json
 import math
 import re
 import struct
 import sys
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Protocol
 
@@ -34,6 +39,8 @@ try:
     from scripts._watchdog import Watchdog, default_ceiling
     from scripts.verify_checkpoint import VerifyError, natural_key
 
+    from mlx_dfloat import _layouts
+    from mlx_dfloat._layouts import SynthesizedLayout, identify_layout
     from mlx_dfloat._memory_caps import install_memory_caps
     from mlx_dfloat._safetensors import MAX_HEADER_BYTES, TensorInfo, parse_header
     from mlx_dfloat.errors import DFloatError
@@ -43,9 +50,12 @@ try:
         MAX_LUT_ROWS,
         DF11Config,
         GroupArrays,
-        matrix_names_for,
+        config_for_layout,
+        group_headers,
+        insert_row_splits,
         n_blocks_for,
         parse_df11_config,
+        row_split_plan,
         validate_group_name,
     )
     from mlx_dfloat.reference import (
@@ -204,6 +214,80 @@ def original_range(meta: object, name: str, *, cast_fp32: bool) -> tuple[int, in
     return offsets[0], offsets[1] - offsets[0], math.prod(shape), dtype
 
 
+def _check_spot_checks(
+    src: RangeSource, name: str, infos: dict[str, TensorInfo], layout: SynthesizedLayout
+) -> None:
+    """Fetch each of the layout's spot checks by a range read and compare its sha256."""
+    if not layout.probes:
+        raise VerifyError(f"{name}: layout {layout.key} pins no spot check; refused")
+    for probe in layout.probes:
+        info = infos.get(probe.tensor)
+        if info is None:
+            raise VerifyError(
+                f"{name}: layout {layout.key} spot-checks {probe.tensor}, which the file lacks"
+            )
+        if probe.length <= 0 or not 0 <= probe.offset <= info.nbytes - probe.length:
+            raise VerifyError(
+                f"{name}: layout {layout.key} spot check of {probe.tensor} at byte {probe.offset} "
+                f"({probe.length} bytes) lies outside its {info.nbytes} bytes"
+            )
+        digest = hashlib.sha256(
+            src.read(name, info.offset + probe.offset, probe.length)
+        ).hexdigest()
+        if digest != probe.sha256:
+            raise VerifyError(
+                f"{name}: header matches layout {layout.key} ({layout.repo_id}@{layout.revision}), but "
+                f"the spot check of {probe.tensor} at byte {probe.offset} differs (sha256 {digest}); "
+                "the stored data is not the copy the layout was checked against"
+            )
+
+
+def config_from_source(
+    src: RangeSource, *, layouts: Sequence[SynthesizedLayout]
+) -> tuple[DF11Config, str]:
+    """The repository's DF11 config and where it came from (``"config.json"`` or ``"layout <key>"``).
+
+    A ``config.json`` is read as it always was and no layout is consulted. Without one, the repository
+    must hold exactly one safetensors file whose raw header sha256, spot checks (range reads) and group
+    and extra counts match one of ``layouts``.
+
+    Raises:
+        VerifyError: No config.json and not exactly one safetensors file; a header that matches no
+            layout; a spot check that differs or lies outside its tensor; other group or extra counts.
+        DFloatError: The header, the config or the layout is malformed.
+        KeyError: A config.json without a ``dfloat11_config`` block.
+    """
+    files = src.files()
+    if "config.json" in files:
+        raw_config = json.loads(src.text("config.json"))["dfloat11_config"]
+        return parse_df11_config(raw_config, source="config.json"), "config.json"
+    shards = [n for n in files if n.endswith(".safetensors")]
+    if len(shards) != 1:
+        raise VerifyError(
+            f"no config.json and {len(shards)} safetensors files; a config-less checkpoint must be "
+            "a single file"
+        )
+    name = shards[0]
+    length = _header_length(src, name)
+    raw = src.read(name, 8, length)
+    layout = identify_layout(raw, known=layouts)
+    if layout is None:
+        digest = hashlib.sha256(raw).hexdigest()
+        raise VerifyError(
+            f"{name}: no config.json and the header (sha256 {digest[:16]}...) matches no known layout"
+        )
+    infos = parse_header(raw, data_start=8 + length, file_size=src.size(name), source=name)
+    config = config_for_layout(layout)
+    groups, extras = group_headers({Path(name): infos}, config)
+    if len(groups) != layout.groups or len(extras) != layout.extras:
+        raise VerifyError(
+            f"{name}: {len(groups)} groups and {len(extras)} extras; layout {layout.key} expects "
+            f"{layout.groups} groups and {layout.extras} extras"
+        )
+    _check_spot_checks(src, name, infos, layout)
+    return config, f"layout {layout.key}"
+
+
 def check_small_fields(header: dict[str, TensorInfo], group: str) -> None:
     """Refuse luts / output_positions larger than any valid group has, before they are read."""
     luts = header[f"{group}.luts"]
@@ -340,7 +424,18 @@ def verify_group(
         arrays = _group_arrays(df11, file, header, group)
         record["max_code_length"] = max_code_length(arrays.luts)
         record["n_blocks"] = arrays.n_blocks
-        names = matrix_names_for(group, config.pattern_dict)
+        stored, names, plan = row_split_plan(group, config)
+        if arrays.split_positions.size + 1 != len(stored):
+            raise VerifyError(
+                f"{group}: stores {arrays.split_positions.size + 1} matrices but its pattern names "
+                f"{len(stored)}"
+            )
+        arrays = dataclasses.replace(
+            arrays,
+            split_positions=insert_row_splits(
+                arrays.split_positions, int(arrays.sign_mantissa.size), plan, name=group
+            ),
+        )
         parts = split_matrices(decode_group(arrays, name=group), arrays.split_positions)
         if bf16 is None:
             record["status"] = "structural-ok"
@@ -383,13 +478,16 @@ def main(
     argv: list[str] | None = None,
     *,
     source_factory: Callable[[str, str, str], RangeSource] | None = None,
+    layouts: Sequence[SynthesizedLayout] | None = None,
 ) -> int:
     """CLI entry point; any failure other than a real mismatch exits 2.
 
     ``source_factory(repo, revision, subdir)`` builds the ``RangeSource`` for the DF11 and BF16
     repos (subdir is always ``""`` for the DF11 side); it defaults to :class:`HfRangeSource`.
     Tests pass a factory that returns :class:`LocalRangeSource` over on-disk fixtures with
-    explicit ``--df11-revision``/``--bf16-revision``, so no network is touched.
+    explicit ``--df11-revision``/``--bf16-revision``, so no network is touched. ``layouts`` are the
+    pinned layouts a config-less DF11 repository may match (default: the package's table, read at
+    call time).
     """
     factory = source_factory or (
         lambda repo, revision, subdir: HfRangeSource(repo, revision, subdir)
@@ -445,8 +543,8 @@ def main(
         api = HfApi()
         df11_rev = args.df11_revision or api.model_info(args.df11_repo).sha
         df11 = factory(args.df11_repo, df11_rev, "")
-        config = parse_df11_config(
-            json.loads(df11.text("config.json"))["dfloat11_config"], source="config.json"
+        config, config_source = config_from_source(
+            df11, layouts=_layouts.KNOWN_LAYOUTS if layouts is None else layouts
         )
         bf16, bf16_rev, bindex = None, None, {}
         if mode == "parity":
@@ -492,6 +590,7 @@ def main(
             "bf16_repo": args.bf16_repo,
             "bf16_revision": bf16_rev,
             "mode": mode,
+            "config_source": config_source,
             "control": "fp32 rounded to bf16 (nearest even)"
             if any(m.get("original_dtype") == "F32" for m in matrices)
             else "bf16",

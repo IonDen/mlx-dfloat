@@ -100,6 +100,62 @@ def write_checkpoint(
     return root
 
 
+def pin_layout(
+    file,
+    *,
+    pattern_dict,
+    row_splits,
+    groups,
+    extras,
+    key="tiny",
+    probe_tensor=None,
+    probe_offset=0,
+    probe_length=8,
+):
+    """A ``SynthesizedLayout`` pinned to a written config-less ``file``, as the package pins a published one.
+
+    The header digest is the file's own; one spot check covers ``probe_length`` bytes of ``probe_tensor`` (default:
+    the first group's ``sign_mantissa``) at ``probe_offset``. ``file_sha256`` is a placeholder: a plain file name is
+    never a Hugging Face blob name, so the whole-file pin is not consulted.
+    """
+    import hashlib
+
+    from mlx_dfloat._layouts import ContentProbe, SynthesizedLayout
+    from mlx_dfloat._safetensors import parse_header, read_header_bytes
+
+    raw, start, size = read_header_bytes(file)
+    infos = parse_header(raw, data_start=start, file_size=size, source=file.name)
+    tensor = probe_tensor or next(n for n in sorted(infos) if n.endswith(".sign_mantissa"))
+    at = infos[tensor].offset + probe_offset
+    data = file.read_bytes()[at : at + probe_length]
+    return SynthesizedLayout(
+        key=key,
+        label=key,
+        repo_id="t/t",
+        revision="0" * 40,
+        file_name=file.name,
+        header_sha256=hashlib.sha256(raw).hexdigest(),
+        file_sha256="0" * 64,
+        groups=groups,
+        extras=extras,
+        raw_config={
+            "version": "0.5.0",
+            "threads_per_block": [512],
+            "bytes_per_thread": 8,
+            "pattern_dict": {k: list(v) for k, v in pattern_dict.items()},
+        },
+        row_splits=dict(row_splits),
+        probes=(
+            ContentProbe(
+                tensor=tensor,
+                offset=probe_offset,
+                length=probe_length,
+                sha256=hashlib.sha256(data).hexdigest(),
+            ),
+        ),
+    )
+
+
 def write_bf16_original(root, tensors, *, with_index=True, dtype=mx.bfloat16):
     """Write 'original' tensors (uint16 bits) as up to two shards plus an HF-style index."""
     root.mkdir(parents=True, exist_ok=True)
