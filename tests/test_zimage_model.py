@@ -232,11 +232,13 @@ def _patch_upstream_generate(monkeypatch, model, *, raise_after_loop=None, raise
     """Replace ZImage.generate_image with a probe: records the cache limit in force, fires our after-loop
     subscriber the way mflux's GenerationContext would, returns a sentinel."""
     from mflux.models.z_image.variants.z_image import ZImage
+    from tests._mlx_limits import current_limits
 
     seen = {}
 
     def fake(self, **kwargs):
         seen["limit_at_entry"] = _cache_limit_in_force()
+        seen["limits_at_entry"] = current_limits()
         seen["set_resident"] = self._lifecycle.set_resident
         seen["kwargs"] = kwargs
         if raise_before_loop is not None:
@@ -731,3 +733,27 @@ def test_a_failed_set_load_leaves_nothing_installed(tmp_path, monkeypatch):
     assert model._provider is None
     assert model.transformer.cap_embedder[1].weight.size == 0
     assert not model._lifecycle.set_resident
+
+
+@pytest.mark.parametrize("raised", [None, RuntimeError("in the loop")], ids=["returns", "raises"])
+def test_a_python_api_call_runs_under_the_commands_caps_and_restores_mlxs_defaults(
+    tmp_path, monkeypatch, raised
+):
+    # Bug caught: generate_image not run under the per-call caps (a Python-API process sits at MLX's default wired
+    # limit 0, while every VAE term was measured under the command's caps), or the caps left installed after a call
+    # that returns or raises.
+    from tests._mlx_limits import command_caps, current_limits, mlx_without_wired_cap
+
+    model = fake_model(tmp_path, monkeypatch)
+    seen = _patch_upstream_generate(monkeypatch, model, raise_before_loop=raised)
+    wired, memory = command_caps()
+    assert wired > 0
+    with mlx_without_wired_cap() as start:
+        if raised is None:
+            model.generate_image(seed=1, prompt="p", height=256, width=256)
+        else:
+            with pytest.raises(RuntimeError, match="in the loop"):
+                model.generate_image(seed=1, prompt="p", height=256, width=256)
+        after = current_limits()
+    assert (seen["limits_at_entry"]["wired"], seen["limits_at_entry"]["memory"]) == (wired, memory)
+    assert after == start

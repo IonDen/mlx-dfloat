@@ -20,7 +20,9 @@ class PhaseConstants:
     at 1024²; ``denoise_activation_at_reference`` the activation volume a denoise step holds beyond the cache limit
     at ``reference_tokens`` (image + text tokens). The allowance fields set the cache room for freed activation
     buffers: ``allowance_at_reference`` at ``allowance_reference_tokens``, never below ``allowance_floor``.
-    ``max_measured_pixels`` is the largest image the constants were measured at.
+    ``max_measured_pixels`` is the largest image the constants were measured at. ``encode_activation_bytes``, when
+    set, is what a prompt encode measured to hold beyond the encoder's weights, and sizes the encode phase's
+    activations; unset (None), the encode phase carries the denoise allowance instead.
     """
 
     overhead_bytes: int
@@ -31,14 +33,16 @@ class PhaseConstants:
     allowance_reference_tokens: int = 4096 + 256
     allowance_floor: int = 500_000_000
     max_measured_pixels: int = 1024 * 1024
+    encode_activation_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class FamilySizes:
     """Resident bytes of the components: file sizes (exact), the extras' tensor sizes, the decoded non-block groups.
 
-    ``encoders`` is the text encoders' file size for FLUX.1 and Z-Image; FLUX.2 Klein replaces it with the bytes of
-    the encoder layers its prompt embedding reads (``flux2.memory.encoder_bytes_used``), which is less than the file.
+    ``encoders`` is the text encoders' file size for FLUX.1 and Z-Image. FLUX.2 Klein and Qwen-Image 2.1 replace it
+    with the bytes an encode makes resident, less than the files: Klein's the encoder layers its prompt embedding
+    reads (``flux2.memory.encoder_bytes_used``), Qwen's the language model's tensors (``qwen21.memory.encoder_bytes_used``).
     """
 
     compressed: int
@@ -85,9 +89,11 @@ def cache_limit_for(
     text_tokens: int,
     override: int | None = None,
 ) -> int:
-    """The MLX buffer-cache limit for one generate call: the two largest decoded groups next to the activations.
+    """The MLX buffer-cache limit for one generate call: the decoded groups next to the activations.
 
-    ``depth2`` adds one more of the largest decoded group (the look-ahead buffer); ``override`` wins outright.
+    ``largest`` holds the largest decoded group per block kind; the limit holds the two largest of them, so one group
+    for a one-kind family (per-block evaluation frees one block-sized buffer at a time). ``depth2`` adds one more of
+    the largest decoded group (the look-ahead buffer); ``override`` wins outright.
     """
     if override is not None:
         return override
@@ -131,13 +137,18 @@ def family_phases(
     vae_transient_bytes: int,
     overhead_bytes: int,
     denoise_activation_bytes: int = 0,
+    encode_activation_bytes: int | None = None,
 ) -> dict[str, dict[str, int]]:
-    """The three phases of a generation (``encode``, ``denoise``, ``vae``), each term once."""
+    """The three phases of a generation (``encode``, ``denoise``, ``vae``), each term once.
+
+    The encode phase's activations are ``encode_activation_bytes`` when given, else the denoise ``allowance``.
+    """
     in_flight = max(largest.values()) * (2 if policy == "depth2" else 1)
+    encode_activations = allowance if encode_activation_bytes is None else encode_activation_bytes
     return {
         "encode": {
             "encoders": encoders_bytes,
-            "activations": allowance,
+            "activations": encode_activations,
             "overhead": overhead_bytes,
         },
         "denoise": {
@@ -176,8 +187,9 @@ def fit_for(
 ) -> FitEstimate:
     """The phase estimate for one generate call against ``budget`` (a prediction, labelled as such by the caller).
 
-    ``vae_with_set=False`` plans the VAE phase after the compressed set has been dropped (compressed, extras and
-    the decoded non-block weights all leave with it).
+    ``vae_with_set=False`` plans the VAE phase after the compressed set has been dropped: the compressed groups and
+    the decoded non-block weights leave with it; the extras stay (they are the transformer's own BF16 parameters,
+    loaded once at construction and not part of the set).
     """
     phases = family_phases(
         compressed_bytes=sizes.compressed,
@@ -194,8 +206,9 @@ def fit_for(
         denoise_activation_bytes=denoise_activation_bytes(
             c, height=height, width=width, text_tokens=text_tokens
         ),
+        encode_activation_bytes=c.encode_activation_bytes,
     )
     if not vae_with_set:
-        for term in ("compressed", "extras", "nonblock"):
+        for term in ("compressed", "nonblock"):
             phases["vae"].pop(term)
     return fit_estimate(phases, budget_bytes=budget)

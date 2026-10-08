@@ -2,8 +2,9 @@
 
 The class subclasses mflux's ``Flux1`` so its loop, scheduler, callbacks, VAE decode and image
 metadata run unchanged; only construction and the prelude of ``generate_image`` differ. The text
-encoders and the compressed transformer are never resident together (see ``lifecycle``). The
-Python API installs no memory caps and no watchdog; the ``mlx-dfloat`` command does both.
+encoders and the compressed transformer are never resident together (see ``lifecycle``). Each
+``generate_image`` call runs under the memory caps the ``mlx-dfloat`` command installs (unless a wired
+limit is already in force) and restores MLX's limits afterwards; only the command adds a watchdog.
 """
 
 import logging
@@ -28,7 +29,7 @@ from mlx_dfloat.integrate.memory import (
 from mlx_dfloat.integrate.memory import budget_bytes, largest_decoded_bytes
 from mlx_dfloat.integrate.names import NameMap, Shapes
 from mlx_dfloat.integrate.providers import DF11Provider
-from mlx_dfloat.mflux import require_mflux
+from mlx_dfloat.mflux import _pipeline, require_mflux
 from mlx_dfloat.mflux.flux1 import init as base_init
 from mlx_dfloat.mflux.flux1.init import BaseComponents, ResolvedRepo
 from mlx_dfloat.mflux.flux1.lifecycle import Lifecycle
@@ -423,6 +424,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
         """Encode prompts now, so several generations pay the encoder reload once (drops a resident set first)."""
         self._lifecycle.ensure_embeddings(*prompts)
 
+    @_pipeline.with_call_caps
     def generate_image(
         self,
         seed: int,

@@ -92,13 +92,46 @@ def _fit(*, policy="per-block", vae_with_set=True):
 
 
 def test_phases_count_each_term_once_and_drop_the_set_from_the_vae_phase_when_asked():
-    # Bug caught: the decoded non-block bytes left out of denoise or counted twice; vae_with_set=False keeping them.
+    # Bug caught: the decoded non-block bytes left out of denoise or counted twice; vae_with_set=False keeping the
+    # compressed set or the non-block bytes, or dropping the extras (they stay on the transformer when the set goes).
     # encode = 8_000 + 700 + 50 = 8_750; denoise = 5_000 + 10 + 300 + 400 + 900 + 0 + 50 = 6_660;
-    # vae = 5_000 + 10 + 300 + 160 + 1_000 + 50 = 6_520; without the set: 160 + 1_000 + 50 = 1_210.
+    # vae = 5_000 + 10 + 300 + 160 + 1_000 + 50 = 6_520; without the set: 10 + 160 + 1_000 + 50 = 1_220.
     fit = _fit()
     assert fit.phases == {"encode": 8_750, "denoise": 6_660, "vae": 6_520}
     assert (fit.peak_phase, fit.peak_bytes, fit.budget_bytes) == ("encode", 8_750, 10_000)
-    assert _fit(vae_with_set=False).phases["vae"] == 1_210
+    assert _fit(vae_with_set=False).phases["vae"] == 1_220
+
+
+@pytest.mark.parametrize(("term", "encode"), [(30, 8_080), (0, 8_050)])
+def test_a_measured_encode_term_replaces_the_allowance_in_the_encode_phase_only(term, encode):
+    # Bug caught: the family's measured encode term ignored (Qwen's encode sized by the denoise allowance, +1.08 GiB),
+    # added on top of the allowance, a 0 term read as "unset" (`or` for `is None`), or the term leaking into the
+    # denoise phase. encode = 8_000 + term + 50; denoise 6_660 and vae 6_520 as without the term.
+    c = _constants(overhead_bytes=50, vae_transient_bytes=1_000, encode_activation_bytes=term)
+    fit = fit_for(
+        c,
+        sizes=SIZES,
+        largest=SMALL_LARGEST,
+        policy="per-block",
+        cache_limit=900,
+        allowance=700,
+        budget=10_000,
+        height=1024,
+        width=1024,
+        text_tokens=512,
+    )
+    assert fit.phases == {"encode": encode, "denoise": 6_660, "vae": 6_520}
+
+
+def test_a_one_kind_familys_cache_limit_is_one_decoded_group_plus_the_allowance():
+    # Bug caught: a one-kind family budgeted two decoded buffers (per-block evaluation frees one block-sized buffer
+    # at a time), or depth2's look-ahead buffer missing. Allowance at 1024^2 + 512 tokens 1_588_235_294;
+    # 436_207_616 + 1_588_235_294 = 2_024_442_910; depth2 adds 436_207_616.
+    c = _constants()
+    one = {"transformer_blocks": 436_207_616}
+    common = {"height": 1024, "width": 1024, "text_tokens": 512}
+    assert cache_limit_for(c, one, policy="per-block", **common) == 2_024_442_910
+    assert cache_limit_for(c, one, policy="depth2", **common) == 2_460_650_526
 
 
 def test_depth2_holds_two_of_the_largest_decoded_groups_in_flight():
@@ -142,6 +175,23 @@ def test_family_phases_name_every_term():
             "overhead": 10,
         },
     }
+    with_term = family_phases(
+        compressed_bytes=1,
+        extras_bytes=2,
+        nonblock_bytes=3,
+        largest={"a": 4},
+        policy="per-block",
+        cache_limit=5,
+        allowance=6,
+        encoders_bytes=7,
+        vae_bytes=8,
+        vae_transient_bytes=9,
+        overhead_bytes=10,
+        denoise_activation_bytes=11,
+        encode_activation_bytes=12,
+    )
+    assert with_term["encode"] == {"encoders": 7, "activations": 12, "overhead": 10}
+    assert with_term["denoise"] == phases["denoise"]
 
 
 @pytest.mark.parametrize(

@@ -62,7 +62,8 @@ def check_zimage_groups(ckpt: Any) -> dict[str, int]:
                 )
             continue
         kind, _dot, idx = name.partition(".")
-        if kind not in seen or not (idx.isascii() and idx.isdigit()):
+        # A zero-padded index ("01") is refused: the seam asks for the group by its canonical name.
+        if kind not in seen or not (idx.isascii() and idx.isdigit() and idx == str(int(idx))):
             raise DFloatFormatError(f"{name}: not a Z-Image block group")
         want = {f"{name}.{sub}.weight" for sub in MATRIX_SUBS[kind]}
         if set(group.matrix_names) != want or len(group.matrix_names) != len(want):

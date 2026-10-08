@@ -2,8 +2,9 @@
 
 The class subclasses mflux's ``Flux2Klein`` so its loop, scheduler, callbacks, VAE decode and image metadata run
 unchanged; only construction and the prelude of ``generate_image`` differ. The text encoder and the compressed
-transformer are never resident together (see ``mlx_dfloat.mflux.lifecycle``). The Python API installs no memory
-caps and no watchdog; the ``mlx-dfloat`` command does both.
+transformer are never resident together (see ``mlx_dfloat.mflux.lifecycle``). Each ``generate_image`` call runs
+under the memory caps the ``mlx-dfloat`` command installs (unless a wired limit is already in force) and restores
+MLX's limits afterwards; only the command adds a watchdog.
 """
 
 import logging
@@ -396,6 +397,7 @@ class DFloatFlux2Klein(Flux2Klein):  # type: ignore[misc]  # mflux ships no type
         negative_embeds, negative_ids = self._embeddings[str(negative_prompt)]
         return embeds, text_ids, negative_embeds, negative_ids
 
+    @_pipeline.with_call_caps
     def generate_image(
         self,
         seed: int,

@@ -56,6 +56,16 @@ def test_the_non_block_group_is_optional(tmp_path):
     assert check_zimage_groups(_ckpt(tmp_path, spec))["layers"] == 2
 
 
+def test_a_zero_padded_block_index_is_refused(tmp_path):
+    # Bug caught: layers.01 counted as block 1 (int("01") == 1), then the seam asks the provider for layers.1, a
+    # group the checkpoint does not have: a failure at the first block after the set load.
+    spec = {**GOOD}
+    del spec["layers.1"]
+    spec["layers.01"] = 8
+    with pytest.raises(DFloatFormatError, match=r"layers\.01: not a Z-Image block group"):
+        check_zimage_groups(_ckpt(tmp_path, spec))
+
+
 def test_a_hole_in_an_index_sequence_is_refused(tmp_path):
     # Bug caught: a missing block (layers.1) accepted as if the download were complete.
     spec = {**GOOD}

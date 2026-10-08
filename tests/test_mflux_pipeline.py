@@ -152,6 +152,125 @@ def test_a_cache_limit_below_the_two_largest_groups_warns(caplog):
     with caplog.at_level("WARNING", logger="tests.pipeline"):
         _plan(cache_limit_override=two - 1)
     assert "below the derived minimum" in caplog.text
+    assert "(the two largest decoded groups)" in caplog.text
+
+
+def test_a_one_kind_familys_derived_minimum_includes_the_activation_allowance(caplog):
+    # Bug caught: a one-kind family's minimum taken as its one decoded group (any override of a block or more passes
+    # silently, though the activations then evict the decoded buffer and every block is allocated fresh). One kind of
+    # 436_207_616 B; allowance at 1024^2 + 512 tokens 1_588_235_294: minimum 2_024_442_910.
+    one = {"transformer_blocks": 436_207_616}
+    with caplog.at_level("WARNING", logger="tests.pipeline"):
+        _plan(largest=one, cache_limit_override=2_024_442_910)
+    assert "below the derived minimum" not in caplog.text
+    with caplog.at_level("WARNING", logger="tests.pipeline"):
+        _plan(largest=one, cache_limit_override=2_024_442_909)
+    assert (
+        "below the derived minimum 2024442910 (the largest decoded group and the activation allowance)"
+        in caplog.text
+    )
+
+
+def test_a_one_kind_familys_depth2_minimum_holds_the_look_ahead_group_too(caplog):
+    # Bug caught: depth2's look-ahead buffer left out of a one-kind family's minimum (an override with room for one
+    # decoded group passes silently though two are in flight). One kind of 436_207_616 B and the allowance at
+    # 1024^2 + 512 tokens 1_588_235_294: per-block minimum 2_024_442_910, depth2 2_460_650_526.
+    one = {"transformer_blocks": 436_207_616}
+    with caplog.at_level("WARNING", logger="tests.pipeline"):
+        _plan(largest=one, policy="depth2", cache_limit_override=2_460_650_526)
+    assert "below the derived minimum" not in caplog.text
+    with caplog.at_level("WARNING", logger="tests.pipeline"):
+        _plan(largest=one, policy="depth2", cache_limit_override=2_460_650_525)
+    assert (
+        "below the derived minimum 2460650526 (the largest decoded group twice, for depth2's look-ahead, and the "
+        "activation allowance)" in caplog.text
+    )
+
+
+def test_a_one_kind_warning_states_the_fresh_allocation_as_a_prediction(caplog):
+    # Bug caught: the warning asserting as fact that every block is allocated fresh: Qwen-Image 2.1's A/B of real
+    # steps at the derived limit and below it measured no difference in step time, so the warning may only predict it.
+    with caplog.at_level("WARNING", logger="tests.pipeline"):
+        _plan(largest={"transformer_blocks": 436_207_616}, cache_limit_override=1)
+    assert "may allocate each block's decode output fresh" in caplog.text
+    assert "will be allocated fresh" not in caplog.text
+
+
+# --- the per-call memory caps -------------------------------------------------------------------------------------
+
+
+class FakeLimits:
+    """MLX's limit setters as mlx 0.32.2 has them (each returns the previous value) and its device report."""
+
+    def __init__(self, *, wired, memory, recommended=26_800_603_136):
+        self.wired, self.memory, self.recommended = wired, memory, recommended
+
+    def set_wired_limit(self, n):
+        previous, self.wired = self.wired, n
+        return previous
+
+    def set_memory_limit(self, n):
+        previous, self.memory = self.memory, n
+        return previous
+
+    def device_info(self):
+        return {"max_recommended_working_set_size": self.recommended}
+
+
+# MLX's default memory limit on this Mac: 1.5 x the recommended working set.
+DEFAULT_MEMORY = 40_200_904_704
+
+
+def test_a_call_without_caps_runs_under_the_commands_caps_and_restores_mlxs_defaults():
+    # Bug caught: the Python API running a call at MLX's default wired limit 0 (a Klein VAE decode's MLX peak went
+    # 6.89 -> 9.49 GiB there, and every VAE term was measured under the caps), or the caps left installed after the
+    # call. This Mac's 26_800_603_136 B working set floors to 24 GiB: wired 20 GiB, memory 22 GiB (the command's caps).
+    limits = FakeLimits(wired=0, memory=DEFAULT_MEMORY)
+    with _pipeline.call_caps(limits) as installed:
+        assert (limits.wired, limits.memory) == (21_474_836_480, 23_622_320_128)
+        assert installed == (21_474_836_480, 23_622_320_128)
+    assert (limits.wired, limits.memory) == (0, DEFAULT_MEMORY)
+
+
+def test_a_call_that_raises_still_restores_mlxs_defaults():
+    # Bug caught: the restore skipped on an exception (an interrupted generation leaves the process capped).
+    limits = FakeLimits(wired=0, memory=DEFAULT_MEMORY)
+    with pytest.raises(KeyboardInterrupt), _pipeline.call_caps(limits):
+        raise KeyboardInterrupt
+    assert (limits.wired, limits.memory) == (0, DEFAULT_MEMORY)
+
+
+def test_caps_already_in_force_are_left_as_they_are():
+    # Bug caught: a call replacing the caps the command (or a CAPPED tier: wired 8 GiB, memory 10 GiB at 16 GB)
+    # installed with the host's, or restoring them to MLX's defaults afterwards.
+    limits = FakeLimits(wired=8 * GIB, memory=10 * GIB)
+    with _pipeline.call_caps(limits) as installed:
+        assert (limits.wired, limits.memory) == (8 * GIB, 10 * GIB)
+        assert installed == (0, 0)
+    assert (limits.wired, limits.memory) == (8 * GIB, 10 * GIB)
+
+
+def test_a_device_that_reports_no_working_set_gets_no_caps():
+    # Bug caught: caps of 0 bytes installed (a memory limit of 0) on a device that reports nothing, as
+    # install_memory_caps itself installs nothing there.
+    limits = FakeLimits(wired=0, memory=DEFAULT_MEMORY, recommended=0)
+    with _pipeline.call_caps(limits) as installed:
+        assert (limits.wired, limits.memory) == (0, DEFAULT_MEMORY)
+        assert installed == (0, 0)
+    assert (limits.wired, limits.memory) == (0, DEFAULT_MEMORY)
+
+
+def test_the_command_path_keeps_its_caps_through_a_call():
+    # Bug caught: the command's own caps (installed before the model is built, as tests/conftest.py installs them
+    # here) changed by a call: real MLX, the limits read before, inside and after.
+    from tests._mlx_limits import current_limits
+
+    before = current_limits()
+    assert before["wired"] > 0
+    with _pipeline.call_caps():
+        inside = current_limits()
+    assert inside == before
+    assert current_limits() == before
 
 
 # --- the phase tracker --------------------------------------------------------------------------------------------

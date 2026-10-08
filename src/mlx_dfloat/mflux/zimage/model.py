@@ -2,8 +2,9 @@
 
 The class subclasses mflux's ``ZImage`` so its loop, scheduler, callbacks, VAE decode and image metadata run
 unchanged; only construction and the prelude of ``generate_image`` differ. The text encoder and the compressed
-transformer are never resident together (see ``mlx_dfloat.mflux.lifecycle``). The Python API installs no memory
-caps and no watchdog; the ``mlx-dfloat`` command does both.
+transformer are never resident together (see ``mlx_dfloat.mflux.lifecycle``). Each ``generate_image`` call runs
+under the memory caps the ``mlx-dfloat`` command installs (unless a wired limit is already in force) and restores
+MLX's limits afterwards; only the command adds a watchdog.
 """
 
 import logging
@@ -33,8 +34,8 @@ from mlx_dfloat.integrate.memory import CallPlan, budget_bytes, largest_decoded_
 from mlx_dfloat.integrate.names import NameMap
 from mlx_dfloat.integrate.providers import DF11Provider
 from mlx_dfloat.integrate.resident import clear_nonblock, decode_nonblock, install_nonblock
+from mlx_dfloat.mflux import _pipeline, require_mflux
 from mlx_dfloat.mflux import families as registry
-from mlx_dfloat.mflux import require_mflux
 from mlx_dfloat.mflux._compile import predict_mode, uncompiled
 from mlx_dfloat.mflux.lifecycle import Lifecycle
 from mlx_dfloat.mflux.zimage import init as zinit
@@ -461,6 +462,7 @@ class DFloatZImage(ZImage):  # type: ignore[misc]  # mflux ships no type informa
         text = self._embeddings[wanted[0]][0]
         return text, (self._embeddings[wanted[1]][0] if len(wanted) > 1 else None)
 
+    @_pipeline.with_call_caps
     def generate_image(
         self,
         seed: int,

@@ -5,13 +5,16 @@ DFloat11 path cannot honour, plan the call's memory, track the phases, and empty
 decode. The family supplies its measured numbers (``PhaseConstants``) and sizes; nothing here imports mflux.
 """
 
+import functools
 import logging
 import math
-from collections.abc import Callable, Mapping
-from typing import Any, NoReturn
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from typing import Any, NoReturn, ParamSpec, TypeVar
 
 import mlx.core as mx
 
+from mlx_dfloat._memory_caps import caps_for_recommended_bytes
 from mlx_dfloat._watchdog import phys_footprint
 from mlx_dfloat.errors import DFloatResourceError, DFloatUnsupportedError
 from mlx_dfloat.integrate.memory import CallPlan
@@ -66,6 +69,56 @@ def refuse_construction_args(
         refuse("lora_scales", "LoRA of any kind")
     if not bake_lora:
         refuse("bake_lora", "LoRA of any kind")
+
+
+@contextmanager
+def call_caps(limits: Any = mx) -> Iterator[tuple[int, int]]:
+    """Run the block under the ``mlx-dfloat`` command's memory caps when no wired cap is in force; restore after.
+
+    The Python API starts at MLX's default wired limit 0 (no cap), while every VAE term was measured under the caps
+    the command installs (``install_memory_caps``: with wired 0 a FLUX.2 Klein VAE decode's MLX peak rose from 6.89
+    to 9.49 GiB). A wired limit already set (the command's own caps, or a CAPPED tier's) is left untouched. mlx 0.32.2
+    has no getters: the wired limit is read by setting it to 0 and back (``bench.capped.current_limits``), which
+    leaves nothing behind. ``limits`` is the object holding the setters and the device report (``mlx.core``).
+    Yields the (wired, memory) caps in bytes installed for the block, (0, 0) when none were.
+    """
+    wired_now = int(limits.set_wired_limit(0))
+    limits.set_wired_limit(wired_now)
+    if wired_now != 0:
+        yield (0, 0)
+        return
+    try:
+        recommended = int(limits.device_info().get("max_recommended_working_set_size", 0))
+    except Exception:  # a device or backend that reports nothing: no caps, as install_memory_caps
+        recommended = 0
+    wired, memory = caps_for_recommended_bytes(recommended)
+    if wired == 0:
+        yield (0, 0)
+        return
+    previous_memory = int(limits.set_memory_limit(memory))
+    try:
+        limits.set_wired_limit(wired)
+        try:
+            yield (wired, memory)
+        finally:
+            limits.set_wired_limit(wired_now)
+    finally:
+        limits.set_memory_limit(previous_memory)
+
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def with_call_caps(method: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Wrap a model's ``generate_image`` in ``call_caps``: the whole call, prelude to VAE decode, runs capped."""
+
+    @functools.wraps(method)
+    def capped(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with call_caps():
+            return method(*args, **kwargs)
+
+    return capped
 
 
 class PhaseTracker:
@@ -171,7 +224,23 @@ def plan_call_for(
             side,
             side,
         )
-    derived_minimum = sum(sorted(largest.values(), reverse=True)[:2])
+    allowance = activation_allowance(constants, height=height, width=width, text_tokens=text_tokens)
+    if len(largest) == 1:
+        # One block kind: the limit holds one decoded group (two under depth2, the look-ahead's too), and the
+        # activations freed beside it must fit as well, or they may evict the decoded buffer and each block's output
+        # be allocated fresh. A prediction: Qwen-Image 2.1's A/B of real steps below this limit measured no slowdown.
+        groups = 2 if policy == "depth2" else 1
+        derived_minimum = groups * max(largest.values()) + allowance
+        minimum_is = (
+            "the largest decoded group twice, for depth2's look-ahead, and the activation allowance"
+            if groups == 2
+            else "the largest decoded group and the activation allowance"
+        )
+        consequence = "the cache may allocate each block's decode output fresh"
+    else:
+        derived_minimum = sum(sorted(largest.values(), reverse=True)[:2])
+        minimum_is = "the two largest decoded groups"
+        consequence = "every block's decode output will be allocated fresh"
     limit = cache_limit_for(
         constants,
         largest,
@@ -183,12 +252,12 @@ def plan_call_for(
     )
     if limit < derived_minimum:
         log.warning(
-            "cache_limit %d is below the derived minimum %d (the two largest decoded groups): "
-            "every block's decode output will be allocated fresh",
+            "cache_limit %d is below the derived minimum %d (%s): %s",
             limit,
             derived_minimum,
+            minimum_is,
+            consequence,
         )
-    allowance = activation_allowance(constants, height=height, width=width, text_tokens=text_tokens)
     common: dict[str, Any] = {
         "sizes": sizes,
         "largest": largest,

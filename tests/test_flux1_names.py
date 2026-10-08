@@ -66,6 +66,14 @@ def test_flux_groups_refuses_holes_missing_kinds_and_foreign_groups(names, reaso
         check_flux_groups(_ckpt(names))
 
 
+def test_flux_groups_refuses_a_zero_padded_block_index():
+    # Bug caught: transformer_blocks.01 counted as block 1 (int("01") == 1), then the seam asks the provider for
+    # transformer_blocks.1, a group the checkpoint does not have: a failure at the first block after the set load.
+    names = ["transformer_blocks.0", "transformer_blocks.01", "single_transformer_blocks.0"]
+    with pytest.raises(DFloatFormatError, match=r"transformer_blocks\.01: not a FLUX block"):
+        check_flux_groups(_ckpt(names))
+
+
 def test_flux_groups_refuses_a_group_with_the_wrong_matrix_count():
     # Bug caught: a group with the wrong pattern_dict subs count (a different FLUX variant, or a
     # corrupted/truncated config) treated as an ordinary block instead of refused.
