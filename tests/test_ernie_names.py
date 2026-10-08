@@ -202,7 +202,7 @@ def test_a_time_embedding_group_with_one_matrix_is_refused(tmp_path):
 
 
 def test_a_zimage_block_under_the_same_group_name_is_refused_naming_the_seven_matrices(tmp_path):
-    # Bug caught (Review Focus 3): a Z-Image DF11 checkpoint (its main blocks are also named layers.<n>) passed for
+    # Bug caught: a Z-Image DF11 checkpoint (its main blocks are also named layers.<n>) passed for
     # ERNIE and failing with a shape error at the first block instead of at build.
     zimage = (
         "attention.to_q",

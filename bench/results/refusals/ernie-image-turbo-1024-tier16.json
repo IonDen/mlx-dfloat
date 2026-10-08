@@ -40,10 +40,10 @@
   },
   "applied": "tier-caps"
  },
- "error": "DFloatResourceError: predicted peak 13.9 GiB in the denoise phase exceeds the budget 8.7 GiB (encode 6.8 GiB, denoise 13.9 GiB, vae 7.4 GiB); pass fit_check=False to run anyway",
- "footprint_peak_bytes": 707167720,
+ "error": "DFloatResourceError: predicted peak 14.4 GiB in the denoise phase exceeds the budget 8.7 GiB (encode 6.8 GiB, denoise 14.4 GiB, vae 7.4 GiB); pass fit_check=False to run anyway",
+ "footprint_peak_bytes": 639436264,
  "footprint_peak_label": "OS phys_footprint, sampled every 0.05 s by the watchdog",
- "watched_peak_bytes": 707167720,
- "mlx_peak_bytes": 28533646,
- "elapsed_seconds": 3.644
+ "watched_peak_bytes": 639436264,
+ "mlx_peak_bytes": 28483214,
+ "elapsed_seconds": 4.53
 }

@@ -17,7 +17,7 @@ from mlx_dfloat.mflux._phases import (
     vae_transient_bytes,
 )
 
-# Klein 4B decoded group sizes (S3 plan arithmetic table: double block 490_733_568 B, single block 245_366_784 B).
+# Klein 4B decoded group sizes (from the header's matrix shapes: double block 490_733_568 B, single block 245_366_784 B).
 KLEIN_4B_LARGEST = {"transformer_blocks": 490_733_568, "single_transformer_blocks": 245_366_784}
 
 
@@ -71,7 +71,7 @@ def test_the_denoise_activation_scales_with_tokens_from_the_reference():
 
 
 def test_a_denoise_activation_floor_holds_below_the_reference_and_is_off_by_default():
-    # Bug caught (X3): a family whose step holds a size-independent buffer (ERNIE-Image's float32 copies of a block's
+    # Bug caught: a family whose step holds a size-independent buffer (ERNIE-Image's float32 copies of a block's
     # weights) predicted below it at a small image, or the floor applied to every family (the default must leave the
     # scaled term as it was). 512^2 + 512: 333_333 scaled, floored at 400_000; 1024^2 + 512: 1_000_000 above the floor.
     floored = _constants(

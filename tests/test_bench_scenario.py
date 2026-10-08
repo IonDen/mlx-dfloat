@@ -48,7 +48,7 @@ def test_a_complete_mapping_builds_a_frozen_scenario_with_tuples():
 @pytest.mark.parametrize(
     ("field", "value", "fragment"),
     [
-        ("warmup_steps", 2, "warmup_steps"),  # unknown key (Review Focus 1)
+        ("warmup_steps", 2, "warmup_steps"),  # unknown key
         ("model", "flux2", "model"),
         ("model", "krea-dev", "model"),
         ("df11_revision", "main", "df11_revision"),  # not a 40-hex SHA

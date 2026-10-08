@@ -28,7 +28,7 @@ ENCODER_PREFIX = "model.language_model."
 TEXT_MAX_LENGTH = 2048
 MAX_MEASURED_PIXELS = 1024 * 1024  # no run above 1024² on this path
 
-# Measured on 2026-10-08 (the first one-step de-risk run, at the old cache limit): Qwen-Image-2.1 DF11
+# Measured on 2026-10-08 (the first one-step calibration run, at the old cache limit): Qwen-Image-2.1 DF11
 # (mingyi456/Qwen-Image-2.1-DF11-ComfyUI @ 1b22a3a) over the Qwen/Qwen-Image-2.1 base (@ d26bb61), 1024², seed 42,
 # guidance 4 with the negative prompt " " (two transformer calls per step); one process: build, encode, drop, set load,
 # one step, VAE decode on the resident set; M1 Max 32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0. Bytes throughout.
@@ -43,9 +43,9 @@ OVERHEAD = 459_445_098  # 0.428 GiB
 # VAE_TRANSIENT, by the overall-peak rule over every 1024² sample: the highest measured peak of the VAE decode on the
 # resident set minus the VAE phase's other terms (compressed + extras + decoded non-block + VAE file + OVERHEAD):
 # 22_788_580_400 - (9_587_103_379 + 137_388_032 + 134_217_728 + 1_350_989_512 + 459_445_098). Eleven samples on
-# 2026-10-08 (the de-risk run above, four de-risk reruns of one step at two cache limits, three 40-step MEASURED
+# 2026-10-08 (the calibration run above, four calibration reruns of one step at two cache limits, three 40-step MEASURED
 # runs, three 4-step identity runs with CFG; the highest is the second one-step rerun at the old cache limit)
-# peaked at 21.76 to 22.79 GB in the VAE phase, with MLX's own VAE peak the same in every de-risk run: about 1 GiB of
+# peaked at 21.76 to 22.79 GB in the VAE phase, with MLX's own VAE peak the same in every calibration run: about 1 GiB of
 # run-to-run spread outside MLX's counters, as Z-Image's VAE phase shows too. A fit check must not under-predict, so
 # the term covers the highest sample; the first run alone (22_139_643_024) would put the VAE phase 0.60 GiB under it.
 # About 1.32x the FLUX.1 VAE's 7.82 GiB.
@@ -53,15 +53,15 @@ VAE_TRANSIENT = 11_119_436_651  # 10.356 GiB
 # DENOISE_ACTIVATION: denoise footprint peak minus the denoise phase's other terms at the planner's cache limit
 # (compressed + extras + non-block + in-flight + cache limit + OVERHEAD), at REFERENCE_TOKENS:
 # 13_939_106_072 - (9_587_103_379 + 137_388_032 + 134_217_728 + 436_207_616 + 2_731_761_634 + 459_445_098). Measured
-# 2026-10-08 (the first one-step de-risk run at the new cache limit, in the cache-limit A/B: the same model, prompt,
+# 2026-10-08 (the first one-step calibration run at the new cache limit, in the cache-limit A/B: the same model, prompt,
 # size, seed and guidance as above, one step at the 2_731_761_634 limit); the larger of the two runs at that limit
 # (the other's denoise peak, 13_506_126_128, gives 20_002_641).
 DENOISE_ACTIVATION = 452_982_585  # 0.422 GiB
-# ALLOWANCE: the cache room for the activation buffers a block frees, at ALLOWANCE_TOKENS (1024² + the de-risk prompt's
+# ALLOWANCE: the cache room for the activation buffers a block frees, at ALLOWANCE_TOKENS (1024² + the calibration prompt's
 # 33 tokens). The block-cache probe (one synthetic block at 1024² + 33 tokens, the decoded buffer allocated then
 # released per iteration) saw the buffer reused at a 2605 MiB limit and released at 1773 and 2189 MiB: the limit is set
 # at 2_731_761_634 B, so the allowance is that minus one decoded block, 2_731_761_634 - 436_207_616. Set at the probe's
-# reuse point: an A/B of real de-risk steps at this limit and the old 1_859_346_402 (two runs each, 2026-10-08) showed
+# reuse point: an A/B of real calibration steps at this limit and the old 1_859_346_402 (two runs each, 2026-10-08) showed
 # no measurable difference in step time or denoise footprint.
 ALLOWANCE = 2_295_554_018  # 2.138 GiB
 ALLOWANCE_TOKENS = 4096 + 33
@@ -87,7 +87,7 @@ CONSTANTS: PhaseConstants = PhaseConstants(
 # run held exactly ENCODE_ACTIVATION, the whole slack under the bound; an encode that also loads the vision tower and
 # lm_head (~2_397_528_480 more) is over it by 2_129_093_024 at every prompt length (the bound does not grow with it).
 ENCODE_SLACK_BYTES = 256 * 1024**2
-# The prompt length ENCODE_ACTIVATION was measured at (the de-risk prompt's text tokens).
+# The prompt length ENCODE_ACTIVATION was measured at (the calibration prompt's text tokens).
 ENCODE_ACTIVATION_TOKENS = 33
 
 

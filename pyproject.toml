@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mlx-dfloat"
-description = "Run DFloat11 losslessly compressed BF16 checkpoints on Apple Silicon with MLX and a Metal decode kernel; today that runs FLUX.1 on a 32 GB Mac with weights about 30% smaller"
+description = "Run DFloat11 losslessly compressed BF16 checkpoints on Apple Silicon with MLX and a Metal decode kernel: image generation with FLUX.1, Z-Image, FLUX.2 Klein, Qwen-Image-2.1, ERNIE-Image and Krea 2 on a 32 GB Mac, with weights about 30% smaller"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"

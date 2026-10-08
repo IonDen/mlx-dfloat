@@ -87,7 +87,7 @@ def test_a_pair_without_a_shared_round_yields_no_overhead():
 
 
 def test_two_scenario_hashes_are_refused():
-    # Review Focus 4: a stale round1-df11.json from another recipe must not be averaged in.
+    # A stale round1-df11.json from another recipe must not be averaged in.
     with pytest.raises(DFloatFormatError, match="scenario"):
         summarise([_r("df11", 1, [1.0]), _r("control", 1, [1.0], h="b" * 64)])
 

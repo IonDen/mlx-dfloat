@@ -318,7 +318,7 @@ MODELS: dict[str, ModelEntry] = {
             cfg_two_calls=False,
             uses_negative_prompt=False,
             fixed_guidance=1.0,
-            # The snapshot the parity, de-risk and MEASURED runs used (text encoder, VAE, tokenizer).
+            # The snapshot the parity, calibration and MEASURED runs used (text encoder, VAE, tokenizer).
             base_revision="bc68c81e2a1730a394d5fc9fae70713dee940140",
         ),
         # mflux 0.20.0: 50 steps (cli/defaults/defaults.py:35); guidance 4.0 (models/ernie_image/cli/
@@ -336,7 +336,7 @@ MODELS: dict[str, ModelEntry] = {
             default_scheduler="linear",
             cfg_two_calls=False,  # CFG runs as one batch-2 call (ernie_image.py:239-250)
             uses_negative_prompt=True,
-            # The snapshot the parity, identity, de-risk and MEASURED runs used.
+            # The snapshot the parity, identity, calibration and MEASURED runs used.
             base_revision="5346b31d68c9c23758ba56ef8be5e9dc174c7f99",
         ),
         # mflux 0.20.0: 8 steps (cli/defaults/defaults.py:47), guidance 1.0 (models/krea2/cli/krea2_generate.py:17;

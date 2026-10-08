@@ -83,7 +83,7 @@ def test_the_build_installs_placeholders_and_loads_every_extra_by_name(tmp_path)
     for block in build.shapes:
         for attr in SEVEN:
             assert params[f"{block}.{attr}.weight"].size == 0, (block, attr)
-    # Every parameter a checkpoint holds outside the compressed groups (S0: 72 extras for 32 blocks = 8 + 2 x 32).
+    # Every parameter a checkpoint holds outside the compressed groups (the published header: 72 extras for 32 blocks = 8 + 2 x 32).
     assert sorted(constants) == [
         "img_in.weight",
         "norm_out.linear.weight",

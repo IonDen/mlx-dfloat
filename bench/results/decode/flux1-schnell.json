@@ -1,0 +1,211 @@
+{
+ "key": {
+  "df11": "~/.cache/huggingface/hub/models--DFloat11--FLUX.1-schnell-DF11/snapshots/51a428b928197e0531cb93d6e438941e2d0b247e",
+  "variants": [
+   "direct",
+   "staged",
+   "reference"
+  ],
+  "reps": 5,
+  "source_hash": "c898767a8b14579825aaf44b29494d94107f72d7b6286bceb187b1b8b1ad487e",
+  "mlx": "0.32.2"
+ },
+ "groups": {
+  "single_transformer_blocks.0": {
+   "n_elements": 141557760,
+   "n_bytes": 46635275,
+   "n_launch": 11386,
+   "bytes_out": 283115520,
+   "max_elements_per_block": 13182,
+   "direct_blocks": 0,
+   "guard": {
+    "rate_bps": 20288985858.109768,
+    "source": "rate-from"
+   },
+   "variants": {
+    "direct": {
+     "parity": true,
+     "direct_blocks": 11386,
+     "reps_s": [
+      0.03463154099881649,
+      0.015058916993439198,
+      0.015175417007412761,
+      0.015008416958153248,
+      0.015031082963105291
+     ],
+     "median_s": 0.015058916993439198,
+     "spread": 1.303089993072713,
+     "gbps": 18.80052331275526
+    },
+    "staged": {
+     "parity": true,
+     "direct_blocks": 0,
+     "reps_s": [
+      0.0053494589519687,
+      0.0053294579847715795,
+      0.005460083018988371,
+      0.005347124999389052,
+      0.005424332979600877
+     ],
+     "median_s": 0.0053494589519687,
+     "spread": 0.02441836368680219,
+     "gbps": 52.924141028469485
+    },
+    "reference": {
+     "reps_s": [
+      8.210994875000324,
+      8.154502124991268,
+      8.168234416982159,
+      8.201749333005864,
+      8.127500457980204
+     ],
+     "median_s": 8.168234416982159,
+     "spread": 0.010221843884221876,
+     "gbps": 0.034660552764179856
+    }
+   },
+   "seconds": 57.7484415830113,
+   "footprint_peak": 2846313256,
+   "provenance": {
+    "git": "22a40354ced7d82168dd35461754f4a8cfdc2934",
+    "source_hash": "c898767a8b14579825aaf44b29494d94107f72d7b6286bceb187b1b8b1ad487e",
+    "mlx": "0.32.2",
+    "mflux": null,
+    "macos": "27.0",
+    "device_info": {
+     "device_name": "Apple M1 Max",
+     "max_recommended_working_set_size": 26800603136,
+     "memory_size": 34359738368,
+     "architecture": "applegpu_g13s",
+     "max_buffer_length": 20100448256,
+     "resource_limit": 499000
+    },
+    "memory_caps_gb": [
+     20,
+     22
+    ],
+    "cache_limit": 1400000000,
+    "cache_memory": 860,
+    "power": {
+     "ac": true,
+     "battery_pct": 100
+    }
+   }
+  },
+  "transformer_blocks.0": {
+   "n_elements": 339738624,
+   "n_bytes": 121650927,
+   "n_launch": 29700,
+   "bytes_out": 679477248,
+   "max_elements_per_block": 12832,
+   "direct_blocks": 0,
+   "guard": {
+    "rate_bps": 20288985858.109768,
+    "source": "rate-from"
+   },
+   "variants": {
+    "direct": {
+     "parity": true,
+     "direct_blocks": 29700,
+     "reps_s": [
+      0.05665195797337219,
+      0.028499290987383574,
+      0.028091332991607487,
+      0.028368040977511555,
+      0.028444666997529566
+     ],
+     "median_s": 0.028444666997529566,
+     "spread": 1.0040766159872854,
+     "gbps": 23.887685099601025
+    },
+    "staged": {
+     "parity": true,
+     "direct_blocks": 0,
+     "reps_s": [
+      0.01258870802121237,
+      0.01261295803124085,
+      0.012497207964770496,
+      0.012474165996536613,
+      0.012544416997116059
+     ],
+     "median_s": 0.012544416997116059,
+     "spread": 0.01106404823246439,
+     "gbps": 54.16570958667993
+    },
+    "reference": {
+     "reps_s": [
+      20.507504915993195,
+      20.559129791974556,
+      20.408495916984975,
+      20.397481957974378,
+      20.34162062499672
+     ],
+     "median_s": 20.408495916984975,
+     "spread": 0.010657775460895769,
+     "gbps": 0.033293842464623025
+    }
+   },
+   "seconds": 144.79180616600206,
+   "footprint_peak": 7189452368,
+   "provenance": {
+    "git": "22a40354ced7d82168dd35461754f4a8cfdc2934",
+    "source_hash": "c898767a8b14579825aaf44b29494d94107f72d7b6286bceb187b1b8b1ad487e",
+    "mlx": "0.32.2",
+    "mflux": null,
+    "macos": "27.0",
+    "device_info": {
+     "device_name": "Apple M1 Max",
+     "max_recommended_working_set_size": 26800603136,
+     "memory_size": 34359738368,
+     "architecture": "applegpu_g13s",
+     "max_buffer_length": 20100448256,
+     "resource_limit": 499000
+    },
+    "memory_caps_gb": [
+     20,
+     22
+    ],
+    "cache_limit": 1400000000,
+    "cache_memory": 860,
+    "power": {
+     "ac": true,
+     "battery_pct": 100
+    }
+   }
+  }
+ },
+ "df11": "~/.cache/huggingface/hub/models--DFloat11--FLUX.1-schnell-DF11/snapshots/51a428b928197e0531cb93d6e438941e2d0b247e",
+ "memory_caps_gb": [
+  20,
+  22
+ ],
+ "cache_limit": 1400000000,
+ "provenance": {
+  "git": "22a40354ced7d82168dd35461754f4a8cfdc2934",
+  "source_hash": "c898767a8b14579825aaf44b29494d94107f72d7b6286bceb187b1b8b1ad487e",
+  "mlx": "0.32.2",
+  "mflux": null,
+  "macos": "27.0",
+  "device_info": {
+   "device_name": "Apple M1 Max",
+   "max_recommended_working_set_size": 26800603136,
+   "memory_size": 34359738368,
+   "architecture": "applegpu_g13s",
+   "max_buffer_length": 20100448256,
+   "resource_limit": 499000
+  },
+  "memory_caps_gb": [
+   20,
+   22
+  ],
+  "cache_limit": 1400000000,
+  "cache_memory": 860,
+  "power": {
+   "ac": true,
+   "battery_pct": 100
+  }
+ },
+ "gbps": 18.80052331275526,
+ "errors": [],
+ "exit_code": 0
+}

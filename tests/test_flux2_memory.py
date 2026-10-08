@@ -1,4 +1,4 @@
-"""FLUX.2 Klein's memory constants and its encoder sizing, checked against the 1024² de-risk measurements.
+"""FLUX.2 Klein's memory constants and its encoder sizing, checked against the 1024² calibration measurements.
 
 Measured inputs (2026-10-08, base 4B and base 9B, guidance 4, 1024², seed 42; one process per size: build, encode,
 drop, set load, one step, VAE decode on the resident set; M1 Max 32 GB, mlx 0.32.2, mflux 0.20.0):
@@ -137,7 +137,7 @@ def _fit_9b(encoders=KLEIN_9B_ENCODER_USED, compressed=12_275_304_729):
     )
 
 
-# The constants are calibrated on the de-risk runs (MEASURED_4B / MEASURED_9B), so there the estimate equals the
+# The constants are calibrated on the calibration runs (MEASURED_4B / MEASURED_9B), so there the estimate equals the
 # measurement by construction: the in-sample checks are exact. Whether the model predicts is decided by the runs below,
 # none of them used for calibration.
 

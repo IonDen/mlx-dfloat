@@ -121,7 +121,7 @@ def test_skewed_one_bit_code_fills_a_block_with_32k_elements():
 
 
 def test_byte_aligned_end_without_eof_roundtrips():
-    # Review focus 5a. Pick a 1-bit symbol, then 8 of it = 8 bits exactly: no EOF emitted.
+    # Pick a 1-bit symbol, then 8 of it = 8 bits exactly: no EOF emitted.
     counter = {127: 1000, 126: 2, 125: 1}
     _, table, _ = codec_for(counter)
     one_bit = next(k for k, v in table.items() if isinstance(k, int) and v[0] == 1)
@@ -133,7 +133,7 @@ def test_byte_aligned_end_without_eof_roundtrips():
 
 
 def test_last_code_straddling_into_a_code_free_tail_block_roundtrips():
-    # Review focus 5b: 32767 one-bit codes + one 9-bit code at bit 32767 -> 32776 bits = 4097 bytes,
+    # 32767 one-bit codes + one 9-bit code at bit 32767 -> 32776 bits = 4097 bytes,
     # byte-aligned, no EOF; block 1 has no code start (2 positions for 2 blocks).
     counter = {127 - i: 2 ** (20 - i) for i in range(12)}
     _, table, _ = codec_for(counter)
@@ -147,7 +147,7 @@ def test_last_code_straddling_into_a_code_free_tail_block_roundtrips():
 
 
 def test_dropped_entry_for_a_block_that_starts_codes_is_refused():
-    # Review focus 5c: remove the last block's start from a real 4-block group.
+    # Remove the last block's start from a real 4-block group.
     rng = np.random.default_rng(6)
     arrays = _roundtrip([random_bf16(rng, (20_000,))])
     assert arrays.n_blocks >= 3

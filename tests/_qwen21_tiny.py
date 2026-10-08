@@ -94,7 +94,7 @@ def tiny_groups(shapes, rng):
     return compress_blocks(shapes, rng)
 
 
-# The ComfyUI export's stored order (S0): gate_layer and proj stacked by rows as img_mlp.gate_up, gate first.
+# The ComfyUI export's stored order (confirmed by a 2026-10-07 byte comparison): gate_layer and proj stacked by rows as img_mlp.gate_up, gate first.
 STORED_SUBS = (
     "attn.to_q",
     "attn.to_k",

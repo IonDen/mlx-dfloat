@@ -1,0 +1,314 @@
+{
+ "key": {
+  "df11": "~/.cache/huggingface/hub/models--DFloat11--Qwen3-4B-DF11/snapshots/618eddad93ca71dacf56cef22e69c5968357dd6e",
+  "variants": [
+   "direct",
+   "staged",
+   "reference"
+  ],
+  "reps": 5,
+  "source_hash": "c898767a8b14579825aaf44b29494d94107f72d7b6286bceb187b1b8b1ad487e",
+  "mlx": "0.32.2"
+ },
+ "groups": {
+  "model.layers.0": {
+   "n_elements": 100925440,
+   "n_bytes": 33159834,
+   "n_launch": 8096,
+   "bytes_out": 201850880,
+   "max_elements_per_block": 12848,
+   "direct_blocks": 0,
+   "guard": {
+    "rate_bps": 20101415844.237495,
+    "source": "calibration",
+    "ramp": [
+     {
+      "k": 1,
+      "bytes": 20968,
+      "first_ms": {
+       "direct": 6.4494170364923775,
+       "staged": 0.7082920055836439
+      },
+      "timed_ms": {
+       "direct": 0.34075003350153565,
+       "staged": 0.311334035359323
+      },
+      "rate_bps": 61534843.54655391
+     },
+     {
+      "k": 2,
+      "bytes": 43840,
+      "first_ms": {
+       "direct": 0.44712499948218465,
+       "staged": 0.3017919952981174
+      },
+      "timed_ms": {
+       "direct": 0.3071249811910093,
+       "staged": 0.30570803210139275
+      },
+      "rate_bps": 142743191.48508054
+     },
+     {
+      "k": 4,
+      "bytes": 92192,
+      "first_ms": {
+       "direct": 0.30866602901369333,
+       "staged": 0.3082919865846634
+      },
+      "timed_ms": {
+       "direct": 0.31504203798249364,
+       "staged": 0.29437500052154064
+      },
+      "rate_bps": 292633962.7257076
+     },
+     {
+      "k": 8,
+      "bytes": 188888,
+      "first_ms": {
+       "direct": 0.6767080049030483,
+       "staged": 0.690166954882443
+      },
+      "timed_ms": {
+       "direct": 0.3540840116329491,
+       "staged": 0.31745899468660355
+      },
+      "rate_bps": 533455320.75536144
+     },
+     {
+      "k": 16,
+      "bytes": 379154,
+      "first_ms": {
+       "direct": 0.34775002859532833,
+       "staged": 0.3179580089636147
+      },
+      "timed_ms": {
+       "direct": 0.35320798633620143,
+       "staged": 0.3113750135526061
+      },
+      "rate_bps": 1073458173.8452024
+     },
+     {
+      "k": 32,
+      "bytes": 773132,
+      "first_ms": {
+       "direct": 0.36087498301640153,
+       "staged": 0.35183399450033903
+      },
+      "timed_ms": {
+       "direct": 0.388041022233665,
+       "staged": 0.3094999701716006
+      },
+      "rate_bps": 1992397596.3923898
+     },
+     {
+      "k": 64,
+      "bytes": 1559738,
+      "first_ms": {
+       "direct": 0.42495899833738804,
+       "staged": 0.3626249963417649
+      },
+      "timed_ms": {
+       "direct": 0.4549170262180269,
+       "staged": 0.33520901342853904
+      },
+      "rate_bps": 3428620847.5575247
+     },
+     {
+      "k": 128,
+      "bytes": 3133008,
+      "first_ms": {
+       "direct": 0.712334003765136,
+       "staged": 0.5285409861244261
+      },
+      "timed_ms": {
+       "direct": 0.7142079994082451,
+       "staged": 0.44604099821299314
+      },
+      "rate_bps": 4386688475.3403
+     },
+     {
+      "k": 256,
+      "bytes": 6338716,
+      "first_ms": {
+       "direct": 1.1096660164184868,
+       "staged": 0.7340830052271485
+      },
+      "timed_ms": {
+       "direct": 1.0890419944189489,
+       "staged": 0.7252499926835299
+      },
+      "rate_bps": 5820451399.013295
+     },
+     {
+      "k": 512,
+      "bytes": 12754474,
+      "first_ms": {
+       "direct": 1.8795840442180634,
+       "staged": 11.295999982394278
+      },
+      "timed_ms": {
+       "direct": 1.8562080222181976,
+       "staged": 0.6617920007556677
+      },
+      "rate_bps": 6871252492.895815
+     },
+     {
+      "k": 1024,
+      "bytes": 25449322,
+      "first_ms": {
+       "direct": 1.8582080374471843,
+       "staged": 1.0497079929336905
+      },
+      "timed_ms": {
+       "direct": 1.8409999902360141,
+       "staged": 0.8624580223113298
+      },
+      "rate_bps": 13823640486.134617
+     },
+     {
+      "k": 2048,
+      "bytes": 50606468,
+      "first_ms": {
+       "direct": 3.4113749861717224,
+       "staged": 1.190749986562878
+      },
+      "timed_ms": {
+       "direct": 2.890957985073328,
+       "staged": 1.1820420040749013
+      },
+      "rate_bps": 17505085947.735207
+     },
+     {
+      "k": 4096,
+      "bytes": 101904652,
+      "first_ms": {
+       "direct": 5.3323329775594175,
+       "staged": 2.1951659582555294
+      },
+      "timed_ms": {
+       "direct": 5.247833963949233,
+       "staged": 2.1727500134147704
+      },
+      "rate_bps": 19418421524.013332
+     },
+     {
+      "k": 8096,
+      "bytes": 201850880,
+      "first_ms": {
+       "direct": 10.130250011570752,
+       "staged": 4.100417019799352
+      },
+      "timed_ms": {
+       "direct": 10.041625006124377,
+       "staged": 3.9670830010436475
+      },
+      "rate_bps": 20101415844.237495
+     }
+    ]
+   },
+   "variants": {
+    "direct": {
+     "parity": true,
+     "direct_blocks": 8096,
+     "reps_s": [
+      0.010116082965396345,
+      0.009926124999765307,
+      0.00994879100471735,
+      0.009874499985016882,
+      0.010030917008407414
+     ],
+     "median_s": 0.00994879100471735,
+     "spread": 0.02428264703368605,
+     "gbps": 20.28898585810977
+    },
+    "staged": {
+     "parity": true,
+     "direct_blocks": 0,
+     "reps_s": [
+      0.00400195800466463,
+      0.004044540983159095,
+      0.004029541974887252,
+      0.004073375021107495,
+      0.0040474169654771686
+     ],
+     "median_s": 0.004044540983159095,
+     "spread": 0.017657632037908787,
+     "gbps": 49.90699336228238
+    },
+    "reference": {
+     "reps_s": [
+      5.880062541982625,
+      5.92360183398705,
+      5.89788637496531,
+      5.8660767920082435,
+      5.883949999988545
+     ],
+     "median_s": 5.883949999988545,
+     "spread": 0.009776602788758955,
+     "gbps": 0.03430533570142387
+    }
+   },
+   "seconds": 41.87269316700986,
+   "footprint_peak": 1977632880,
+   "provenance": {
+    "git": "22a40354ced7d82168dd35461754f4a8cfdc2934",
+    "source_hash": "c898767a8b14579825aaf44b29494d94107f72d7b6286bceb187b1b8b1ad487e",
+    "mlx": "0.32.2",
+    "mflux": null,
+    "macos": "27.0",
+    "device_info": {
+     "device_name": "Apple M1 Max",
+     "max_recommended_working_set_size": 26800603136,
+     "memory_size": 34359738368,
+     "architecture": "applegpu_g13s",
+     "max_buffer_length": 20100448256,
+     "resource_limit": 499000
+    },
+    "memory_caps_gb": [
+     20,
+     22
+    ],
+    "cache_limit": 1400000000,
+    "cache_memory": 860,
+    "power": {
+     "ac": true,
+     "battery_pct": 100
+    }
+   }
+  }
+ },
+ "df11": "~/.cache/huggingface/hub/models--DFloat11--Qwen3-4B-DF11/snapshots/618eddad93ca71dacf56cef22e69c5968357dd6e",
+ "memory_caps_gb": [
+  20,
+  22
+ ],
+ "cache_limit": 1400000000,
+ "provenance": {
+  "git": "22a40354ced7d82168dd35461754f4a8cfdc2934",
+  "source_hash": "c898767a8b14579825aaf44b29494d94107f72d7b6286bceb187b1b8b1ad487e",
+  "mlx": "0.32.2",
+  "mflux": null,
+  "macos": "27.0",
+  "device_info": {
+   "device_name": "Apple M1 Max",
+   "max_recommended_working_set_size": 26800603136,
+   "memory_size": 34359738368,
+   "architecture": "applegpu_g13s",
+   "max_buffer_length": 20100448256,
+   "resource_limit": 499000
+  },
+  "memory_caps_gb": [
+   20,
+   22
+  ],
+  "cache_limit": 1400000000,
+  "cache_memory": 860,
+  "power": {
+   "ac": true,
+   "battery_pct": 100
+  }
+ },
+ "gbps": 20.28898585810977,
+ "errors": [],
+ "exit_code": 0
+}

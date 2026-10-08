@@ -156,7 +156,7 @@ def test_the_set_load_installs_the_three_nonblock_groups_and_attaches_with_verif
 def test_a_new_batch_after_a_generation_drops_the_set_and_reinstalls_the_nonblock_weights(
     tmp_path, monkeypatch
 ):
-    # Bug caught (Review Focus 4): a non-block weight left on its placeholder after the reload a new batch forces (a
+    # Bug caught: a non-block weight left on its placeholder after the reload a new batch forces (a
     # zero-size matmul on adaln_modulation before the first block), or the encoder reload reading another base.
     model = fake_model(tmp_path, monkeypatch)
     loads = []
@@ -337,7 +337,7 @@ def test_a_call_whose_batch_was_not_encoded_is_refused(tmp_path, monkeypatch):
 
 
 def test_blank_and_missing_negatives_share_one_batch(tmp_path, monkeypatch):
-    # Bug caught (Review Focus 2): None, "" and "   " keyed apart (three encodes and set reloads for one mflux batch
+    # Bug caught: None, "" and "   " keyed apart (three encodes and set reloads for one mflux batch
     # [" ", prompt]), or a blank negative encoded as itself. Real mflux loop, one step each.
     model = fake_model(tmp_path, monkeypatch)
     run = {"seed": 1, "prompt": "a", "num_inference_steps": 1, "height": 64, "width": 64}
@@ -399,7 +399,7 @@ def _double(allowance):
 def test_a_cfg_call_plans_with_the_batch_two_constants(
     tmp_path, monkeypatch, guidance, batch, limit
 ):
-    # Bug caught (Review Focus 1, Python-API half): the constants looked up by model name (Turbo planned with batch-1
+    # Bug caught (the Python API's half): the constants looked up by model name (Turbo planned with batch-1
     # activations for a batch-2 call: 1_000_017_408 at guidance 4), or the batch counted from the model instead of the
     # prompts. The doubles' reference is 4096 + 1 tokens ("a" and " " are one stub token each), so no scaling, no
     # floor: the tiny decoded block 17_408 B + the allowance, by hand.
@@ -484,7 +484,7 @@ def _fake_encode_peak(monkeypatch, model, above_start):
 def test_an_encode_over_the_bound_warns_through_the_pure_helper(tmp_path, monkeypatch, over, warns):
     # Bug caught: _check_encode_peak never called after the encode phase, measuring the wrong phase record, or a bound
     # of its own that drifts from the helper's (`>` at the bound: silent). The bound comes from the plan through the
-    # helper Task 7 pins with literals.
+    # helper, whose own tests pin it with literals.
     import warnings
 
     from mlx_dfloat.mflux.ernie import memory as emem
@@ -634,7 +634,7 @@ def test_save_model_is_refused_and_freeze_skips_a_dropped_encoder(tmp_path, monk
 def test_the_constructor_builds_with_the_models_overrides_and_the_language_model_bytes(
     tmp_path, monkeypatch
 ):
-    # Bug caught (S3 review fix 9): __init__ wiring past the resolver untested: the transformer built without the
+    # Bug caught: __init__ wiring past the resolver untested: the transformer built without the
     # model's overrides (mflux builds ErnieTransformer(**model_config.transformer_overrides),
     # ernie_image_initializer.py:63; ModelConfig.ernie_image_turbo() sets rope_axes_dim [32, 48, 48]), the base
     # components read from another directory, or the sizes taken from the encoder file (vision tower included) instead
@@ -841,7 +841,7 @@ def test_a_tiny_generation_gives_stock_mfluxs_latents_bit_for_bit(tmp_path, monk
 
 
 def test_encode_then_generate_on_the_base_reuses_the_batch(tmp_path, monkeypatch):
-    # Bug caught (C1): encode("p") keyed at guidance 1.0 while generate_image(seed, "p") runs the base's default 4.0
+    # Bug caught: encode("p") keyed at guidance 1.0 while generate_image(seed, "p") runs the base's default 4.0
     # (CFG: the batch [" ", "p"]), so the call drops the set and reloads the encoder for a batch encode() was meant to
     # prepare.
     model = fake_model(tmp_path, monkeypatch, model="ernie-image")
@@ -856,7 +856,7 @@ def test_encode_then_generate_on_the_base_reuses_the_batch(tmp_path, monkeypatch
 
 @pytest.mark.parametrize("prompt", ["", "   "])
 def test_encode_refuses_an_empty_or_blank_prompt(tmp_path, monkeypatch, prompt):
-    # Bug caught (C3): encode() taking a prompt generate_image refuses (an empty batch cached, an encoder load spent).
+    # Bug caught: encode() taking a prompt generate_image refuses (an empty batch cached, an encoder load spent).
     model = fake_model(tmp_path, monkeypatch)
     monkeypatch.setattr(model._lifecycle, "ensure_embeddings", lambda *p: pytest.fail("encoded"))
     with pytest.raises(
@@ -866,7 +866,7 @@ def test_encode_refuses_an_empty_or_blank_prompt(tmp_path, monkeypatch, prompt):
 
 
 def test_encode_runs_under_the_commands_caps_and_restores_mlxs_defaults(tmp_path, monkeypatch):
-    # Bug caught (X4): encode() from Python run at MLX's default wired limit 0 (a prompt encode is one of the measured
+    # Bug caught: encode() from Python run at MLX's default wired limit 0 (a prompt encode is one of the measured
     # phases, sized under the command's caps), or the caps left installed after it returns.
     from tests._mlx_limits import command_caps, current_limits, mlx_without_wired_cap
 

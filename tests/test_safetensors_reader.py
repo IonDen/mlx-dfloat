@@ -38,7 +38,7 @@ def test_bf16_is_returned_as_uint16_bits(tmp_path):
 
 
 def test_reads_through_a_symlink(tmp_path):
-    # Review focus 1: HF snapshots are symlinks into blobs/.
+    # HF snapshots are symlinks into blobs/.
     blob = tmp_path / "blob.safetensors"
     _write(blob, {"t": np.arange(4, dtype=np.uint8)})
     link = tmp_path / "model.safetensors"
@@ -56,7 +56,6 @@ def test_dangling_symlink_is_a_format_error(tmp_path):
 
 
 def test_truncated_file_is_a_format_error(tmp_path):
-    # Review focus 2.
     path = tmp_path / "c.safetensors"
     _write(path, {"t": np.zeros(1000, dtype=np.uint8)})
     path.write_bytes(path.read_bytes()[:-10])

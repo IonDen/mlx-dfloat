@@ -96,7 +96,7 @@ def test_the_set_load_installs_modulation_and_attaches_with_verify_in_call(tmp_p
 
 
 def test_a_new_prompt_drops_the_set_and_reinstalls_modulation(tmp_path, monkeypatch):
-    # Bug caught (Review Focus 5): modulation.layers.1.weight left on its placeholder after the reload a new prompt
+    # Bug caught: modulation.layers.1.weight left on its placeholder after the reload a new prompt
     # forces, or the encoder reload reading another base than the model was built from.
     model = fake_model(tmp_path, monkeypatch)
     loads = []
@@ -361,7 +361,7 @@ def test_a_missing_guidance_and_scheduler_become_mflux_defaults(tmp_path, monkey
 def test_an_empty_prompt_and_a_negative_equal_to_the_prompt_run_from_the_cache(
     tmp_path, monkeypatch
 ):
-    # Bug caught (Review Focus 3): the empty prompt cached under " " (mflux's loop looks it up as "" and calls the
+    # Bug caught: the empty prompt cached under " " (mflux's loop looks it up as "" and calls the
     # dropped encoder, which raises), an empty negative encoded or run as CFG, or a negative equal to the prompt
     # encoded twice. Real mflux loop, one step.
     model = fake_model(tmp_path, monkeypatch)
@@ -840,7 +840,7 @@ def test_the_default_base_resolves_at_its_pin_and_a_user_base_unpinned(tmp_path,
 def test_the_constructor_builds_from_local_dirs_with_mfluxs_defaults_and_the_language_model_bytes(
     tmp_path, monkeypatch
 ):
-    # Bug caught (S3 review fix 9 for Klein): __init__ wiring past the resolver untested: the config-less checkpoint
+    # Bug caught: __init__ wiring past the resolver untested: the config-less checkpoint
     # not opened through the layout table, the transformer built with arguments mflux's initializer does not use
     # (Qwen21Initializer._init_models builds Qwen21Transformer() bare, qwen21_initializer.py:52), the base components
     # read from another directory, or the sizes taken from the shared rule (the encoder shards' file size, vision
@@ -1040,7 +1040,7 @@ def test_a_tiny_generation_gives_stock_mfluxs_latents_bit_for_bit(
 
 
 def test_encode_runs_under_the_commands_caps_and_restores_mlxs_defaults(tmp_path, monkeypatch):
-    # Bug caught (X4): encode() from Python run at MLX's default wired limit 0 (a prompt encode is one of the measured
+    # Bug caught: encode() from Python run at MLX's default wired limit 0 (a prompt encode is one of the measured
     # phases, sized under the command's caps), or the caps left installed after it returns.
     from tests._mlx_limits import command_caps, current_limits, mlx_without_wired_cap
 

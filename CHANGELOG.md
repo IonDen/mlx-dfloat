@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-08
+
+0.2.0 adds five image-model families to the FLUX.1 support of 0.1.0. Each runs from its DFloat11 checkpoint through
+mflux, and the GPU decodes every compressed weight to exactly the bits the checkpoint stores. The peaks below are from
+one 1024² run per model, six for Z-Image-Turbo, on a 32 GB M1 Max (macOS 27.0.1, mlx 0.32.2, mflux 0.20.0; the files
+in `bench/results/tiers/` and `bench/results/repeats/`):
+
+- Z-Image-Turbo and Z-Image: 13.11 and 13.15 GiB. Six runs of the Turbo command peaked between 13.11 and 14.26 GiB.
+- FLUX.2 Klein, 4B and 9B, base and distilled: 11.88 GiB (FLUX.2-klein-4B) to 18.40 GiB (FLUX.2-klein-9B).
+- Qwen-Image-2.1: 20.42 GiB.
+- ERNIE-Image and ERNIE-Image-Turbo: 16.79 and 17.34 GiB.
+- Krea 2 Turbo and Krea 2 Raw: 21.17 and 21.15 GiB.
+
+None of these models was measured on a 16 GB or 24 GB Mac. Under those Macs' memory caps on the 32 GB Mac, only
+FLUX.2-klein-base-4B passed at both sizes, and ERNIE-Image-Turbo passed one forced run at 24 GB.
+
+From Python, every model runs under the same memory caps as the command, unless the process already set a wired
+limit. `mlx-dfloat selftest` checks the GPU decoder
+on your Mac.
+
 ### Added
 
 - `mlx-dfloat selftest` and `mlx_dfloat.decode.selftest()` decode two packaged groups, one cut from a real Qwen3-4B
@@ -80,6 +100,38 @@ All notable changes to this project are documented here. The format follows
 - A FLUX.2 Klein call warns when the prompt encode holds more memory than the fit estimate allows for it. The
   estimate counts only the text-encoder layers whose output FLUX.2 Klein reads, so the warning fires if a future mflux
   runs them all.
+- Krea 2 Turbo and Krea 2 Raw generation through mflux: `mlx-dfloat generate --model krea-2|krea-2-raw` and the
+  `DFloatKrea2` class, also returned by `DFloatModel`. The text encoder, VAE and tokenizer come from `krea/Krea-2-Turbo`
+  and `krea/Krea-2-Raw`, pinned to the revisions the measured runs used; their transformers are not downloaded. Both
+  repositories are gated on the Hub (the Hub grants access once you accept the Krea 2 Community License). The defaults
+  are 8 steps for Turbo and 25 for Raw, both at guidance 1.0 with the `er_sde` scheduler, so one transformer call per
+  step. Turbo's come from mflux's own Krea 2 command, which does not run Raw; Raw's 25 steps are mflux's fallback for a
+  model without a step default of its own. Any other guidance runs classifier-free guidance as two transformer calls per step; Raw's model card
+  uses 52 steps at guidance 3.5. An empty or blank prompt is refused as a user error.
+- The default Krea 2 checkpoints, `mingyi456/Krea-2-Turbo-DF11-ComfyUI` and `mingyi456/Krea-2-Raw-DF11-ComfyUI`, are
+  ComfyUI files with no `config.json`. The reader opens each through a layout pinned to that file's revision, and a
+  Krea 2 model built from the other model's file is refused with the `--model` the file belongs to.
+- Both Krea 2 checkpoints were compared in full with their originals by HTTP range reads. In each, the 256 matrices of
+  the transformer and text-fusion blocks equal the BF16 originals, and the other 5 matrices and 169 stored tensors
+  equal the FP32 originals rounded to BF16, nearest even. The GPU decoder matches the CPU reference on all 261 matrices
+  of each (records in `bench/results/parity/krea-2/` and `bench/results/parity/krea-2-raw/`). In a 4-step, 1024² run
+  at guidance 3.5, Krea 2 Raw's final latents match bit for bit those of the same transformer streaming its original
+  weights one block at a time (`bench/results/identity/krea-2-raw-1024/compare.json`); Turbo's latents have not been
+  compared with a reference.
+- Krea 2 decodes its seven non-block groups (the four text-fusion blocks and three small layers, 1.23 GiB decoded) at
+  the start of every transformer call and frees them before the first block, and it empties MLX's cache at each call's
+  start and again before the first block. On one guided Raw step the denoising peak was 21.14 GiB, against 22.56 GiB
+  with the groups kept decoded (one run each, `bench/results/calibration/krea-2-raw-1024.json`); most of that comes
+  from emptying the cache, and decoding per call on its own saves about 0.14 GiB.
+- The measured 32 GB runs peak at 1024² at 21.17 GiB for Krea 2 Turbo (8 steps) and at 21.15 GiB for Krea 2 Raw (25
+  steps) and for Raw with its model card's 52 steps at guidance 3.5 (`bench/results/tiers/krea-2-1024.json`,
+  `krea-2-raw-1024.json` and `bench/results/recipes/krea-2-raw-1024-52steps-guidance3.5.json`). Every call drops the compressed transformer
+  before the VAE decode. The fit estimate puts the denoising step at 22.58 GiB against the 22.96 GiB budget, and it
+  predicts a refusal on a 32 GB Mac at about 500 prompt tokens (only a 30-token prompt was measured). Under a 16 GB and a 24 GB Mac's caps the fit check
+  refuses both models (`bench/results/refusals/krea-2-1024-tier16.json` and the other three), and forced runs were
+  stopped by the watchdog while the compressed transformer was loading, so both sizes are at risk.
+- `scripts.verify_remote_group --extras` also compares every uncompressed tensor with its original of the same name,
+  BF16 as is or, with `--cast-fp32-to-bf16`, FP32 rounded to BF16; `--groups none --extras` compares the extras alone.
 - `scripts.verify_remote_group --cast-fp32-to-bf16` compares a DFloat11 repository with an FP32 original rounded to
   BF16, nearest even.
 
@@ -95,6 +147,10 @@ All notable changes to this project are documented here. The format follows
   `--guidance` other than 1.0 and ignores `--negative-prompt` with a warning, as mflux's Turbo command does. The image
   identity check covers ERNIE-Image and refuses `--negative-prompt` and a guidance other than 1.0 for
   ERNIE-Image-Turbo.
+- `mlx-dfloat generate --model` also accepts `krea-2` and `krea-2-raw`. For them, the `--negative-prompt` warning
+  follows mflux's Krea 2 rule (classifier-free guidance runs at any guidance other than 1.0), the command prints a line
+  when a call runs two transformer calls per step, and `--scheduler` takes `er_sde`, `euler` or `linear` and refuses
+  any other name. The image identity check accepts Krea 2 Raw, and Krea 2 Turbo at guidance 1.0.
 - `mlx-dfloat generate --report` records `elapsed_seconds`, and the watchdog's `abort.json` names the phase that was
   running (`build`, `encode`, `set_load`, `denoise` or `vae`). A checkpoint or base taken as a Hub id (the defaults
   included) prints one line saying it is resolved on the Hub, from the local cache or by download. On the Z-Image base
@@ -115,8 +171,8 @@ All notable changes to this project are documented here. The format follows
 - When a call drops the compressed transformer before the VAE decode, the fit estimate for that step now counts the
   transformer's uncompressed BF16 tensors, which stay loaded. The estimate grows by 6 MB to 137 MB depending on the
   model; at 1024² none of the 16, 24 or 32 GB verdicts changes.
-- The package summary and keywords name the FLUX.1 use case; `mlx-lm` is no longer a keyword, since no mlx-lm path
-  exists yet.
+- The package summary names the image models mlx-dfloat runs, and `mlx-lm` is no longer a keyword, since no mlx-lm
+  path exists yet.
 - The `mlx-dfloat generate --help` text no longer prints reST markup, explains the `--eval-policy` choices, and says
   "the host's own limits" where it said "the host caps".
 
@@ -158,8 +214,8 @@ The first release.
   (`scripts/bench_decode_kernel.py`, median of 5 repetitions after a warm-up); staged is the default, and the direct
   path is the fallback for blocks larger than the staging buffer. `verify_checkpoint.py --decoder metal` checks a
   whole checkpoint through the kernel, against the BF16 original when one is given and against the reference
-  otherwise: Qwen3-4B decodes bit-identically in 12.8 s where the reference took 223 s, and all 57 groups of
-  FLUX.1-schnell match the reference.
+  otherwise: Qwen3-4B decodes bit-identically against its BF16 original, and all 57 groups of FLUX.1-schnell match the
+  reference.
 - A measurement rig for the question the project hinges on: how much a FLUX.1 denoise step slows down when every
   transformer block's weights are decoded just in time. `scripts/bench_flux_step.py` runs one mode per process, either
   decoding per block or a control that swaps pre-decoded weights into the same graph, and reports the paired overhead;
@@ -182,7 +238,9 @@ The first release.
   isolated prediction. Decoding the next block on a second GPU stream (`df11-prefetch`, submitted after the previous
   block's evaluation returns) hides about a fifth of the kernel's time and, at that submission point, none of the
   allocation; since the cache limit removes that cost anyway, the integration will evaluate per block and size the
-  cache limit instead. A timed process peaks at about 19 GiB of memory, 20.3 GiB with the look-ahead.
+  cache limit instead. A timed process peaks at about 19 GiB of memory, 20.3 GiB with the look-ahead. (Note,
+  2026-10-08: the overhead figures in this entry were measured at a 1.4 GB cache limit and are superseded by the
+  committed overhead block in the README.)
 - The scripts' memory watchdog now enforces its ceiling on the process footprint the OS reports rather than on RSS
   plus MLX memory, which counted loaded arrays twice.
 - A block-boundary integration layer, `mlx_dfloat.integrate`: zero-size placeholders for a module's matrices, weight
@@ -280,5 +338,6 @@ The first release.
 - CI's mflux lane gets the Hub token for its test step only, so the three tokenizer tests against the gated FLUX.1
   bases run there instead of skipping.
 
-[Unreleased]: https://github.com/IonDen/mlx-dfloat/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/IonDen/mlx-dfloat/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/IonDen/mlx-dfloat/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/IonDen/mlx-dfloat/releases/tag/v0.1.0

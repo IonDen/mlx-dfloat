@@ -17,7 +17,7 @@ from mlx_dfloat.mflux.qwen21.names import (
     templated_targets,
 )
 
-# The seven block matrices in the order a block decodes into after the gate_up split (S0: the stored order is
+# The seven block matrices in the order a block decodes into after the gate_up split (the stored order, by a 2026-10-07 byte comparison, is
 # to_q, to_k, to_v, to_out.0, gate_up = [gate_layer; proj], out). Literal, so a reordered MATRIX_SUBS shows.
 SEVEN = (
     "attn.to_q",
@@ -76,7 +76,7 @@ def _folded(targets=None):
 
 def test_the_folded_map_places_every_block_matrix_on_its_own_path_in_decoded_order():
     # Bug caught: a concrete-index mapping not folded (no {block} target: "a compressed matrix with no mflux target"),
-    # or the table order not the decoded order (gate_layer before proj, S0).
+    # or the table order not the decoded order (gate_layer before proj).
     m = _folded()
     assert m.attrs_of("transformer_blocks") == SEVEN
     assert m.place("transformer_blocks.2.img_mlp.proj.weight").attr == "img_mlp.proj"
@@ -203,7 +203,7 @@ def test_a_checkpoint_without_blocks_is_refused(tmp_path):
 
 
 def test_a_qwen_image_1_block_is_refused_naming_the_group_and_the_seven_matrices(tmp_path):
-    # Bug caught (Review Focus 2): the Qwen-Image 1 DF11 checkpoint (dual-stream blocks, 14 matrices, same group
+    # Bug caught: the Qwen-Image 1 DF11 checkpoint (dual-stream blocks, 14 matrices, same group
     # names) passed for 2.1 and failing with a shape error at the first block instead of at build.
     qwen_image_1 = (
         "img_mod.1",

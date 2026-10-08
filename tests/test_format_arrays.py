@@ -85,5 +85,5 @@ def test_pointer_bounds(rows, pointer):
 
 
 def test_tail_block_without_a_code_start_is_accepted():
-    # Review focus 5: n_bytes spans 2 blocks, no code starts in the second, 2 entries.
+    # n_bytes spans 2 blocks, no code starts in the second, 2 entries.
     validate_group_arrays(_two_blocks(output_positions=np.array([0, 8], np.uint32)), name="g")

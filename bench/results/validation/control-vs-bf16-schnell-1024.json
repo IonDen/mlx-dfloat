@@ -1,0 +1,141 @@
+{
+ "rounds": {
+  "1": {
+   "T_bf16": 3.684958625002764,
+   "T_control": 3.693141083000228,
+   "T_df11": 3.992285207961686
+  },
+  "2": {
+   "T_bf16": 3.6915409169741906,
+   "T_control": 3.6984091250342317,
+   "T_df11": 4.014075957995374
+  },
+  "3": {
+   "T_bf16": 3.688040791952517,
+   "T_control": 3.6900886660441756,
+   "T_df11": 3.982614917040337
+  }
+ },
+ "complete_rounds": [
+  1,
+  2,
+  3
+ ],
+ "control_vs_bf16_per_round": {
+  "1": 0.002215582295279224,
+  "2": 0.0018570709264020377,
+  "3": 0.000554966093498802
+ },
+ "pooled": {
+  "bf16": {
+   "median": 3.688304833951406,
+   "spread": 0.009334888941151141,
+   "n": 15,
+   "verify_median_s": 5.249981768429279e-06
+  },
+  "control": {
+   "median": 3.693141083000228,
+   "spread": 0.01274607223277016,
+   "n": 15,
+   "verify_median_s": 5.416979547590017e-06
+  },
+  "df11": {
+   "median": 3.994620500016026,
+   "spread": 0.013406884831935348,
+   "n": 15,
+   "verify_median_s": 0.0002883330453187227
+  }
+ },
+ "control_vs_bf16": 0.001309521878566514,
+ "spread_bound": 0.01274607223277016,
+ "within_spread": true,
+ "df11_vs_bf16": 0.08305052859105833,
+ "stopped": null,
+ "key": {
+  "model": "schnell",
+  "size": 1024,
+  "steps": 5,
+  "warmup": 2,
+  "seed": 42,
+  "df11": "~/.cache/huggingface/hub/models--DFloat11--FLUX.1-schnell-DF11/snapshots/51a428b928197e0531cb93d6e438941e2d0b247e",
+  "embeds": "schnell-embeds.safetensors",
+  "embeds_meta": {
+   "token_length": "256",
+   "synthetic": "false",
+   "seed": "42",
+   "mflux": "0.20.0",
+   "root": "~/.cache/huggingface/hub/models--black-forest-labs--FLUX.1-schnell/snapshots/741f7c3ce8b383c54771c7003378a50191e9efe9",
+   "prompt": "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water",
+   "model": "schnell",
+   "mlx": "0.32.2"
+  },
+  "source": "9b4803f1ff2e69eb3faa00ca975d9a935f25fa6c62615050d986e3f6a0688568",
+  "mlx": "0.32.2",
+  "double": 4,
+  "single": 8
+ },
+ "rounds_requested": 3,
+ "runs_complete": [
+  [
+   1,
+   "bf16"
+  ],
+  [
+   1,
+   "control"
+  ],
+  [
+   1,
+   "df11"
+  ],
+  [
+   2,
+   "bf16"
+  ],
+  [
+   2,
+   "control"
+  ],
+  [
+   2,
+   "df11"
+  ],
+  [
+   3,
+   "bf16"
+  ],
+  [
+   3,
+   "control"
+  ],
+  [
+   3,
+   "df11"
+  ]
+ ],
+ "provenance": {
+  "git": "7c5b410296bc01295fba93fd4ecea187609d6456",
+  "source_hash": "9b4803f1ff2e69eb3faa00ca975d9a935f25fa6c62615050d986e3f6a0688568",
+  "mlx": "0.32.2",
+  "mflux": "0.20.0",
+  "macos": "27.0",
+  "device_info": {
+   "device_name": "Apple M1 Max",
+   "max_recommended_working_set_size": 26800603136,
+   "memory_size": 34359738368,
+   "architecture": "applegpu_g13s",
+   "max_buffer_length": 20100448256,
+   "resource_limit": 499000
+  },
+  "memory_caps_gb": [
+   20,
+   22
+  ],
+  "cache_limit": 32641751449,
+  "cache_memory": 0,
+  "power": {
+   "ac": true,
+   "battery_pct": 100
+  }
+ }
+}

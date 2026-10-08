@@ -41,7 +41,7 @@ BASE_FILES = (
     "vae/config.json",
     "vae/diffusion_pytorch_model.safetensors",
 )
-# The de-risk prompt and its token count (mflux 0.20.0 TokenizerLoader on both base snapshots, 2026-10-08).
+# The calibration prompt and its token count (mflux 0.20.0 TokenizerLoader on both base snapshots, 2026-10-08).
 PROMPT = (
     "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the "
     "water"
@@ -180,7 +180,7 @@ def _write_tiny_encoder(root, *, drop=()):
 
 @pytest.mark.mflux
 def test_an_encoder_tensor_missing_from_the_base_is_refused_by_name(tmp_path):
-    # Bug caught (Review Focus 5): mflux's applier updates with strict=False, so a base missing one tensor (a lost
+    # Bug caught: mflux's applier updates with strict=False, so a base missing one tensor (a lost
     # shard, a renamed key) loads without error and that layer keeps its random float32 init: a wrong image, no error.
     from mlx_dfloat.mflux.ernie.init import load_text_encoder
 
@@ -239,7 +239,7 @@ def _write_vae(root, *, drop=()):
 @pytest.mark.mflux
 @pytest.mark.parametrize("dropped", ["decoder.conv_out.weight", "bn.running_mean"])
 def test_a_vae_tensor_missing_from_the_base_is_refused_by_name(tmp_path, dropped):
-    # Bug caught (Review Focus 5): the VAE loaded through the same strict=False applier with no coverage check (a
+    # Bug caught: the VAE loaded through the same strict=False applier with no coverage check (a
     # lost decoder conv keeps its random init and the decode returns noise), or the batch-norm statistics exempted as
     # computed buffers (they come from the file: flux2_weight_mapping.py:202-209).
     from mlx_dfloat.mflux.ernie.init import load_vae

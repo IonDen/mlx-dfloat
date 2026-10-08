@@ -1104,7 +1104,7 @@ def test_groups_none_selects_nothing_and_mixed_with_a_group_is_refused():
 
 
 def test_an_extras_only_run_on_a_repository_without_extras_is_an_error(tmp_path):
-    # Bug caught (CC3): `--groups none --extras` on a checkpoint with no extras exiting 0 having compared nothing.
+    # Bug caught: `--groups none --extras` on a checkpoint with no extras exiting 0 having compared nothing.
     df11, bf16 = _extras_pair(tmp_path, df11_extras={}, single_file=False)
     code, result = _extras_run(tmp_path, df11, bf16, "--groups", "none", "--extras")
     assert code == 2
@@ -1119,7 +1119,7 @@ def test_an_extras_only_run_on_a_repository_without_extras_is_an_error(tmp_path)
 
 
 def test_an_extra_whose_original_has_another_shape_is_an_error_before_its_data_is_read(tmp_path):
-    # Bug caught (CC4): a transposed or reshaped original (same element count) compared byte for byte, a mapping
+    # Bug caught: a transposed or reshaped original (same element count) compared byte for byte, a mapping
     # problem passed off as a pass or a mismatch. mod.lin is 2 x 2 in the checkpoint; its original here is 1 x 4.
     reshaped = {**_EXTRAS, "mod.lin": _EXTRAS["mod.lin"].reshape(1, 4)}
     df11, bf16 = _extras_pair(tmp_path, originals=reshaped)
@@ -1129,7 +1129,7 @@ def test_an_extra_whose_original_has_another_shape_is_an_error_before_its_data_i
 
 
 def test_a_shard_outside_the_checkpoints_index_is_not_an_extra(tmp_path):
-    # Bug caught (FF4): every safetensors file in the repository read as the checkpoint's (a DF11 repository that also
+    # Bug caught: every safetensors file in the repository read as the checkpoint's (a DF11 repository that also
     # hosts an encoder file would fail with "no original for extra ..."). The index names the group shard and the
     # extras shard; vae.safetensors sits next to them, unlisted.
     df11, bf16 = _extras_pair(tmp_path, single_file=False)
