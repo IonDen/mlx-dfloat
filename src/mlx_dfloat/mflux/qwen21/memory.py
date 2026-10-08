@@ -32,7 +32,7 @@ MAX_MEASURED_PIXELS = 1024 * 1024  # no run above 1024² on this path
 # (mingyi456/Qwen-Image-2.1-DF11-ComfyUI @ 1b22a3a) over the Qwen/Qwen-Image-2.1 base (@ d26bb61), 1024², seed 42,
 # guidance 4 with the negative prompt " " (two transformer calls per step); one process: build, encode, drop, set load,
 # one step, VAE decode on the resident set; M1 Max 32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0. Bytes throughout.
-# Re-measure before changing any.
+# Re-measure before changing any. Each run's phase peaks: bench/results/calibration/qwen-image-2.1-1024.json.
 #
 # REFERENCE_TOKENS: the calibration point, 1024² (4096 image tokens) + the run's text tokens, 33 (the prompt's; the
 # negative prompt's 9 are fewer, and the call is sized by its longest prompt).
@@ -42,9 +42,9 @@ REFERENCE_TOKENS = 4096 + 33
 OVERHEAD = 459_445_098  # 0.428 GiB
 # VAE_TRANSIENT, by the overall-peak rule over every 1024² sample: the highest measured peak of the VAE decode on the
 # resident set minus the VAE phase's other terms (compressed + extras + decoded non-block + VAE file + OVERHEAD):
-# 22_788_580_400 - (9_587_103_379 + 137_388_032 + 134_217_728 + 1_350_989_512 + 459_445_098). Nine samples on
-# 2026-10-08 (the de-risk run above, four de-risk reruns of one step at two cache limits, two 40-step MEASURED
-# runs, two 4-step identity runs with CFG; the highest is the second one-step rerun at the old cache limit)
+# 22_788_580_400 - (9_587_103_379 + 137_388_032 + 134_217_728 + 1_350_989_512 + 459_445_098). Eleven samples on
+# 2026-10-08 (the de-risk run above, four de-risk reruns of one step at two cache limits, three 40-step MEASURED
+# runs, three 4-step identity runs with CFG; the highest is the second one-step rerun at the old cache limit)
 # peaked at 21.76 to 22.79 GB in the VAE phase, with MLX's own VAE peak the same in every de-risk run: about 1 GiB of
 # run-to-run spread outside MLX's counters, as Z-Image's VAE phase shows too. A fit check must not under-predict, so
 # the term covers the highest sample; the first run alone (22_139_643_024) would put the VAE phase 0.60 GiB under it.

@@ -7,15 +7,15 @@
 Run [DFloat11](https://github.com/LeanModels/DFloat11) checkpoints on a Mac with
 [MLX](https://github.com/ml-explore/mlx). The weights stay about 30 % smaller than BF16 in memory, and the GPU decodes
 each block back to exactly the same bits just before it runs. Today that means FLUX.1 image generation on a 32 GB Mac;
-Z-Image and FLUX.2 Klein arrive in the next release.
+Z-Image, FLUX.2 Klein and Qwen-Image-2.1 arrive in the next release.
 
 DFloat11 is lossless compression for BF16 model weights. Each weight is 16 bits. DFloat11 stores the 8 exponent bits
 as a short variable-length code, the same idea a zip file uses, and keeps the other 8 bits (the sign and the
 fraction) exactly as they are. The DFloat11 authors report models at about 70% of their BF16 size with output that is
 bit for bit the same as the original.[^size] Their decoder runs on NVIDIA GPUs only. This project is an independent
 reader and decoder for Apple Silicon. The weights stay compressed in memory, and a Metal kernel decodes each block
-on the GPU as it runs. That is how it generates FLUX.1 images through mflux; Z-Image and FLUX.2 Klein follow in the
-next release.
+on the GPU as it runs. That is how it generates FLUX.1 images through mflux; Z-Image, FLUX.2 Klein and Qwen-Image-2.1
+follow in the next release.
 
 ```
 one BF16 weight, 16 bits:    s   eeeeeeee   mmmmmmm
@@ -46,9 +46,11 @@ of the three FLUX.1 models; no other Mac has been measured. The numbers are unde
 | A 24 GB Mac, FLUX.2 Klein | CAPPED: FLUX.2-klein-base-4B passed, peak 12.29 GiB; FLUX.2-klein-base-9B is at risk (the fit check refuses it, and a forced run was stopped by the watchdog). See "Generate a FLUX.2 Klein image". |
 | A 16 GB Mac, FLUX.2-klein-base-4B | CAPPED: passed, peak 8.15 GiB. See "Generate a FLUX.2 Klein image". |
 | A 16 GB Mac, Z-Image-Turbo | CAPPED: at risk. The fit check refuses it, and a forced run was stopped by the watchdog at 9.26 GiB before the transformer ran. See "Generate a Z-Image image". |
+| A 32 GB Mac, Qwen-Image-2.1, with the weights unchanged | mlx-dfloat, from the next release. Peak at 1024²: 20.42 GiB. See "Generate a Qwen-Image-2.1 image". |
+| A 16 GB or 24 GB Mac, Qwen-Image-2.1 | CAPPED: at risk. The fit check refuses it, and forced runs were stopped by the watchdog while the prompt was being encoded, before the transformer ran. See "Generate a Qwen-Image-2.1 image". |
 | A Mac with room for the BF16 transformer next to everything else | Plain mflux in BF16. There is nothing to decode. |
 | A Mac with less than 32 GB | Not measured. The rows marked CAPPED are runs on the 32 GB Mac under the caps mlx-dfloat installs on a 16 GB or 24 GB Mac; the tables below make no other claim for those Macs. |
-| Another model: an LLM, Qwen-Image, FLUX.2-dev, Krea-2 | Not wired up yet. The reader and the decoder handle all four published versions of the DFloat11 format, but generation covers FLUX.1 only; Z-Image and FLUX.2 Klein arrive in the next release. |
+| Another model: an LLM, the original Qwen-Image or Qwen-Image-Edit, FLUX.2-dev, Krea-2 | Not wired up yet. The reader and the decoder handle all four published versions of the DFloat11 format, but generation in 0.1.0 covers FLUX.1 only. The next release adds Z-Image-Turbo, Z-Image, the four FLUX.2 Klein models and Qwen-Image-2.1. |
 
 ## Status
 
@@ -94,6 +96,17 @@ In the next release (not yet on PyPI):
   FLUX.2-klein-base-9B and 30 for FLUX.2-klein-9B. Each model's two records are `kernel-vs-reference.json` and
   `sampled-vs-bf16.json` in `bench/results/parity/<model>/` (`flux2-klein-4b`, `flux2-klein-base-9b`, `flux2-klein-9b`).
   Their latents have not been compared with a reference.
+- Qwen-Image-2.1 makes 1024² images through mflux, from the command line or from Python. Its DFloat11 checkpoint
+  (`mingyi456/Qwen-Image-2.1-DF11-ComfyUI`) is a single file made for ComfyUI, with no `config.json` next to it.
+  mlx-dfloat carries the missing layout for that one published file, pinned to one revision on the Hub, and refuses a
+  file without a `config.json` that it does not recognise. Every one of the 225 compressed matrices and 72 other tensors
+  equals the BF16 original in `Qwen/Qwen-Image-2.1` (`bench/results/parity/qwen-image-2.1/full-vs-bf16.json`), and the
+  GPU decoder gives the same bits as the CPU reference on all 225
+  (`bench/results/parity/qwen-image-2.1/kernel-vs-reference.json`). Its final latents match, bit for bit, those of
+  the same transformer streaming its BF16 weights one block at a time, and the images match pixel for pixel. That check
+  ran at 1024² for 4 steps at guidance 4.0. The negative prompt was a single space, so classifier-free guidance ran
+  (record: `bench/results/identity/qwen-image-2.1-1024/compare.json`). `scripts/verify_image.py` runs both sides
+  without mflux's step compilation.
 - `mlx-dfloat generate --tier 16` and `--tier 24` run under the memory caps mlx-dfloat installs on a Mac of that size.
   The 16 GB and 24 GB rows under "Measured numbers" are CAPPED runs on the 32 GB Mac under those caps; no smaller Mac
   was measured.
@@ -110,7 +123,7 @@ pip install "mlx-dfloat[mflux]"
 ```
 
 Without the extra you get the checkpoint reader and the decoder. The `mflux` extra installs mflux 0.20, which the
-`mlx-dfloat generate` command needs for FLUX.1, Z-Image and FLUX.2 Klein generation.
+`mlx-dfloat generate` command needs for FLUX.1, Z-Image, FLUX.2 Klein and Qwen-Image-2.1 generation.
 
 The parity scripts and the benchmark live in the repository, not in the package, so run them from a checkout with
 [uv](https://docs.astral.sh/uv/):
@@ -162,10 +175,10 @@ result is compared with bits known in advance. It exits 0 when every check passe
 GPU decoder cannot run at all, for example because there is no Metal device. `--json` prints the same report as JSON.
 
 The same check runs automatically the first time a process decodes on the GPU, once for each write path, and when a
-FLUX.1, Z-Image or FLUX.2 Klein model or the `generate` command sets up its decoder, so a broken GPU decoder refuses
-before any model loads. On an M1 Max the check itself took about 13 ms, measured after the kernel pipelines were
-compiled; the one-time compile took about 0.4 s with a cold shader cache and 0.03 s with a warm one. It does not check
-whether a real model fits in your memory or how fast it runs; the numbers below cover that.
+FLUX.1, Z-Image, FLUX.2 Klein or Qwen-Image-2.1 model or the `generate` command sets up its decoder, so a broken GPU
+decoder refuses before any model loads. On an M1 Max the check itself took about 13 ms, measured after the kernel
+pipelines were compiled; the one-time compile took about 0.4 s with a cold shader cache and 0.03 s with a warm one. It
+does not check whether a real model fits in your memory or how fast it runs; the numbers below cover that.
 
 ### Generate a FLUX.1 image
 
@@ -206,9 +219,10 @@ image.save("lighthouse.png")
 ```
 
 FLUX.1-dev and FLUX.1-Krea-dev want more steps; the measured runs below used 20 steps and `guidance=3.5`.
-`base_path=` takes the `--base` value, and `fit_check=False` replaces `--no-fit-check` (see below). From Python
-nothing installs memory caps or a memory watchdog; `mlx-dfloat generate` does both, so prefer the command on a Mac
-near its memory limit.
+`base_path=` takes the `--base` value, and `fit_check=False` replaces `--no-fit-check` (see below). From Python, each
+`generate_image` call runs under the same memory caps as `mlx-dfloat generate` and puts MLX's limits back when it
+returns; a wired limit your process already set is left alone. Only the command adds a memory watchdog, so prefer it
+on a Mac near its memory limit.
 
 Measured on an M1 Max (32 GB, macOS 27.0, mlx 0.32.2, mflux 0.20.0, 2026-09-28/29) at 1024², one image per model:
 FLUX.1-schnell (4 steps) peaked at 19.94 GiB and took 1 minute 54 seconds including imports; FLUX.1-dev (20 steps,
@@ -384,6 +398,68 @@ FLUX.1. FLUX.2 Klein's image-editing and KV-cache variants are not on this path.
 a warning: a base model above guidance 1.0 runs its negative branch on mflux's blank prompt and takes no custom one.
 Sizes above 1024² are refused unless you pass `--no-fit-check`, because none has been measured.
 
+### Generate a Qwen-Image-2.1 image
+
+Qwen-Image-2.1 runs through the same command. Its BF16 repository and the DFloat11 checkpoint are both ungated on the
+Hub, so no Hub login is needed. Both come under the Qwen Research License Agreement
+([license](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE)).
+
+```
+mlx-dfloat generate --model qwen-image-2.1 \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024 --report report.json
+```
+
+The defaults are mflux's own for this model: 40 steps, guidance 1.0 and the `linear` scheduler. At guidance 1.0 each
+step calls the transformer once, with no classifier-free guidance. As in mflux, classifier-free guidance needs both a
+`--guidance` above 1 and a `--negative-prompt`. Pass a guidance above 1 without a negative prompt and the command warns
+that no classifier-free guidance runs; pass a negative prompt at guidance 1 or below and it warns that the prompt has no
+effect.
+
+The command takes the DFloat11 transformer from that checkpoint and the text encoder, VAE and tokenizer from
+`Qwen/Qwen-Image-2.1`, without downloading that repository's BF16 transformer. Both default repositories are pinned to
+the revisions the measured runs used; a `--df11` or `--base` you pass is used as given.
+
+The same from Python:
+
+```python
+from mlx_dfloat.mflux import DFloatModel
+
+model = DFloatModel("qwen-image-2.1")
+image = model.generate_image(
+    seed=42,
+    prompt="A stone lighthouse on a rocky shore at dawn",
+    height=1024,
+    width=1024,
+)
+image.save("lighthouse.png")
+```
+
+`num_inference_steps` defaults to 40 here too. For classifier-free guidance pass a `guidance` above 1.0 and a
+`negative_prompt`.
+
+mflux compiles Qwen-Image-2.1's denoising step. As with Z-Image and FLUX.2 Klein, this path runs the step
+without that compilation (see "Generate a Z-Image image" for why), and what that costs against stock mflux was not
+measured.
+
+Measured on an M1 Max (32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0) at 1024², seed 42, 40 steps at guidance 1.0,
+with the command under "Measured numbers": the run peaked at 20.42 GiB and took 6.9 minutes (the `elapsed_seconds` of
+`bench/results/tiers/qwen-image-2.1-1024.json`). MLX's own memory peaked during the VAE decode. On this 32 GB Mac the
+compressed transformer stays loaded through the VAE decode: the fit estimate predicts 21.2 GiB for that step (the
+report's `fit.phases.vae`), under the 22.96 GiB budget.
+
+On a 16 GB or 24 GB Mac, Qwen-Image-2.1 is at risk. No such Mac was measured: the runs behind those rows are CAPPED,
+made on the 32 GB M1 Max under the caps mlx-dfloat installs on a Mac of that size (`--tier 16` and `--tier 24`). The fit
+check refuses both. It predicts a 14.6 GiB peak while the prompt is encoded, against a budget of 8.67 GiB at 16 GB and
+14.00 GiB at 24 GB; the text encoder alone holds 14.1 GiB. Forced runs (`--no-fit-check`) were stopped by the
+watchdog while the prompt was being encoded, before the transformer ran. At 16 GB that came after 4.4 s, when MLX's
+active plus cached memory reached 9.28 GiB against the 9.17 GiB ceiling. At 24 GB it came after 4.8 s, with a
+footprint of 14.59 GiB against the 14.50 GiB ceiling.
+
+Quantisation, LoRA, img2img, mflux's alternative image decoder (`--pid-decode`) and ControlNet are refused, as for
+FLUX.1. Only text-to-image is on this path; Qwen-Image-2.1's image editing is not. Sizes above 1024² are refused unless
+you pass `--no-fit-check`, because none has been measured.
+
 ## Measured numbers
 
 The blocks below are generated from the files under `bench/results/` by `scripts/bench_table.py`, and a test fails when
@@ -395,21 +471,24 @@ and 16 GiB), so it sees the limits a user of that Mac runs under. PROOF marks a 
 ceiling, made only to show that the watchdog works; it never appears as a tier row.
 
 The 32 GB rows are MEASURED, on one M1 Max. The 16 GB and 24 GB rows are CAPPED, run on that same Mac:
-FLUX.2-klein-base-4B passed under both, while FLUX.2-klein-base-9B under a 24 GB Mac's caps and Z-Image-Turbo under a
-16 GB Mac's were stopped by the watchdog. The table makes no claim about any Mac it does not list. Each row is one
-`mlx-dfloat generate` run at 1024² with seed 42 (4 steps for FLUX.1-schnell, FLUX.2-klein-4B and FLUX.2-klein-9B, 20
-for FLUX.1-dev and FLUX.1-Krea-dev, 9 for Z-Image-Turbo, 50 with guidance 4.0 for Z-Image and the two FLUX.2 Klein
-base models), with `--tier` and `--report` writing the file in the last column.
+FLUX.2-klein-base-4B passed under both, while FLUX.2-klein-base-9B under a 24 GB Mac's caps, Z-Image-Turbo under a
+16 GB Mac's and Qwen-Image-2.1 under both were stopped by the watchdog. The table makes no claim about any Mac it does
+not list. Each row is one `mlx-dfloat generate` run at 1024² with seed 42 (4 steps for FLUX.1-schnell, FLUX.2-klein-4B
+and FLUX.2-klein-9B, 20 for FLUX.1-dev and FLUX.1-Krea-dev, 9 for Z-Image-Turbo, 40 at guidance 1.0 for
+Qwen-Image-2.1, 50 with guidance 4.0 for Z-Image and the two FLUX.2 Klein base models), with `--tier` and `--report`
+writing the file in the last column.
 
 The second column is the Mac's recommended GPU working set minus a reserve. On the 16 GB and 24 GB rows the working
 set is taken as two thirds of that Mac's memory. Two limits come off that working set, with different reserves. The
 fit budget, which `generate` checks before a run, is the working set minus 2 GiB on every Mac: 22.96 GiB on this one,
 8.67 GiB for a 16 GB Mac and 14.00 GiB for a 24 GB Mac. The watchdog ceiling, where a CAPPED run is stopped, is the
 working set minus 1.5 GiB at 16 GB and 24 GB: 9.17 and 14.50 GiB. So the second column is the fit budget on the 32 GB
-rows and the watchdog ceiling on the CAPPED rows. The CAPPED rows were recorded while the fit check still used the
-1.5 GiB reserve, and the stricter budget changes none of their outcomes. FLUX.2-klein-base-4B still passes at 16 GB
+rows and the watchdog ceiling on the CAPPED rows. The FLUX.2 Klein and Z-Image CAPPED rows were recorded while the
+fit check still used the 1.5 GiB reserve, and the stricter budget changes none of their outcomes. FLUX.2-klein-base-4B still passes at 16 GB
 (a predicted 8.54 GiB against 8.67), and at 24 GB it still keeps the compressed transformer loaded for the VAE decode
 (12.69 GiB predicted against 14.00). FLUX.2-klein-base-9B at 24 GB and Z-Image-Turbo at 16 GB are still refused.
+The Qwen-Image-2.1 rows were recorded under the current budget, which refuses both (a predicted 14.6 GiB while it
+encodes the prompt).
 
 "Peak (watched)" is the larger of the process footprint the OS reports and MLX's active plus cached memory, and a
 row's status is "target" when it stayed under the second column. "Peak MLX" is the larger of two
@@ -468,6 +547,24 @@ denoising against the 14.50 GiB budget of that run, and 14.00 GiB today
 (`bench/results/refusals/flux2-klein-base-9b-1024-tier24.json`). It ends with
 exit 70, like the Z-Image-Turbo run above.
 
+The Qwen-Image-2.1 rows come from these commands, with the same prompt:
+
+```
+mlx-dfloat generate --model qwen-image-2.1 --tier 32 \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024 --report bench/results/tiers/qwen-image-2.1-1024.json
+mlx-dfloat generate --model qwen-image-2.1 --tier 16 --no-fit-check \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024
+mlx-dfloat generate --model qwen-image-2.1 --tier 24 --no-fit-check \
+  --prompt "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water" \
+  --seed 42 --height 1024 --width 1024
+```
+
+In the last two the watchdog stops the run (exit 70) and writes its `abort.json` next to the output image; the
+table's copies are in `bench/results/tiers/aborts/`. Without `--no-fit-check` both are refused with exit 2
+(`bench/results/refusals/qwen-image-2.1-1024-tier16.json` and `qwen-image-2.1-1024-tier24.json`).
+
 Measured on an Apple M1 Max, 32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0.
 
 <!-- bench:tier-table -->
@@ -481,10 +578,13 @@ Measured on an Apple M1 Max, 32 GB, macOS 27.0.1, mlx 0.32.2, mflux 0.20.0.
 | 32 GB | 22.96 GiB | FLUX.2-klein-base-4B | 4.90 GiB | 12.78 GiB | 12.78 GiB | 11.91 GiB | MEASURED | target | host caps | `bench/results/tiers/flux2-klein-base-4b-1024.json` |
 | 32 GB | 22.96 GiB | FLUX.2-klein-base-9B | 11.47 GiB | 17.60 GiB | 17.60 GiB | 16.58 GiB | MEASURED | target | host caps | `bench/results/tiers/flux2-klein-base-9b-1024.json` |
 | 32 GB | 22.96 GiB | FLUX.1-Krea-dev | 15.21 GiB | 20.04 GiB | 20.04 GiB | 19.19 GiB | MEASURED | target | host caps | `bench/results/tiers/krea-dev-1024.json` |
+| 32 GB | 22.96 GiB | Qwen-Image-2.1 | 9.06 GiB | 20.42 GiB | 20.42 GiB | 19.72 GiB | MEASURED | target | host caps | `bench/results/tiers/qwen-image-2.1-1024.json` |
 | 32 GB | 22.96 GiB | FLUX.1-schnell | 15.19 GiB | 19.78 GiB | 19.78 GiB | 19.03 GiB | MEASURED | target | host caps | `bench/results/tiers/schnell-1024.json` |
 | 32 GB | 22.96 GiB | Z-Image | 7.80 GiB | 13.15 GiB | 13.15 GiB | 12.65 GiB | MEASURED | target | host caps | `bench/results/tiers/z-image-1024.json` |
 | 32 GB | 22.96 GiB | Z-Image-Turbo | 7.80 GiB | 13.11 GiB | 13.11 GiB | 12.20 GiB | MEASURED | target | host caps | `bench/results/tiers/z-image-turbo-1024.json` |
 | 24 GB | 14.50 GiB | FLUX.2-klein-base-9B | not recorded | at least 14.64 GiB (stopped after 28.5 s) | at least 14.64 GiB | at least 14.26 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/flux2-klein-base-9b-1024-tier24.json` |
+| 16 GB | 9.17 GiB | Qwen-Image-2.1 | not recorded | at least 9.28 GiB (stopped after 4.4 s) | at least 8.90 GiB | at least 9.28 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/qwen-image-2.1-1024-tier16.json` |
+| 24 GB | 14.50 GiB | Qwen-Image-2.1 | not recorded | at least 14.59 GiB (stopped after 4.8 s) | at least 14.59 GiB | at least 14.31 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/qwen-image-2.1-1024-tier24.json` |
 | 16 GB | 9.17 GiB | Z-Image-Turbo | not recorded | at least 9.26 GiB (stopped after 4.7 s) | at least 9.26 GiB | at least 8.81 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/z-image-turbo-1024-tier16.json` |
 <!-- /bench:tier-table -->
 

@@ -1,0 +1,144 @@
+{
+ "model": "qwen-image-2.1",
+ "purpose": "the 1024² runs the Qwen-Image 2.1 memory constants were calibrated on (mlx_dfloat.mflux.qwen21.memory)",
+ "df11": "mingyi456/Qwen-Image-2.1-DF11-ComfyUI@1b22a3a1f96293f3b328d03abe22ab2e51cbd9cc",
+ "base": "Qwen/Qwen-Image-2.1@d26bb61231c349cf6b7896fa83353113880e1ba3",
+ "prompt": "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water",
+ "size": 1024,
+ "seed": 42,
+ "text_tokens": 33,
+ "device": "Apple M1 Max, 32 GB",
+ "macos": "27.0.1",
+ "versions": {
+  "mlx": "0.32.2",
+  "mflux": "0.20.0"
+ },
+ "footprint_peaks_label": "OS phys_footprint in bytes, the peak of each phase; for the 40-step and identity runs the run's watched peak, reached in the VAE phase",
+ "constants_from": {
+  "encode": "derisk-1",
+  "denoise": "ab-new-limit-1",
+  "vae": "ab-old-limit-2"
+ },
+ "runs": [
+  {
+   "label": "derisk-1",
+   "date": "2026-10-08",
+   "run": "the first de-risk run: one step at guidance 4 with the negative prompt \" \" (two transformer calls), the VAE decode on the resident set",
+   "steps": 1,
+   "cache_limit": 1859346402,
+   "footprint_peaks": {
+    "encode": 15857938288,
+    "denoise": 13526704528,
+    "vae": 22139643024
+   }
+  },
+  {
+   "label": "ab-new-limit-1",
+   "date": "2026-10-08",
+   "run": "cache-limit A/B, the planner's limit: one step at guidance 4 with the negative prompt \" \" (two transformer calls), the VAE decode on the resident set",
+   "steps": 1,
+   "cache_limit": 2731761634,
+   "footprint_peaks": {
+    "encode": 15857561480,
+    "denoise": 13939106072,
+    "vae": 21755487280
+   }
+  },
+  {
+   "label": "ab-old-limit-1",
+   "date": "2026-10-08",
+   "run": "cache-limit A/B, the earlier limit: one step at guidance 4 with the negative prompt \" \" (two transformer calls), the VAE decode on the resident set",
+   "steps": 1,
+   "cache_limit": 1859346402,
+   "footprint_peaks": {
+    "encode": 15868063600,
+    "denoise": 13943660944,
+    "vae": 22586942584
+   }
+  },
+  {
+   "label": "ab-new-limit-2",
+   "date": "2026-10-08",
+   "run": "cache-limit A/B, the planner's limit: one step at guidance 4 with the negative prompt \" \" (two transformer calls), the VAE decode on the resident set",
+   "steps": 1,
+   "cache_limit": 2731761634,
+   "footprint_peaks": {
+    "encode": 15871209352,
+    "denoise": 13506126128,
+    "vae": 22074123432
+   }
+  },
+  {
+   "label": "ab-old-limit-2",
+   "date": "2026-10-08",
+   "run": "cache-limit A/B, the earlier limit: one step at guidance 4 with the negative prompt \" \" (two transformer calls), the VAE decode on the resident set",
+   "steps": 1,
+   "cache_limit": 1859346402,
+   "footprint_peaks": {
+    "encode": 15866245000,
+    "denoise": 13633331456,
+    "vae": 22788580400
+   }
+  },
+  {
+   "label": "measured-40-steps-1",
+   "date": "2026-10-08",
+   "run": "mlx-dfloat generate --tier 32: 40 steps, guidance 1.0 (one transformer call per step)",
+   "steps": 40,
+   "cache_limit": 1859346402,
+   "footprint_peaks": {
+    "vae": 21942805432
+   }
+  },
+  {
+   "label": "measured-40-steps-2",
+   "date": "2026-10-08",
+   "run": "mlx-dfloat generate --tier 32: 40 steps, guidance 1.0 (one transformer call per step)",
+   "steps": 40,
+   "cache_limit": 2731761634,
+   "footprint_peaks": {
+    "vae": 21832147968
+   }
+  },
+  {
+   "label": "identity-4-steps-cfg-1",
+   "date": "2026-10-08",
+   "run": "the identity check's df11 side: 4 steps, guidance 4 with the negative prompt \" \"",
+   "steps": 4,
+   "cache_limit": 1859346402,
+   "footprint_peaks": {
+    "vae": 21977228264
+   }
+  },
+  {
+   "label": "identity-4-steps-cfg-2",
+   "date": "2026-10-08",
+   "run": "the identity check's df11 side: 4 steps, guidance 4 with the negative prompt \" \"",
+   "steps": 4,
+   "cache_limit": 2731761634,
+   "footprint_peaks": {
+    "vae": 22065292384
+   }
+  },
+  {
+   "label": "measured-40-steps-final",
+   "date": "2026-10-08",
+   "run": "mlx-dfloat generate --tier 32: 40 steps, guidance 1.0 (one transformer call per step)",
+   "steps": 40,
+   "cache_limit": 2731761634,
+   "footprint_peaks": {
+    "vae": 21929337856
+   }
+  },
+  {
+   "label": "identity-4-steps-cfg-final",
+   "date": "2026-10-08",
+   "run": "the identity check's df11 side: 4 steps, guidance 4 with the negative prompt \" \"",
+   "steps": 4,
+   "cache_limit": 2731761634,
+   "footprint_peaks": {
+    "vae": 21935465568
+   }
+  }
+ ]
+}
