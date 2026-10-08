@@ -801,16 +801,37 @@ def test_finish_writes_the_report_with_the_home_directory_as_a_tilde(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("model", "steps"), [("schnell", 4), ("dev", 25), ("z-image", 50), ("z-image-turbo", 9)]
+    ("model", "steps"),
+    [
+        ("schnell", 4),
+        ("dev", 25),
+        ("z-image", 50),
+        ("z-image-turbo", 9),
+        ("flux2-klein-base-4b", 50),
+        ("flux2-klein-4b", 4),
+        ("flux2-klein-base-9b", 50),
+        ("flux2-klein-9b", 4),
+    ],
 )
 def test_default_steps_follow_mflux_per_model(model, steps):
-    # Bug caught: Z-Image falling back to FLUX's 25 (mflux 0.20 cli/defaults/defaults.py:55-56: 50 and 9).
+    # Bug caught: Z-Image falling back to FLUX's 25 (mflux 0.20 cli/defaults/defaults.py:55-56: 50 and 9), or a
+    # Klein base on the distilled 4 steps (defaults.py:41-45: distilled 4, base 50).
     assert gen._steps(gen.build_parser().parse_args(["--model", model, "--prompt", "p"])) == steps
 
 
 def test_the_model_choices_are_the_registry_names():
     # Bug caught: --model still limited to the FLUX.1 names (z-image refused by argparse).
-    for name in ("schnell", "dev", "krea-dev", "z-image", "z-image-turbo"):
+    for name in (
+        "schnell",
+        "dev",
+        "krea-dev",
+        "z-image",
+        "z-image-turbo",
+        "flux2-klein-base-4b",
+        "flux2-klein-4b",
+        "flux2-klein-base-9b",
+        "flux2-klein-9b",
+    ):
         assert gen.build_parser().parse_args(["--model", name, "--prompt", "p"]).model == name
     with pytest.raises(SystemExit):
         gen.build_parser().parse_args(["--model", "z-image-edit", "--prompt", "p"])
@@ -866,6 +887,111 @@ def test_the_negative_prompt_warnings_follow_the_model_and_the_guidance(tmp_path
     assert "warning" not in capsys.readouterr().err
     _generate_kwargs("schnell", tmp_path, "--negative-prompt", "blurry")
     assert "--negative-prompt is ignored" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("model", ["flux2-klein-4b", "flux2-klein-9b"])
+def test_a_distilled_klein_refuses_another_guidance(model, tmp_path, capsys):
+    # Bug caught: --guidance 4 reaching a distilled Klein (mflux's own CLI exits 2 there, flux2_generate.py:74-75),
+    # or the refusal coming after the caps or the model build (minutes and gigabytes spent before the error).
+    built = []
+    args = gen.build_parser().parse_args(
+        ["--model", model, "--prompt", "p", "--guidance", "4", "--output", str(tmp_path / "o.png")]
+    )
+    code = gen.run(
+        args,
+        model_factory=lambda **kw: built.append(kw),
+        install_caps=lambda: pytest.fail("caps installed before the refusal"),
+        watchdog_factory=lambda *a, **k: pytest.fail("watchdog started before the refusal"),
+        resolve_output=_resolve,
+        **_host_kwargs(),
+    )
+    assert code == 2
+    assert built == []
+    label = {"flux2-klein-4b": "FLUX.2-klein-4B", "flux2-klein-9b": "FLUX.2-klein-9B"}[model]
+    assert f"error: --guidance: {label} is a distilled model and runs at guidance 1.0 only" in (
+        capsys.readouterr().err
+    )
+
+
+@pytest.mark.parametrize("extra", [[], ["--guidance", "1.0"], ["--guidance", "1"]])
+def test_a_distilled_klein_accepts_guidance_one_and_the_default(extra, tmp_path):
+    # Bug caught: the refusal firing on the default (no --guidance) or on an explicit 1.0, or the distilled model
+    # getting a guidance other than mflux's 1.0 (flux2_generate.py:63-64).
+    call = _generate_kwargs("flux2-klein-4b", tmp_path, *extra)
+    assert call["guidance"] == 1.0
+    assert call["num_inference_steps"] == 4
+    assert call["scheduler"] == "flow_match_euler_discrete"
+
+
+def test_a_base_klein_passes_guidance_through_without_a_negative_prompt(tmp_path, capsys):
+    # Bug caught: a base Klein's --guidance 4 refused like a distilled one, or a negative_prompt keyword sent to
+    # Flux2Klein.generate_image (which has none: flux2_klein.py:50-63, a TypeError at the call).
+    call = _generate_kwargs(
+        "flux2-klein-base-9b", tmp_path, "--guidance", "4", "--negative-prompt", "blurry"
+    )
+    assert call["guidance"] == 4.0
+    assert call["num_inference_steps"] == 50
+    assert "negative_prompt" not in call
+    assert "--negative-prompt is ignored" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("model", ["flux2-klein-base-4b", "flux2-klein-9b"])
+def test_a_klein_refuses_a_scheduler_before_anything_runs(model, tmp_path, capsys):
+    # Bug caught (review 2026-10-08): --scheduler linear reaching a Klein model, whose mflux command has no scheduler
+    # flag and always runs flow_match_euler_discrete (models/flux2/cli/flux2_generate.py): LinearScheduler.step ignores
+    # the sigmas Klein passes (linear_scheduler.py:56-58), a sampling path with no identity evidence.
+    built = []
+    args = gen.build_parser().parse_args(
+        [
+            "--model",
+            model,
+            "--prompt",
+            "p",
+            "--scheduler",
+            "linear",
+            "--output",
+            str(tmp_path / "o.png"),
+        ]
+    )
+    code = gen.run(
+        args,
+        model_factory=lambda **kw: built.append(kw),
+        install_caps=lambda: pytest.fail("caps installed before the refusal"),
+        watchdog_factory=lambda *a, **k: pytest.fail("watchdog started before the refusal"),
+        resolve_output=_resolve,
+        **_host_kwargs(),
+    )
+    assert code == 2
+    assert built == []
+    assert (
+        "error: --scheduler: mflux's FLUX.2 Klein command runs flow_match_euler_discrete only"
+        in capsys.readouterr().err
+    )
+
+
+def test_the_scheduler_refusal_is_klein_only(tmp_path):
+    # Bug caught: the Klein refusal put in the common list (FLUX.1's --scheduler, which mflux's FLUX.1 command takes,
+    # refused too).
+    assert _generate_kwargs("dev", tmp_path, "--scheduler", "linear")["scheduler"] == "linear"
+
+
+def test_a_klein_negative_prompt_warning_says_it_takes_no_custom_negative(tmp_path, capsys):
+    # Bug caught (review 2026-10-08): telling a base Klein user "this model has no negative branch" when guidance 4
+    # does run one (mflux's blank " ", flux2_klein.py:78-80); what Klein lacks is a custom negative prompt.
+    _generate_kwargs("flux2-klein-base-4b", tmp_path, "--guidance", "4", "--negative-prompt", "x")
+    err = capsys.readouterr().err
+    assert (
+        "warning: --negative-prompt is ignored: this model takes no custom negative prompt" in err
+    )
+    assert "no negative branch" not in err
+    _generate_kwargs("schnell", tmp_path, "--negative-prompt", "x")  # FLUX.1's wording unchanged
+    assert "this model has no negative branch" in capsys.readouterr().err
+
+
+def test_existing_models_ignore_the_fixed_guidance_check(tmp_path):
+    # Bug caught: the check firing for fixed_guidance=None (schnell's or Z-Image's --guidance refused).
+    assert _generate_kwargs("schnell", tmp_path, "--guidance", "7")["guidance"] == 7.0
+    assert _generate_kwargs("z-image-turbo", tmp_path, "--guidance", "2")["guidance"] == 2.0
 
 
 def test_the_watchdog_context_names_the_tier_and_label(tmp_path):

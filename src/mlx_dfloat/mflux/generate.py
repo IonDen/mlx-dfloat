@@ -118,7 +118,8 @@ def _add_arguments(p: argparse.ArgumentParser) -> None:
         "--steps",
         type=int,
         default=None,
-        help="denoise steps (default per model, as mflux: schnell 4, dev 25, z-image 50, z-image-turbo 9)",
+        help="denoise steps (default per model, as mflux: schnell 4, dev 25, z-image 50, z-image-turbo 9, "
+        "FLUX.2 Klein base 50, distilled 4)",
     )
     p.add_argument("--height", type=int, default=1024)
     p.add_argument("--width", type=int, default=1024)
@@ -126,10 +127,16 @@ def _add_arguments(p: argparse.ArgumentParser) -> None:
         "--guidance",
         type=float,
         default=None,
-        help="guidance (default per model, as mflux: FLUX.1 3.5, schnell and z-image-turbo ignore it; "
-        "z-image defaults to 0 for the base model, as mflux does; its model card suggests about 4)",
+        help="guidance (default per model, as mflux: FLUX.1 dev 3.5, ignored by schnell and z-image-turbo; "
+        "z-image 0, its model card suggests about 4; FLUX.2 Klein 1.0, where the base models take another "
+        "value such as 4 and the distilled ones refuse it)",
     )
-    p.add_argument("--scheduler", default=None, help="scheduler (default per model: FLUX.1 linear)")
+    p.add_argument(
+        "--scheduler",
+        default=None,
+        help="scheduler (default per model: FLUX.1 linear; FLUX.2 Klein always runs "
+        "flow_match_euler_discrete and refuses the flag)",
+    )
     p.add_argument(
         "--negative-prompt",
         default=None,
@@ -198,6 +205,8 @@ def _add_arguments(p: argparse.ArgumentParser) -> None:
     )
     family_flags = {f: r for fam in FAMILIES.values() for f, r in fam.refused_flags.items()}
     for flag, reason in {**REFUSED, **family_flags}.items():
+        if flag in p._option_string_actions:
+            continue  # a real option for the other families (FLUX.2 Klein refuses --scheduler); refused_option reads it
         p.add_argument(
             flag,
             *_REFUSED_ALIASES.get(flag, []),
@@ -217,6 +226,21 @@ def refused_option(args: argparse.Namespace) -> str | None:
         if getattr(args, flag.lstrip("-").replace("-", "_")) is not None:
             return f"{flag}: {reason}"
     return None
+
+
+def fixed_guidance_refusal(args: argparse.Namespace) -> str | None:
+    """Why ``--guidance`` is refused for this model, or None.
+
+    A distilled model runs at its one guidance only (FLUX.2 Klein's distilled models at 1.0, as mflux's own command
+    enforces); an absent ``--guidance`` is never refused.
+    """
+    e = entry(args.model)
+    if e.fixed_guidance is None or args.guidance is None or args.guidance == e.fixed_guidance:
+        return None
+    return (
+        f"--guidance: {e.label} is a distilled model and runs at guidance {e.fixed_guidance} only "
+        "(use a base model for guidance)"
+    )
 
 
 def ceiling_for(
@@ -361,15 +385,18 @@ def run(
     between them).
     """
     started = clock()
-    refused = refused_option(args)
+    refused = refused_option(args) or fixed_guidance_refusal(args)
     if refused is not None:
         print(f"error: {refused}", file=sys.stderr)
         return EXIT_ERROR
     if args.negative_prompt and not entry(args.model).uses_negative_prompt:
-        print(
-            "warning: --negative-prompt is ignored: this model has no negative branch",
-            file=sys.stderr,
+        # A base FLUX.2 Klein above guidance 1 does run a negative branch (mflux's blank " "); it takes no custom one.
+        why = (
+            "this model takes no custom negative prompt"
+            if entry(args.model).family == "flux2"
+            else "this model has no negative branch"
         )
+        print(f"warning: --negative-prompt is ignored: {why}", file=sys.stderr)
     elif args.negative_prompt and (_guidance(args) or 0.0) <= 1.0:
         print(
             "warning: --negative-prompt has no effect: classifier-free guidance runs only above "

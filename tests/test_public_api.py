@@ -65,3 +65,19 @@ def test_dfloat_zimage_is_reachable_lazily():
     from mlx_dfloat.mflux.zimage.model import DFloatZImage
 
     assert adapters.DFloatZImage is DFloatZImage
+
+
+def test_the_model_classes_stay_out_of_the_star_import():
+    # Bug caught: a model class added to __all__ (`from mlx_dfloat.mflux import *` would then need mflux).
+    import mlx_dfloat.mflux as adapters
+
+    assert sorted(adapters.__all__) == ["DFloatModel", "require_mflux"]
+
+
+@pytest.mark.mflux
+def test_dfloat_flux2_klein_is_reachable_lazily():
+    # Bug caught: DFloatFlux2Klein missing from the lazy attribute hook (AttributeError on first use).
+    import mlx_dfloat.mflux as adapters
+    from mlx_dfloat.mflux.flux2.model import DFloatFlux2Klein
+
+    assert adapters.DFloatFlux2Klein is DFloatFlux2Klein

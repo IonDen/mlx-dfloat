@@ -18,7 +18,7 @@ class ModelEntry:
 
     name: str
     family: str
-    label: str  # "FLUX.1-schnell", "Z-Image", "Z-Image-Turbo" (tables, README)
+    label: str  # "FLUX.1-schnell", "Z-Image", "FLUX.2-klein-4B" (tables, README)
     df11_repo: str
     df11_revision: (
         str | None
@@ -29,6 +29,8 @@ class ModelEntry:
     default_scheduler: str | None  # None: the model's own rule
     cfg_two_calls: bool  # the step may call the transformer twice
     uses_negative_prompt: bool
+    # A distilled model runs at this guidance only (the CLI refuses any other); None: any guidance.
+    fixed_guidance: float | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -65,6 +67,18 @@ def _zimage_names() -> NameMap:
     return zimage_name_map()
 
 
+def _flux2_class() -> type:
+    from mlx_dfloat.mflux.flux2.model import DFloatFlux2Klein
+
+    return DFloatFlux2Klein
+
+
+def _flux2_names() -> NameMap:
+    from mlx_dfloat.mflux.flux2.names import klein_name_map
+
+    return klein_name_map()
+
+
 FAMILIES: dict[str, FamilySpec] = {
     "flux1": FamilySpec(
         name="flux1",
@@ -77,6 +91,15 @@ FAMILIES: dict[str, FamilySpec] = {
         refused_flags={},
         load_model_class=_zimage_class,
         load_name_map=_zimage_names,
+    ),
+    "flux2": FamilySpec(
+        name="flux2",
+        # mflux 0.20.0's FLUX.2 Klein command has no scheduler flag (models/flux2/cli/flux2_generate.py).
+        refused_flags={
+            "--scheduler": "mflux's FLUX.2 Klein command runs flow_match_euler_discrete only"
+        },
+        load_model_class=_flux2_class,
+        load_name_map=_flux2_names,
     ),
 }
 
@@ -94,6 +117,32 @@ def _flux(name: str, label: str, steps: int, df11: str, base: str) -> ModelEntry
         default_scheduler="linear",
         cfg_two_calls=False,
         uses_negative_prompt=False,
+    )
+
+
+def _klein(name: str, label: str, steps: int, revision: str, *, base: bool) -> ModelEntry:
+    """A FLUX.2 Klein entry, with mflux 0.20.0's defaults for it.
+
+    The default steps are 50 for a base model and 4 for a distilled one; guidance defaults to 1.0, and the scheduler
+    is mflux's fixed one. A base model calls the transformer twice per step above guidance 1.0 (the negative is
+    mflux's own blank prompt, so there is no negative prompt to pass); a distilled model runs at 1.0 only, as mflux's
+    command enforces.
+    """
+    # Sources in mflux 0.20.0: the steps in cli/defaults/defaults.py; guidance 1.0 and the scheduler in
+    # models/flux2/cli/flux2_generate.py and Flux2Klein.generate_image.
+    return ModelEntry(
+        name=name,
+        family="flux2",
+        label=label,
+        df11_repo=f"mingyi456/{label}-DF11",
+        df11_revision=revision,
+        base_repo=f"black-forest-labs/{label}",
+        default_steps=steps,
+        default_guidance=1.0,
+        default_scheduler="flow_match_euler_discrete",
+        cfg_two_calls=base,
+        uses_negative_prompt=False,
+        fixed_guidance=None if base else 1.0,
     )
 
 
@@ -141,6 +190,34 @@ MODELS: dict[str, ModelEntry] = {
             cfg_two_calls=False,
             uses_negative_prompt=False,
         ),
+        _klein(
+            "flux2-klein-base-4b",
+            "FLUX.2-klein-base-4B",
+            50,
+            "b887c73c5cbc3f4d50887a04c41509fb25a0a0f0",
+            base=True,
+        ),
+        _klein(
+            "flux2-klein-4b",
+            "FLUX.2-klein-4B",
+            4,
+            "d29a2c249ff0afeb678da101e707bd134596c96f",
+            base=False,
+        ),
+        _klein(
+            "flux2-klein-base-9b",
+            "FLUX.2-klein-base-9B",
+            50,
+            "50dc8e7cba7a41eeaf9e9c4fcec557d1a6888ded",
+            base=True,
+        ),
+        _klein(
+            "flux2-klein-9b",
+            "FLUX.2-klein-9B",
+            4,
+            "45a202a0bd19ec01ce8db2d5236890586cbac6a6",
+            base=False,
+        ),
     )
 }
 
@@ -168,7 +245,7 @@ def DFloatModel(name: str, /, **kwargs: Any) -> Any:  # noqa: N802
     """A ready DFloat11 model for a registered name: the family's model class built with ``name`` and ``kwargs``.
 
     Imports mflux. ``DFloatModel("z-image-turbo")`` returns a ``DFloatZImage``; ``DFloatModel("schnell")`` a
-    ``DFloatFlux1``.
+    ``DFloatFlux1``; ``DFloatModel("flux2-klein-4b")`` a ``DFloatFlux2Klein``.
 
     Args:
         name: A registered model name, such as ``"schnell"`` or ``"z-image-turbo"``.
