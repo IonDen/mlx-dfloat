@@ -937,3 +937,52 @@ def test_zimage_layout_single_file_with_a_nonblock_group_against_a_diffusers_ind
     assert verify(df11, bf16, out, key=KEY) == 0
     s = _summary(out)
     assert (s["compared"], s["extras_compared"], s["uncovered_originals"]) == (5, 2, [])
+
+
+def test_klein_layout_empty_list_groups_against_an_index_less_original(tmp_path):
+    # Bug caught: an empty pattern list ("context_embedder": [], the FLUX.2 Klein DF11 config) not read as the matrix
+    # context_embedder.weight (that original left uncovered, exit 2), or an index-less single-file original (FLUX.2
+    # base-4B's transformer is one file with no index) not enumerated.
+    rng = np.random.default_rng(13)
+    groups = {
+        "transformer_blocks.0": [random_bf16(rng, (8, 4)), random_bf16(rng, (4, 8))],
+        "single_transformer_blocks.0": [random_bf16(rng, (8, 4)), random_bf16(rng, (4, 8))],
+        "context_embedder": [random_bf16(rng, (4, 6))],
+        "norm_out.linear": [random_bf16(rng, (6, 4))],
+    }
+    df11 = write_checkpoint(
+        tmp_path / "df11",
+        groups=groups,
+        patterns={
+            r"transformer_blocks\.\d+": ("attn.to_q", "attn.to_out.0"),
+            r"single_transformer_blocks\.\d+": ("attn.to_qkv_mlp_proj", "attn.to_out"),
+            "context_embedder": (),
+            "norm_out.linear": (),
+        },
+        extras={"x_embedder.weight": NORM},
+        single_file=True,
+    )
+    originals = {
+        "x_embedder.weight": NORM,
+        "context_embedder.weight": groups["context_embedder"][0],
+        "norm_out.linear.weight": groups["norm_out.linear"][0],
+    }
+    (
+        originals["transformer_blocks.0.attn.to_q.weight"],
+        originals["transformer_blocks.0.attn.to_out.0.weight"],
+    ) = groups["transformer_blocks.0"]
+    (
+        originals["single_transformer_blocks.0.attn.to_qkv_mlp_proj.weight"],
+        originals["single_transformer_blocks.0.attn.to_out.weight"],
+    ) = groups["single_transformer_blocks.0"]
+    bf16 = tmp_path / "bf16"
+    bf16.mkdir()
+    mx.save_safetensors(
+        str(bf16 / "diffusion_pytorch_model.safetensors"),
+        {k: mx.array(v).view(mx.bfloat16) for k, v in originals.items()},
+    )
+    out = tmp_path / "out"
+    assert verify(df11, bf16, out, key=KEY) == 0
+    s = _summary(out)
+    # 2 + 2 block matrices + 2 one-matrix groups = 6 compared; x_embedder the one extra.
+    assert (s["compared"], s["extras_compared"], s["uncovered_originals"]) == (6, 1, [])
