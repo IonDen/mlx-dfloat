@@ -1,7 +1,7 @@
 """The block seam: assign one block's weights, run it, evaluate per policy, restore the placeholders."""
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -155,14 +155,40 @@ def _seam_eval(state: SeamState, out: Any) -> None:
         state.prev = out
 
 
-def run_block(state: SeamState, block_name: str, block: Any, run: Callable[[], Any]) -> Any:
+class BeforeBlock(Protocol):
+    """The optional provider hook ``before_block``, called with a block's inputs before its weights are requested.
+
+    A provider that defines it can act on the block's inputs first (Krea 2's per-call decode evaluates block 0's
+    inputs and releases the non-block weights there); a provider without it is asked for the weights and nothing else.
+    """
+
+    def __call__(self, block_name: str, args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> None:
+        """Act on ``block_name``'s call arguments; the weights are requested after it returns."""
+        ...
+
+
+def run_block(
+    state: SeamState,
+    block_name: str,
+    block: Any,
+    run: Callable[[], Any],
+    *,
+    inputs: tuple[tuple[Any, ...], Mapping[str, Any]] | None = None,
+) -> Any:
     """Assign the block's weights, run it, evaluate per policy, restore the placeholders (also on a raise).
+
+    ``inputs`` are the block's call arguments, handed to the provider's ``before_block`` hook when it has one (see
+    ``BeforeBlock``); a seam that does not pass them hands the hook empty ones, new for each call.
 
     Raises:
         DFloatIntegrationError: The provider's dict does not cover the block's matrices, or a weight's
             shape does not match the block.
     """
     shapes = state.shapes[block_name]
+    before: BeforeBlock | None = getattr(state.provider, "before_block", None)
+    if before is not None:
+        args, kwargs = ((), {}) if inputs is None else inputs
+        before(block_name, args, kwargs)
     t_decode_start = time.perf_counter()
     weights = state.provider.weights_for(block_name, shapes)
     t_decode_end = time.perf_counter()

@@ -46,6 +46,8 @@ class BlockSeam:
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Run the block with its weights assigned, evaluated per policy, placeholders restored.
 
+        The call's arguments reach the provider's optional ``before_block`` hook (``seam.BeforeBlock``).
+
         Raises:
             DFloatIntegrationError: Nothing is attached.
         """
@@ -56,7 +58,13 @@ class BlockSeam:
                 f"{binding.name}: call attach(provider, shapes) before running a step"
             )
         parent: Any = super()
-        return seam.run_block(state, binding.name, self, lambda: parent.__call__(*args, **kwargs))
+        return seam.run_block(
+            state,
+            binding.name,
+            self,
+            lambda: parent.__call__(*args, **kwargs),
+            inputs=(args, kwargs),
+        )
 
 
 @cache

@@ -133,3 +133,59 @@ def test_a_raise_inside_a_block_restores_placeholders_and_clears_pending_words()
         tf(mx.ones((1, 2, 5)), mx.ones((1, 2, 4)), mx.ones((1, 4)))  # D=4 blocks given width 5
     assert provider.pending == []
     assert tf.noise_refiner[0].attention.to_q.weight.size == 0  # the block that raised
+
+
+class _HookedProvider(ResidentProvider):
+    """A resident provider with the optional ``before_block`` hook: records the hook and the request in order."""
+
+    def __init__(self, per_block, rec):
+        super().__init__(per_block)
+        self.rec = rec
+
+    def before_block(self, block_name, args, kwargs):
+        self.rec.events.append(("before", block_name, tuple(id(a) for a in args), dict(kwargs)))
+
+    def weights_for(self, block_name, shapes):
+        self.rec.events.append(("weights", block_name))
+        return super().weights_for(block_name, shapes)
+
+
+def test_a_providers_before_block_hook_runs_before_each_request_with_the_blocks_own_inputs():
+    # Bug caught: the hook called after the weights are requested (a provider releasing memory there would release
+    # it after the block's decode, not before), called with another block's inputs, or not called for every block.
+    # Block 0 of layers is called with (concat(x, cap), t_emb); layers.1 with layers.0's output.
+    rec = Recorder()
+    tf, shapes = _seamed(rec)
+    x, cap, t_emb = zimage_inputs()
+    tf.attach(_HookedProvider(resident_dicts(shapes), rec), shapes)
+    mx.eval(tf(x, cap, t_emb))
+    runs = [e[1] for e in rec.events if e[0] == "run"]
+    order = [(e[0], e[1]) for e in rec.events if e[0] != "run"]
+    names = ["noise_refiner.0", "context_refiner.0", "layers.0", "layers.1"]
+    assert order == [step for n in names for step in (("before", n), ("weights", n))]
+    hooks = {e[1]: e[2:] for e in rec.events if e[0] == "before"}
+    assert hooks["noise_refiner.0"] == ((id(x), id(t_emb)), {})
+    assert hooks["context_refiner.0"][0][0] != id(
+        cap
+    )  # cap went through the resident cap_embedder first
+    assert hooks["layers.1"] == ((runs[2], id(t_emb)), {})
+
+
+def test_without_the_hook_the_seam_requests_the_weights_and_nothing_else():
+    # Bug caught: the seam calling something new on a provider that has no hook (every family before Krea 2 runs one
+    # of these), e.g. a hook looked up with a default that is called, or the inputs evaluated for every provider.
+    # The provider records every attribute the seam reads during a step.
+    seen = []
+
+    class Watching(ResidentProvider):
+        def __getattribute__(self, name):
+            if not name.startswith("_"):
+                seen.append(name)
+            return super().__getattribute__(name)
+
+    rec = Recorder()
+    tf, shapes = _seamed(rec)
+    tf.attach(Watching(resident_dicts(shapes)), shapes)
+    seen.clear()
+    mx.eval(tf(*zimage_inputs()))
+    assert seen == ["pending"] + ["before_block", "weights_for"] * 4
