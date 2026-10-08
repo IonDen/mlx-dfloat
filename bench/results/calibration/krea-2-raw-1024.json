@@ -1,0 +1,252 @@
+{
+ "model": "krea-2-raw",
+ "purpose": "the 1024² runs the Krea 2 memory constants were calibrated on (mlx_dfloat.mflux.krea2.memory); one set of constants serves both models, the runs are recorded per model. The constants come from the runs of the shipped mechanism only (mechanism 'shipped'); the VAE term also counts the resident run, whose VAE phase ran with the set dropped like every other. The superseded runs measured earlier per-call code and are kept as history, never as a constant's source. The git fields name development commits that were folded into the 0.2.0 release; they are kept to tell the runs apart and cannot be fetched from the public repository.",
+ "df11": "mingyi456/Krea-2-Raw-DF11-ComfyUI@8320616b25ac9340a830a7fb21f1b0237e160e66",
+ "base": "krea/Krea-2-Raw@6b0ece7fffb640c5e3bcbe0a7f10f66b8e60a603",
+ "calls_per_step": 2,
+ "prompt": "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water",
+ "size": 1024,
+ "seed": 42,
+ "text_tokens": 30,
+ "device": "Apple M1 Max, 32 GB",
+ "macos": "27.0.1",
+ "versions": {
+  "mlx": "0.32.2",
+  "mflux": "0.20.0"
+ },
+ "footprint_peaks_label": "OS phys_footprint in bytes, the peak of each phase (the de-risk runs: 1024², the set dropped before the VAE decode; a multi-step run's denoise peak is over all its steps); for the MEASURED, card-recipe and identity runs the run's watched peak, reached in the denoise phase",
+ "sizes_label": "FamilySizes as mlx_dfloat.mflux.krea2.memory.sizes_for computes them in the run's non-block mode: nonblock is 0 when the seven groups are decoded per call, 1_325_400_064 when they stay resident; encoders is the language model's evaluated layers (layer 35 and the final norm never run), not the 8_044_936_192 B of every language-model tensor",
+ "constants_from": {
+  "encode": "confirm-raw-24711fb",
+  "vae": "derisk-raw-1"
+ },
+ "runs": [
+  {
+   "label": "derisk-raw-2",
+   "date": "2026-10-08",
+   "git": "c555f5031aecd06d9c2410c0ac5253b970254580",
+   "mechanism": "shipped: the non-block groups decoded per call, MLX's cache emptied and drained at each call's start and again before block 0's decode, after the non-block release",
+   "run": "the de-risk run of the shipped code: one step at guidance 3.5 with mflux's \" \" negative (two batch-1 transformer calls), at the planner's limit for the probe's allowance",
+   "steps": 1,
+   "calls_per_step": 2,
+   "guidance": 3.5,
+   "nonblock": "per-call",
+   "cache_limit": 4500000000,
+   "footprint_peaks": {
+    "encode": 8595823360,
+    "set_load": 18097109152,
+    "denoise": 22701701280,
+    "vae": 10163669128
+   },
+   "after_build": {
+    "footprint": 527484128,
+    "mlx_active": 4805792,
+    "mlx_cache": 4974
+   },
+   "mlx_encode_held": 7946299264,
+   "sizes": {
+    "compressed": 17540930560,
+    "extras": 4560024,
+    "nonblock": 0,
+    "encoders": 7843074560,
+    "vae": 507591892
+   },
+   "denoise_footprint_after_each_step": [
+    22701701280
+   ]
+  },
+  {
+   "label": "measured-25-steps",
+   "date": "2026-10-08",
+   "git": "f0f348fd2f333304a4cee47bb9cd64db9dd87d3c",
+   "mechanism": "shipped: the non-block groups decoded per call, MLX's cache emptied and drained at each call's start and again before block 0's decode, after the non-block release",
+   "run": "the MEASURED row (mlx-dfloat generate --tier 32, the final code): the default call, 25 steps at guidance 1.0 (one call per step), the set dropped before the VAE decode; the watched peak, reached in the denoise phase; bench/results/tiers/krea-2-raw-1024.json",
+   "steps": 25,
+   "calls_per_step": 1,
+   "guidance": 1.0,
+   "nonblock": "per-call",
+   "cache_limit": 4500000000,
+   "footprint_peaks": {
+    "denoise": 22713743304
+   },
+   "sizes": {
+    "compressed": 17540930560,
+    "extras": 4560024,
+    "nonblock": 0,
+    "encoders": 7843074560,
+    "vae": 507591892
+   }
+  },
+  {
+   "label": "card-52-steps-cfg",
+   "date": "2026-10-08",
+   "git": "f0f348fd2f333304a4cee47bb9cd64db9dd87d3c",
+   "mechanism": "shipped: the non-block groups decoded per call, MLX's cache emptied and drained at each call's start and again before block 0's decode, after the non-block release",
+   "run": "the model card's recipe (mlx-dfloat generate --tier 32, the final code): 52 steps at guidance 3.5 with mflux's \" \" negative (two calls per step), the set dropped before the VAE decode; the watched peak, reached in the denoise phase; bench/results/recipes/krea-2-raw-1024-52steps-guidance3.5.json",
+   "steps": 52,
+   "calls_per_step": 2,
+   "guidance": 3.5,
+   "nonblock": "per-call",
+   "cache_limit": 4500000000,
+   "footprint_peaks": {
+    "denoise": 22714513664
+   },
+   "sizes": {
+    "compressed": 17540930560,
+    "extras": 4560024,
+    "nonblock": 0,
+    "encoders": 7843074560,
+    "vae": 507591892
+   }
+  },
+  {
+   "label": "identity-4-steps-cfg",
+   "date": "2026-10-08",
+   "git": "e3a508e6d37a3946253801258a9200ff03a708a4",
+   "mechanism": "shipped: the non-block groups decoded per call, MLX's cache emptied and drained at each call's start and again before block 0's decode, after the non-block release",
+   "run": "the identity check's df11 side: 4 steps at guidance 3.5 with \" \" (two calls per step), the set dropped before the VAE decode; the watched peak, reached in the denoise phase; bench/results/identity/krea-2-raw-1024/df11-result.json",
+   "steps": 4,
+   "calls_per_step": 2,
+   "guidance": 3.5,
+   "nonblock": "per-call",
+   "cache_limit": 4500000000,
+   "footprint_peaks": {
+    "denoise": 22711515080
+   },
+   "sizes": {
+    "compressed": 17540930560,
+    "extras": 4560024,
+    "nonblock": 0,
+    "encoders": 7843074560,
+    "vae": 507591892
+   }
+  },
+  {
+   "label": "confirm-raw-24711fb",
+   "date": "2026-10-08",
+   "git": "24711fbe86cc8c72e233735c26fb0f03ef11d2d6",
+   "mechanism": "shipped: the non-block groups decoded per call, MLX's cache emptied and drained at each call's start and again before block 0's decode, after the non-block release",
+   "run": "the confirmation run of the final code (the drain also waits for the GPU first): one step at guidance 3.5 with mflux's \" \" negative (two batch-1 calls), at the planner's limit for the probe's allowance",
+   "steps": 1,
+   "calls_per_step": 2,
+   "guidance": 3.5,
+   "nonblock": "per-call",
+   "cache_limit": 4500000000,
+   "footprint_peaks": {
+    "encode": 8598264624,
+    "set_load": 18099828728,
+    "denoise": 22704306168,
+    "vae": 10525591448
+   },
+   "after_build": {
+    "footprint": 528401632,
+    "mlx_active": 4805792,
+    "mlx_cache": 4974
+   },
+   "mlx_encode_held": 7953193856,
+   "sizes": {
+    "compressed": 17540930560,
+    "extras": 4560024,
+    "nonblock": 0,
+    "encoders": 7843074560,
+    "vae": 507591892
+   },
+   "denoise_footprint_after_each_step": [
+    22704306168
+   ]
+  },
+  {
+   "label": "derisk-raw-1",
+   "date": "2026-10-08",
+   "git": "d1aa9df996cee99356ffa3f2f01fdb0ebd16469c",
+   "mechanism": "resident: the non-block groups decoded once at set load and kept with the set",
+   "run": "the de-risk run, rung 1: the same step with the seven non-block groups resident (its denoise peak was over the gate line, so per-call decode followed); a VAE sample (the set is dropped before the decode in every mechanism)",
+   "steps": 1,
+   "calls_per_step": 2,
+   "guidance": 3.5,
+   "nonblock": "resident",
+   "cache_limit": 4500000000,
+   "footprint_peaks": {
+    "encode": 8599804744,
+    "set_load": 19426654152,
+    "denoise": 24218219864,
+    "vae": 11869477608
+   },
+   "after_build": {
+    "footprint": 530826464,
+    "mlx_active": 4805792,
+    "mlx_cache": 4974
+   },
+   "mlx_encode_held": 7942988392,
+   "sizes": {
+    "compressed": 17540930560,
+    "extras": 4560024,
+    "nonblock": 1325400064,
+    "encoders": 7843074560,
+    "vae": 507591892
+   }
+  },
+  {
+   "label": "history-v1-raw",
+   "date": "2026-10-08",
+   "git": "59c961bfb5b58cdb95198ef1bf4a5fb548300262",
+   "mechanism": "superseded (history): per-call decode released after block 0, no cache emptying",
+   "run": "the first per-call run (the same step)",
+   "steps": 1,
+   "calls_per_step": 2,
+   "guidance": 3.5,
+   "nonblock": "per-call",
+   "cache_limit": 4500000000,
+   "footprint_peaks": {
+    "encode": 8609733448,
+    "set_load": 18103810064,
+    "denoise": 24072009744,
+    "vae": 10396076024
+   },
+   "after_build": {
+    "footprint": 532530400,
+    "mlx_active": 4805792,
+    "mlx_cache": 4974
+   },
+   "mlx_encode_held": 7939351776,
+   "sizes": {
+    "compressed": 17540930560,
+    "extras": 4560024,
+    "nonblock": 0,
+    "encoders": 7843074560,
+    "vae": 507591892
+   }
+  },
+  {
+   "label": "history-mm1-raw",
+   "date": "2026-10-08",
+   "git": "bedba36cd0734655f48f7ac9b425ef3ae47235c0",
+   "mechanism": "superseded (history): per-call decode released before block 0 with a cache clear there, none at the call's start",
+   "run": "the second per-call run (the same step); its second call started on the first call's cached activations and the denoise peak sat on MLX's GC line",
+   "steps": 1,
+   "calls_per_step": 2,
+   "guidance": 3.5,
+   "nonblock": "per-call",
+   "cache_limit": 4500000000,
+   "footprint_peaks": {
+    "encode": 8599624448,
+    "set_load": 18099238928,
+    "denoise": 24135923728,
+    "vae": 10151200592
+   },
+   "after_build": {
+    "footprint": 528352480,
+    "mlx_active": 4805792,
+    "mlx_cache": 4974
+   },
+   "mlx_encode_held": 7946292096,
+   "sizes": {
+    "compressed": 17540930560,
+    "extras": 4560024,
+    "nonblock": 0,
+    "encoders": 7843074560,
+    "vae": 507591892
+   }
+  }
+ ]
+}

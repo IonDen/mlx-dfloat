@@ -1,0 +1,139 @@
+{
+ "exit_code": 0,
+ "output": "krea-2.png",
+ "memory_caps_gb": [
+  20,
+  22
+ ],
+ "model_kwargs": {
+  "model": "krea-2",
+  "df11_path": "~/.cache/huggingface/hub/models--mingyi456--Krea-2-Turbo-DF11-ComfyUI/snapshots/978da5fb7647bd222d33125993abd8fdc2840cfc",
+  "base_path": "~/.cache/huggingface/hub/models--krea--Krea-2-Turbo/snapshots/98e0fe118d17c9e3547fbb2e25acdbae2cadf7c7",
+  "eval_policy": "per-block",
+  "cache_limit": null,
+  "fit_check": true
+ },
+ "height": 1024,
+ "width": 1024,
+ "memory_ceiling_bytes": null,
+ "tier_gb": 32,
+ "label": "MEASURED",
+ "watchdog_ceiling_bytes": 30064771072,
+ "limits": {
+  "tier": {
+   "tier_gb": 32,
+   "ram_bytes": 34359738368,
+   "recommended_bytes": 26800603136,
+   "memory_limit_bytes": 32641751449,
+   "cache_limit_bytes": 25460572979,
+   "wired_limit_bytes": 0,
+   "reserve_bytes": 2147483648,
+   "budget_bytes": 26800603136,
+   "ceiling_bytes": 24653119488,
+   "fit_budget_bytes": 24653119488,
+   "budget_source": "device",
+   "is_host": true,
+   "label": "MEASURED"
+  },
+  "effective": {
+   "memory_limit_bytes": 23622320128,
+   "cache_limit_bytes": 32641751449,
+   "wired_limit_bytes": 21474836480
+  },
+  "applied": "host-caps"
+ },
+ "family": "krea2",
+ "model": "krea-2",
+ "df11": {
+  "root": "~/.cache/huggingface/hub/models--mingyi456--Krea-2-Turbo-DF11-ComfyUI/snapshots/978da5fb7647bd222d33125993abd8fdc2840cfc",
+  "repo_id": null,
+  "revision": "978da5fb7647bd222d33125993abd8fdc2840cfc",
+  "config_source": "header and spot checks match layout krea-2-turbo-comfyui (mingyi456/Krea-2-Turbo-DF11-ComfyUI@978da5fb7647bd222d33125993abd8fdc2840cfc)"
+ },
+ "base": {
+  "root": "~/.cache/huggingface/hub/models--krea--Krea-2-Turbo/snapshots/98e0fe118d17c9e3547fbb2e25acdbae2cadf7c7",
+  "repo_id": null,
+  "revision": "98e0fe118d17c9e3547fbb2e25acdbae2cadf7c7"
+ },
+ "layout": "header and spot checks match layout krea-2-turbo-comfyui (mingyi456/Krea-2-Turbo-DF11-ComfyUI@978da5fb7647bd222d33125993abd8fdc2840cfc)",
+ "nonblock": "per-call",
+ "eval_policy": "per-block",
+ "eval_policy_status": "measured",
+ "cfg_calls_per_step": 1,
+ "text_tokens": 30,
+ "predict": "uncompiled",
+ "nonblock_groups": [
+  "tmlp",
+  "tproj",
+  "txtfusion.layerwise_blocks.0",
+  "txtfusion.layerwise_blocks.1",
+  "txtfusion.refiner_blocks.0",
+  "txtfusion.refiner_blocks.1",
+  "txtmlp"
+ ],
+ "cache_limit_in_force": 4500000000,
+ "drop_set_before_vae": true,
+ "fit": {
+  "label": "predicted",
+  "phases": {
+   "encode": 8595823360,
+   "denoise": 24242523532,
+   "vae": 11869477608
+  },
+  "peak_phase": "denoise",
+  "peak_bytes": 24242523532,
+  "budget_bytes": 24653119488,
+  "fits": true
+ },
+ "sizes": {
+  "compressed": 17540075298,
+  "extras": 4560024,
+  "nonblock": 0,
+  "encoders": 7843074560,
+  "vae": 507591892
+ },
+ "peaks": {
+  "label": "sampled at phase boundaries",
+  "encode": {
+   "footprint_start": 562808056,
+   "mlx_peak": 7955707996,
+   "footprint_end": 7916919552,
+   "active_at_start": 4823348
+  },
+  "set_load": {
+   "footprint_start": 7916919552,
+   "mlx_peak": 17549525844,
+   "footprint_end": 18120767600,
+   "active_at_start": 8754468
+  },
+  "denoise": {
+   "footprint_start": 18120767600,
+   "mlx_peak": 21242923578,
+   "footprint_end": 22736402568,
+   "active_at_start": 17549525844
+  },
+  "vae": {
+   "footprint_start": 10848966560,
+   "mlx_peak": 9583229094,
+   "footprint_end": 4962453400,
+   "active_at_start": 11901082
+  }
+ },
+ "decode_launches": 224,
+ "lifecycle": {
+  "encoder_loads": 0,
+  "encoder_seconds": 0.0,
+  "set_loads": 1,
+  "set_seconds": 30.84187958302209,
+  "forced_set_drops": 0
+ },
+ "versions": {
+  "mlx": "0.32.2",
+  "mflux": "0.20.0"
+ },
+ "footprint_peak_bytes": 22736402568,
+ "footprint_peak_label": "OS phys_footprint, sampled every 0.05 s by the watchdog",
+ "watched_peak_bytes": 22736402568,
+ "mlx_peak_bytes": 22158626378,
+ "elapsed_seconds": 305.676
+}

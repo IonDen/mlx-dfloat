@@ -1377,3 +1377,194 @@ def test_an_empty_prompt_is_still_passed_to_the_other_families(tmp_path):
     )
     assert code == 0
     assert log[0][1]["prompt"] == ""
+
+
+# --- Krea 2 ------------------------------------------------------------------------------------------------------
+
+
+def test_krea_negative_prompt_at_guidance_half_does_not_warn_it_has_no_effect(tmp_path, capsys):
+    # Bug caught (Review Focus 1): the "runs only above guidance 1.0" warning for Krea 2 at 0.5, where mflux does run
+    # classifier-free guidance (any guidance other than 1.0, prompt_encoder.py:33), so the negative prompt is used.
+    call = _generate_kwargs("krea-2", tmp_path, "--guidance", "0.5", "--negative-prompt", "blurry")
+    assert (call["guidance"], call["negative_prompt"]) == (0.5, "blurry")
+    assert "has no effect" not in capsys.readouterr().err
+
+
+def test_krea_negative_prompt_at_guidance_1_warns_with_the_default(tmp_path, capsys):
+    # Bug caught: the warning missing at exactly 1.0 (mflux runs no negative branch there), or worded with the other
+    # families' "only above 1.0" (wrong for Krea 2, where 0.5 runs it too).
+    _generate_kwargs("krea-2", tmp_path, "--guidance", "1", "--negative-prompt", "blurry")
+    err = capsys.readouterr().err
+    assert (
+        "warning: --negative-prompt has no effect: classifier-free guidance runs only for a guidance other than "
+        "1.0 (the default is 1.0)"
+    ) in err
+    assert "only above" not in err
+
+
+def test_flux_dev_negative_prompt_at_guidance_half_still_warns(tmp_path, capsys):
+    # Bug caught: the Krea rule applied to every family (FLUX.1 dev takes no negative prompt; Z-Image at 0.5 runs no
+    # CFG, so its warning must stay).
+    _generate_kwargs("z-image", tmp_path, "--guidance", "0.5", "--negative-prompt", "blurry")
+    assert (
+        "warning: --negative-prompt has no effect: classifier-free guidance runs only above guidance 1.0"
+        in capsys.readouterr().err
+    )
+    _generate_kwargs("dev", tmp_path, "--guidance", "0.5", "--negative-prompt", "blurry")
+    assert "warning: --negative-prompt is ignored" in capsys.readouterr().err
+
+
+def test_an_unknown_krea_scheduler_is_refused_before_the_build(tmp_path, capsys):
+    # Bug caught (Review Focus 3): flow_match_euler_discrete (another family's scheduler) reaching the model, where
+    # mflux would raise only after the encoder and the set loaded, or the refusal after the caps.
+    log = []
+    code, watchdogs = _run(
+        [
+            "--model",
+            "krea-2",
+            "--prompt",
+            "p",
+            "--scheduler",
+            "flow_match_euler_discrete",
+            "--output",
+            str(tmp_path / "o.png"),
+        ],
+        log,
+        tmp_path,
+        factory=lambda **kw: pytest.fail("built"),
+        install_caps=lambda: pytest.fail("caps installed before the refusal"),
+    )
+    assert (code, watchdogs, log) == (2, [], [])
+    assert "error: --scheduler: Krea 2 Turbo runs er_sde, euler, linear" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("scheduler", ["er_sde", "euler", "linear"])
+def test_the_krea_schedulers_pass_through(scheduler, tmp_path):
+    # Bug caught: "linear" refused although mflux maps it to er_sde (krea2.py:206-212), or euler refused.
+    assert (
+        _generate_kwargs("krea-2-raw", tmp_path, "--scheduler", scheduler)["scheduler"] == scheduler
+    )
+
+
+def test_the_scheduler_allow_list_is_krea_only():
+    # Bug caught: another family's --scheduler checked against Krea's list (Qwen's "linear" passes, but Z-Image's
+    # "euler" or a custom dotted scheduler would be refused).
+    for model, scheduler in (("z-image", "euler"), ("qwen-image-2.1", "my.module.Scheduler")):
+        args = gen.build_parser().parse_args(
+            ["--model", model, "--prompt", "p", "--scheduler", scheduler]
+        )
+        assert gen.scheduler_refusal(args) is None
+
+
+def test_krea_raw_passes_its_defaults(tmp_path, capsys):
+    # Bug caught: the card's 52 / 3.5 left as Raw's default (a CFG run nobody asked for), or Turbo's 8 steps. Literals:
+    # 25 steps (mflux defaults.py:19,111-118), guidance 1.0 (krea2.py:58), er_sde (krea2.py:206-212).
+    call = _generate_kwargs("krea-2-raw", tmp_path, "--negative-prompt", "n")
+    assert (call["num_inference_steps"], call["guidance"], call["scheduler"]) == (25, 1.0, "er_sde")
+    assert call["negative_prompt"] == "n"
+    turbo = _generate_kwargs("krea-2", tmp_path)
+    assert (turbo["num_inference_steps"], turbo["guidance"], turbo["scheduler"]) == (
+        8,
+        1.0,
+        "er_sde",
+    )
+
+
+def test_krea_raw_negative_prompt_at_its_default_guidance_warns(tmp_path, capsys):
+    # Bug caught: the warning keyed on Raw's former 3.5 (silent at the real default 1.0, where the negative prompt has
+    # no effect).
+    _generate_kwargs("krea-2-raw", tmp_path, "--negative-prompt", "n")
+    err = capsys.readouterr().err
+    assert "warning: --negative-prompt has no effect" in err
+    assert "(the default is 1.0)" in err
+
+
+def test_krea_raw_card_recipe_flags_pass_through(tmp_path, capsys):
+    # Bug caught: the model card's recipe clamped to the defaults, or --guidance 3.5 refused.
+    call = _generate_kwargs("krea-2-raw", tmp_path, "--steps", "52", "--guidance", "3.5")
+    assert (call["num_inference_steps"], call["guidance"]) == (52, 3.5)
+
+
+@pytest.mark.parametrize(
+    ("model", "extra", "note"),
+    [
+        (
+            "krea-2",
+            ["--guidance", "0.5"],
+            "info: guidance 0.5 on Krea 2 Turbo runs classifier-free guidance: two transformer calls per step "
+            '(negative prompt " ")',
+        ),
+        (
+            "krea-2-raw",
+            ["--guidance", "3.5", "--negative-prompt", "n"],
+            "info: guidance 3.5 on Krea 2 Raw runs classifier-free guidance: two transformer calls per step",
+        ),
+        ("krea-2-raw", [], None),
+        ("dev", ["--guidance", "3.5"], None),
+        ("qwen-image-2.1", ["--guidance", "4", "--negative-prompt", "n"], None),
+    ],
+)
+def test_cfg_cost_note_names_two_calls_for_krea_off_guidance_one(
+    model, extra, note, tmp_path, capsys
+):
+    # Bug caught: the note on every family, missing below 1.0 (the rule copied as `> 1.0`), or claiming mflux's " "
+    # when the user gave a negative prompt. The exit code is unchanged (an info line, not a refusal).
+    args = gen.build_parser().parse_args(["--model", model, "--prompt", "p", *extra])
+    expected = None if note is None else note.removeprefix("info: ")
+    assert gen.cfg_cost_note(args) == expected
+    _generate_kwargs(model, tmp_path, *extra)  # asserts exit 0
+    err = capsys.readouterr().err
+    if note is None:
+        assert "info: guidance" not in err
+    else:
+        assert note in err
+
+
+@pytest.mark.parametrize(
+    ("model", "guidance", "expected"),
+    [
+        ("krea-2", None, False),
+        ("krea-2", 1.0, False),
+        ("krea-2", 0.5, True),
+        ("krea-2", 1.0001, True),
+        ("qwen-image-2.1", 0.5, False),
+        ("qwen-image-2.1", 1.0, False),
+        ("qwen-image-2.1", 4.0, True),
+    ],
+)
+def test_runs_cfg_follows_each_familys_rule(model, guidance, expected):
+    # Bug caught: Krea's != 1.0 rule applied to every family, or the other families' > 1.0 rule applied to Krea.
+    from mlx_dfloat.mflux import families
+
+    assert gen.runs_cfg(families.entry(model), guidance) is expected
+
+
+@pytest.mark.parametrize("model", ["krea-2", "krea-2-raw"])
+@pytest.mark.parametrize("prompt", ["", "   "])
+def test_an_empty_krea_prompt_is_refused_before_anything_loads(model, prompt, tmp_path, capsys):
+    # Bug caught: an empty prompt reaching Krea 2 (its tokenizer gives "" no ids: an empty context through the
+    # transformer), or the refusal coming after the caps, the watchdog or the build.
+    log = []
+    code, watchdogs = _run(
+        ["--model", model, "--prompt", prompt, "--output", str(tmp_path / "o.png")],
+        log,
+        tmp_path,
+        factory=lambda **kw: pytest.fail("built"),
+        install_caps=lambda: pytest.fail("caps installed before the refusal"),
+    )
+    assert (code, watchdogs, log) == (2, [], [])
+    assert (
+        "an empty or blank prompt is refused as a user error (an empty prompt gives Krea 2's tokenizer"
+        in (capsys.readouterr().err)
+    )
+
+
+def test_the_help_names_the_krea_defaults_and_the_cards_recipe():
+    # Bug caught: --help still listing only the older families' defaults, or Raw's default shown as the card's 3.5.
+    text = " ".join(gen.build_parser().format_help().split())
+    assert "krea-2-raw 25, krea-2 8" in text
+    assert (
+        "Krea 2 Raw and Turbo 1.0 (Krea 2 Raw's model card uses --steps 52 --guidance 3.5); Krea 2 runs "
+        "classifier-free guidance, two transformer calls per step, for any value other than 1.0"
+    ) in text
+    assert "Krea 2: er_sde (default), euler" in text

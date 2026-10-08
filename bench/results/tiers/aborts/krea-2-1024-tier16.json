@@ -1,0 +1,30 @@
+{
+ "reason": "memory",
+ "footprint": 10197902072,
+ "peak_footprint": 10197902072,
+ "ceiling": 9842633386,
+ "elapsed": 17.100785250018816,
+ "budget": 1800.0,
+ "rss": 9530130432,
+ "mlx_active": 10083739684,
+ "mlx_cache": 0,
+ "verdict_memory": 10197902072,
+ "verdict_counter": "footprint",
+ "peak_watched": 10197902072,
+ "peak_mlx": 10083739684,
+ "context": {
+  "model": "krea-2",
+  "height": 1024,
+  "width": 1024,
+  "seed": 42,
+  "steps": 8,
+  "tier_gb": 16,
+  "label": "CAPPED",
+  "limits": {
+   "memory": 10737418240,
+   "cache": 10737418240,
+   "wired": 8589934592
+  },
+  "phase": "set_load"
+ }
+}

@@ -1,0 +1,49 @@
+{
+ "exit_code": 2,
+ "output": "t.png",
+ "memory_caps_gb": null,
+ "model_kwargs": {
+  "model": "krea-2",
+  "df11_path": "~/.cache/huggingface/hub/models--mingyi456--Krea-2-Turbo-DF11-ComfyUI/snapshots/978da5fb7647bd222d33125993abd8fdc2840cfc",
+  "base_path": "~/.cache/huggingface/hub/models--krea--Krea-2-Turbo/snapshots/98e0fe118d17c9e3547fbb2e25acdbae2cadf7c7",
+  "eval_policy": "per-block",
+  "cache_limit": null,
+  "fit_check": true,
+  "budget_bytes": 9305762474
+ },
+ "height": 1024,
+ "width": 1024,
+ "memory_ceiling_bytes": null,
+ "tier_gb": 16,
+ "label": "CAPPED",
+ "watchdog_ceiling_bytes": 9842633386,
+ "limits": {
+  "tier": {
+   "tier_gb": 16,
+   "ram_bytes": 17179869184,
+   "recommended_bytes": 11453246122,
+   "memory_limit_bytes": 10737418240,
+   "cache_limit_bytes": 10737418240,
+   "wired_limit_bytes": 8589934592,
+   "reserve_bytes": 1610612736,
+   "budget_bytes": 11453246122,
+   "ceiling_bytes": 9842633386,
+   "fit_budget_bytes": 9305762474,
+   "budget_source": "ratio",
+   "is_host": false,
+   "label": "CAPPED"
+  },
+  "effective": {
+   "memory_limit_bytes": 10737418240,
+   "cache_limit_bytes": 10737418240,
+   "wired_limit_bytes": 8589934592
+  },
+  "applied": "tier-caps"
+ },
+ "error": "DFloatResourceError: predicted peak 22.6 GiB in the denoise phase exceeds the budget 8.7 GiB (encode 8.0 GiB, denoise 22.6 GiB, vae 11.1 GiB); pass fit_check=False to run anyway",
+ "footprint_peak_bytes": 561186040,
+ "footprint_peak_label": "OS phys_footprint, sampled every 0.05 s by the watchdog",
+ "watched_peak_bytes": 561186040,
+ "mlx_peak_bytes": 5230518,
+ "elapsed_seconds": 3.164
+}

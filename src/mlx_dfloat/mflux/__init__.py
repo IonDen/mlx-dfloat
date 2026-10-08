@@ -21,8 +21,8 @@ def require_mflux() -> None:
 def __getattr__(name: str) -> Any:
     """``DFloatModel`` and the model classes are imported on first use.
 
-    The classes are ``DFloatFlux1``, ``DFloatZImage``, ``DFloatFlux2Klein``, ``DFloatQwenImage21`` and
-    ``DFloatErnieImage``. So ``import mlx_dfloat.mflux`` needs neither mflux nor MLX.
+    The classes are ``DFloatFlux1``, ``DFloatZImage``, ``DFloatFlux2Klein``, ``DFloatQwenImage21``,
+    ``DFloatErnieImage`` and ``DFloatKrea2``. So ``import mlx_dfloat.mflux`` needs neither mflux nor MLX.
     """
     if name == "DFloatModel":
         from mlx_dfloat.mflux.families import DFloatModel
@@ -48,10 +48,14 @@ def __getattr__(name: str) -> Any:
         from mlx_dfloat.mflux.ernie.model import DFloatErnieImage
 
         return DFloatErnieImage
+    if name == "DFloatKrea2":
+        from mlx_dfloat.mflux.krea2.model import DFloatKrea2
+
+        return DFloatKrea2
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # The model classes stay out of __all__: a star-import must not need mflux; `mlx_dfloat.mflux.DFloatFlux1`,
-# `mlx_dfloat.mflux.DFloatZImage`, `mlx_dfloat.mflux.DFloatFlux2Klein`, `mlx_dfloat.mflux.DFloatQwenImage21` and
-# `mlx_dfloat.mflux.DFloatErnieImage` still work.
+# `mlx_dfloat.mflux.DFloatZImage`, `mlx_dfloat.mflux.DFloatFlux2Klein`, `mlx_dfloat.mflux.DFloatQwenImage21`,
+# `mlx_dfloat.mflux.DFloatErnieImage` and `mlx_dfloat.mflux.DFloatKrea2` still work.
 __all__ = ["DFloatModel", "require_mflux"]

@@ -101,3 +101,23 @@ def test_dfloat_ernie_image_is_reachable_lazily():
     from mlx_dfloat.mflux.ernie.model import DFloatErnieImage
 
     assert adapters.DFloatErnieImage is DFloatErnieImage
+
+
+@pytest.mark.mflux
+def test_dfloat_krea2_is_reachable_lazily():
+    # Bug caught: DFloatKrea2 missing from the lazy attribute hook (AttributeError on first use), or added to __all__
+    # (a star-import would then need mflux; the star-import test pins __all__).
+    import mlx_dfloat.mflux as adapters
+    from mlx_dfloat.mflux.krea2.model import DFloatKrea2
+
+    assert adapters.DFloatKrea2 is DFloatKrea2
+
+
+def test_importing_the_mflux_package_loads_no_mlx_core():
+    # Bug caught: an eager import of the Krea 2 model (or any model) in mlx_dfloat/mflux/__init__.py.
+    import subprocess
+    import sys
+
+    code = "import sys, mlx_dfloat.mflux; print('mlx.core' in sys.modules, 'mflux' in sys.modules)"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "False False"
