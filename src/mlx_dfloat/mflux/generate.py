@@ -1,4 +1,4 @@
-"""``mlx-dfloat generate``: one FLUX.1 image from a DFloat11 transformer, with memory caps and a watchdog.
+"""``mlx-dfloat generate``: one image from a DFloat11 transformer, with memory caps and a watchdog.
 
 Flag names follow ``mflux-generate`` so a pasted command works; the options that path cannot
 honour are parsed only to refuse them with a reason (exit 2). ``--tier GB`` runs under a smaller
@@ -9,8 +9,9 @@ host caps); ``--memory-ceiling BYTES`` sets the watchdog ceiling alone, under th
 import argparse
 import json
 import sys
+import time
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -22,10 +23,9 @@ from mlx_dfloat._watchdog import Watchdog, default_ceiling, phys_footprint
 from mlx_dfloat.bench import capped
 from mlx_dfloat.bench.capped import TierLimits, host_tier_gb, limits_record, tier_limits
 from mlx_dfloat.errors import DFloatError
+from mlx_dfloat.mflux.families import FAMILIES, MODELS, entry, family_of
 
 EXIT_OK, EXIT_ERROR = 0, 2
-DEFAULT_STEPS = {"schnell": 4, "dev": 25, "krea-dev": 25}  # mflux 0.20's per-model defaults
-DEFAULT_GUIDANCE = 3.5  # mflux-generate's default; schnell ignores it
 FOOTPRINT_PEAK_LABEL = "OS phys_footprint, sampled every 0.05 s by the watchdog"
 REFUSED: dict[str, str] = {
     "--quantize": "quantisation on top of DFloat11 changes the output the format exists to keep",
@@ -36,7 +36,7 @@ REFUSED: dict[str, str] = {
     "--image-path": "img2img is not on the DFloat11 path",
     "--image-strength": "img2img is not on the DFloat11 path",
     "--image": "img2img is not on the DFloat11 path",
-    "--pid-decode": "the PiD decoder loads an 8 GB caption encoder next to the compressed set",
+    "--pid-decode": "mflux's alternative image decoder (PiD) loads an 8 GB caption encoder next to the compressed set",
     "--controlnet-image-path": "ControlNet is another model class, not provided on the DFloat11 path",
     "--controlnet-strength": "ControlNet is another model class, not provided on the DFloat11 path",
 }
@@ -87,7 +87,7 @@ def add_generate_parser(sub: Any) -> argparse.ArgumentParser:
     """Register ``generate`` on a subparsers object."""
     p: argparse.ArgumentParser = sub.add_parser(
         "generate",
-        help="generate one FLUX.1 image from a DFloat11 transformer",
+        help="generate one image from a DFloat11 transformer",
         description=__doc__,
     )
     _add_arguments(p)
@@ -103,14 +103,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _add_arguments(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--model", "-m", choices=tuple(DEFAULT_STEPS), default="schnell")
+    p.add_argument("--model", "-m", choices=tuple(MODELS), default="schnell")
     p.add_argument("--prompt", required=True, help="the text to generate")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
         "--steps",
         type=int,
         default=None,
-        help="denoise steps (default per model: schnell 4, dev 25)",
+        help="denoise steps (default per model, as mflux: schnell 4, dev 25, z-image 50, z-image-turbo 9)",
     )
     p.add_argument("--height", type=int, default=1024)
     p.add_argument("--width", type=int, default=1024)
@@ -118,11 +118,15 @@ def _add_arguments(p: argparse.ArgumentParser) -> None:
         "--guidance",
         type=float,
         default=None,
-        help=f"guidance (default {DEFAULT_GUIDANCE}; schnell ignores it)",
+        help="guidance (default per model, as mflux: FLUX.1 3.5, schnell and z-image-turbo ignore it; "
+        "z-image defaults to 0 for the base model, as mflux does; its model card suggests about 4)",
     )
-    p.add_argument("--scheduler", default="linear")
+    p.add_argument("--scheduler", default=None, help="scheduler (default per model: FLUX.1 linear)")
     p.add_argument(
-        "--negative-prompt", default=None, help="accepted and ignored, as mflux does for FLUX.1"
+        "--negative-prompt",
+        default=None,
+        help="used by z-image with --guidance above 1; accepted and ignored for the other models, "
+        "as mflux does",
     )
     p.add_argument(
         "--output",
@@ -179,7 +183,8 @@ def _add_arguments(p: argparse.ArgumentParser) -> None:
         metavar="BYTES",
         help="a lower watchdog ceiling alone, under the host caps (not with --tier)",
     )
-    for flag, reason in REFUSED.items():
+    family_flags = {f: r for fam in FAMILIES.values() for f, r in fam.refused_flags.items()}
+    for flag, reason in {**REFUSED, **family_flags}.items():
         p.add_argument(
             flag,
             *_REFUSED_ALIASES.get(flag, []),
@@ -191,8 +196,11 @@ def _add_arguments(p: argparse.ArgumentParser) -> None:
 
 
 def refused_option(args: argparse.Namespace) -> str | None:
-    """The first refused flag present on the command line, with its reason; None when there is none."""
-    for flag, reason in REFUSED.items():
+    """The first refused flag present on the command line, with its reason; None when there is none.
+
+    The common refusals apply to every model; a family's own list only to its models.
+    """
+    for flag, reason in {**REFUSED, **family_of(args.model).refused_flags}.items():
         if getattr(args, flag.lstrip("-").replace("-", "_")) is not None:
             return f"{flag}: {reason}"
     return None
@@ -239,10 +247,20 @@ def ceiling_for(
 
 def _steps(args: argparse.Namespace) -> int:
     """The denoise steps this call runs: ``--steps``, else the model's mflux default."""
-    return int(args.steps) if args.steps is not None else DEFAULT_STEPS[args.model]
+    return int(args.steps) if args.steps is not None else entry(args.model).default_steps
 
 
-def _run_context(args: argparse.Namespace) -> dict[str, Any]:
+def _guidance(args: argparse.Namespace) -> float | None:
+    """The guidance this call passes: ``--guidance``, else the model's default (None: the model's own rule)."""
+    return float(args.guidance) if args.guidance is not None else entry(args.model).default_guidance
+
+
+def _scheduler(args: argparse.Namespace) -> str | None:
+    """The scheduler this call passes: ``--scheduler``, else the model's default (None: its own rule)."""
+    return args.scheduler if args.scheduler is not None else entry(args.model).default_scheduler
+
+
+def _run_context(args: argparse.Namespace, *, tier_gb: int, label: str) -> dict[str, Any]:
     """What the watchdog's abort artifact records about the run it may stop."""
     return {
         "model": args.model,
@@ -250,7 +268,17 @@ def _run_context(args: argparse.Namespace) -> dict[str, Any]:
         "width": args.width,
         "seed": args.seed,
         "steps": _steps(args),
+        "tier_gb": tier_gb,
+        "label": label,
     }
+
+
+def _phase_of(built: Mapping[str, Any]) -> str | None:
+    """The phase a run is in: ``"build"`` before the model exists, then the model's ``open_phase``."""
+    if "model" not in built:
+        return "build"
+    phase = getattr(built["model"], "open_phase", None)
+    return None if phase is None else str(phase)
 
 
 def _host_facts() -> tuple[int, int]:
@@ -259,12 +287,9 @@ def _host_facts() -> tuple[int, int]:
     return int(info.get("memory_size", 0)), int(info.get("max_recommended_working_set_size", 0))
 
 
-def _model_class() -> Callable[..., Any]:
-    from mlx_dfloat.mflux.flux1.model import (
-        DFloatFlux1,  # raises DFloatDependencyError without mflux
-    )
-
-    return DFloatFlux1
+def _model_class(name: str) -> Callable[..., Any]:
+    """The model class of a registered name (raises DFloatDependencyError without mflux)."""
+    return family_of(name).load_model_class()
 
 
 def _output_resolver() -> Callable[[Path], Path]:
@@ -302,21 +327,34 @@ def run(
     ceiling_default: Callable[[], int] = default_ceiling,
     apply_limits: Callable[[TierLimits], object] = capped.apply,
     read_limits: Callable[[], dict[str, int]] = capped.current_limits,
+    clock: Callable[[], float] = time.monotonic,
 ) -> int:
     """Refuse, cap, watch, build, generate, save, report. Returns the exit code.
 
     ``resolve_output`` maps the requested file to the one written (default: mflux's rule, looked
     up lazily next to the model class). ``host_facts`` returns this host's RAM and recommended
     working set; ``ceiling_default`` the host's watchdog ceiling; ``apply_limits`` installs a
-    smaller tier's limits (in place of ``install_caps``); ``read_limits`` reads the limits in force.
+    smaller tier's limits (in place of ``install_caps``); ``read_limits`` reads the limits in force;
+    ``clock`` gives the report's ``elapsed_seconds`` (read at the start and after the run).
+    The watchdog's abort artifact names the phase open when it fired: ``"build"`` until the model
+    exists, then the model's own phase (``encode``, ``set_load``, ``denoise``, ``vae``, or None
+    between them).
     """
+    started = clock()
     refused = refused_option(args)
     if refused is not None:
         print(f"error: {refused}", file=sys.stderr)
         return EXIT_ERROR
-    if args.negative_prompt:
+    if args.negative_prompt and not entry(args.model).uses_negative_prompt:
         print(
-            "warning: --negative-prompt is ignored: FLUX.1 has no negative branch", file=sys.stderr
+            "warning: --negative-prompt is ignored: this model has no negative branch",
+            file=sys.stderr,
+        )
+    elif args.negative_prompt and (_guidance(args) or 0.0) <= 1.0:
+        print(
+            "warning: --negative-prompt has no effect: classifier-free guidance runs only above "
+            "guidance 1.0 (the default is 0). Pass --guidance above 1.0 to enable it.",
+            file=sys.stderr,
         )
     output = Path(args.output)
     model_kwargs = {
@@ -327,6 +365,7 @@ def run(
         "cache_limit": args.cache_limit,
         "fit_check": not args.no_fit_check,
     }
+    built: dict[str, Any] = {}  # the model, once it exists (the watchdog reads its phase)
     report: dict[str, Any] = {
         "exit_code": EXIT_ERROR,
         "output": str(output),
@@ -373,7 +412,11 @@ def run(
             applied=applied,
         )
         watchdog = watchdog_factory(
-            output.parent, ceiling=ceiling, budget=args.wall_budget, context=_run_context(args)
+            output.parent,
+            ceiling=ceiling,
+            budget=args.wall_budget,
+            context=_run_context(args, tier_gb=limits.tier_gb, label=label),
+            live_context={"phase": lambda: _phase_of(built)},
         ).start()
     except (DFloatError, OSError) as exc:
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
@@ -384,18 +427,21 @@ def run(
         report["error"] = f"{type(exc).__name__}: {exc}"
         return _finish(args, report)
     try:
-        factory = model_factory if model_factory is not None else _model_class()
+        factory = model_factory if model_factory is not None else _model_class(args.model)
         resolve = resolve_output if resolve_output is not None else _output_resolver()
-        model = factory(**model_kwargs)
-        image = model.generate_image(
-            seed=args.seed,
-            prompt=args.prompt,
-            num_inference_steps=_steps(args),
-            height=args.height,
-            width=args.width,
-            guidance=args.guidance if args.guidance is not None else DEFAULT_GUIDANCE,
-            scheduler=args.scheduler,
-        )
+        model = built["model"] = factory(**model_kwargs)
+        call: dict[str, Any] = {
+            "seed": args.seed,
+            "prompt": args.prompt,
+            "num_inference_steps": _steps(args),
+            "height": args.height,
+            "width": args.width,
+            "guidance": _guidance(args),
+            "scheduler": _scheduler(args),
+        }
+        if entry(args.model).uses_negative_prompt:
+            call["negative_prompt"] = args.negative_prompt
+        image = model.generate_image(**call)
         final = Path(resolve(output))
         image.save(str(final), export_json_metadata=args.metadata, overwrite=True)
         if not final.is_file() or final.stat().st_size == 0:
@@ -416,4 +462,5 @@ def run(
     report["footprint_peak_label"] = FOOTPRINT_PEAK_LABEL
     report["watched_peak_bytes"] = max(watchdog.peak_watched, final_sample)
     report["mlx_peak_bytes"] = watchdog.peak_mlx
+    report["elapsed_seconds"] = round(clock() - started, 3)
     return _finish(args, report)

@@ -7,7 +7,7 @@ from collections.abc import Sequence
 
 from mlx_dfloat._version import __version__
 from mlx_dfloat.errors import DFloatError
-from mlx_dfloat.mflux.flux1.cli import add_generate_parser
+from mlx_dfloat.mflux.generate import add_generate_parser
 
 
 def _run_selftest(args: argparse.Namespace) -> int:
@@ -45,7 +45,7 @@ def _run_selftest(args: argparse.Namespace) -> int:
 
 
 def add_selftest_parser(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
-    """Register ``selftest``: decode the packaged canary groups on the GPU and with the CPU reference."""
+    """Register ``selftest``: decode the packaged self-check groups on the GPU and with the CPU reference."""
     parser = sub.add_parser(
         "selftest",
         help="check the GPU decoder against groups with known output",

@@ -11,7 +11,7 @@ import pytest
 
 from mlx_dfloat import DFloatDependencyError, DFloatResourceError, DFloatUnsupportedError
 from mlx_dfloat.cli import main
-from mlx_dfloat.mflux.flux1 import cli as gen
+from mlx_dfloat.mflux import generate as gen
 
 REPO = Path(__file__).resolve().parents[1]
 GIB = 1024**3
@@ -40,9 +40,10 @@ class _Model:
 
 
 class _Watchdog:
-    def __init__(self, out_dir, *, ceiling, budget, context=None):
+    def __init__(self, out_dir, *, ceiling, budget, context=None, live_context=None):
         self.out_dir, self.ceiling, self.budget, self.stopped = out_dir, ceiling, budget, False
         self.context = context
+        self.live_context = live_context
         # Far above any real footprint, and distinct from one another: the report must carry each
         # peak from its own counter, not the final sample and not another counter's value.
         self.peak_footprint = 10**15
@@ -235,6 +236,8 @@ def test_generate_builds_the_model_from_the_flags_writes_the_image_and_the_repor
         "width": 768,
         "seed": 7,
         "steps": 3,
+        "tier_gb": 32,
+        "label": "MEASURED",
     }
     assert report["footprint_peak_bytes"] == 10**15
     assert (
@@ -251,6 +254,8 @@ def test_the_watchdog_context_carries_the_models_default_steps(tmp_path):
         "width": 1024,
         "seed": 42,
         "steps": 4,
+        "tier_gb": 32,
+        "label": "MEASURED",
     }
 
 
@@ -788,3 +793,188 @@ def test_finish_writes_the_report_with_the_home_directory_as_a_tilde(tmp_path):
     assert written["df11"]["root"] == "~/.cache/huggingface/hub/models--a/snapshots/s"
     assert written["error"] == "cannot read ~/.cache/x: missing"
     assert home not in path.read_text()
+
+
+@pytest.mark.parametrize(
+    ("model", "steps"), [("schnell", 4), ("dev", 25), ("z-image", 50), ("z-image-turbo", 9)]
+)
+def test_default_steps_follow_mflux_per_model(model, steps):
+    # Bug caught: Z-Image falling back to FLUX's 25 (mflux 0.20 cli/defaults/defaults.py:55-56: 50 and 9).
+    assert gen._steps(gen.build_parser().parse_args(["--model", model, "--prompt", "p"])) == steps
+
+
+def test_the_model_choices_are_the_registry_names():
+    # Bug caught: --model still limited to the FLUX.1 names (z-image refused by argparse).
+    for name in ("schnell", "dev", "krea-dev", "z-image", "z-image-turbo"):
+        assert gen.build_parser().parse_args(["--model", name, "--prompt", "p"]).model == name
+    with pytest.raises(SystemExit):
+        gen.build_parser().parse_args(["--model", "z-image-edit", "--prompt", "p"])
+
+
+def _generate_kwargs(model, tmp_path, *extra):
+    log = []
+    code, _ = _run(
+        ["--model", model, "--prompt", "p", "--output", str(tmp_path / "o.png"), *extra],
+        log,
+        tmp_path,
+    )
+    assert code == 0
+    return log[0][1]
+
+
+def test_zimage_gets_no_guidance_or_scheduler_unless_asked_and_flux_keeps_its_defaults(tmp_path):
+    # Bug caught: FLUX's 3.5 / "linear" forced on Z-Image (base would run CFG at 3.5 with the wrong scheduler), or
+    # FLUX losing them.
+    z = _generate_kwargs("z-image", tmp_path)
+    assert z["guidance"] is None
+    assert z["scheduler"] is None
+    asked = _generate_kwargs("z-image", tmp_path, "--guidance", "4", "--scheduler", "euler")
+    assert (asked["guidance"], asked["scheduler"]) == (4.0, "euler")
+    f = _generate_kwargs("dev", tmp_path)
+    assert (f["guidance"], f["scheduler"]) == (3.5, "linear")
+
+
+def test_the_negative_prompt_reaches_zimage_and_flux_does_not_get_it(tmp_path):
+    # Bug caught: a Z-Image base user's negative prompt dropped, or an unexpected kwarg sent to FLUX.1.
+    assert (
+        _generate_kwargs("z-image", tmp_path, "--negative-prompt", "blurry")["negative_prompt"]
+        == "blurry"
+    )
+    assert "negative_prompt" not in _generate_kwargs(
+        "schnell", tmp_path, "--negative-prompt", "blurry"
+    )
+
+
+def test_the_negative_prompt_warnings_follow_the_model_and_the_guidance(tmp_path, capsys):
+    # Bug caught: telling a Z-Image base user their negative prompt is ignored when it is used (guidance 4), or
+    # staying silent when it has no effect (guidance at its default 0, or exactly 1.0: mflux runs CFG only above 1).
+    _generate_kwargs("z-image", tmp_path, "--negative-prompt", "blurry", "--guidance", "4")
+    assert "warning" not in capsys.readouterr().err
+    for extra in ([], ["--guidance", "1.0"]):
+        _generate_kwargs("z-image", tmp_path, "--negative-prompt", "blurry", *extra)
+        err = capsys.readouterr().err
+        assert "warning: --negative-prompt has no effect" in err
+        assert "Pass --guidance above 1.0 to enable it" in err
+    _generate_kwargs(
+        "z-image", tmp_path, "--guidance", "1.0"
+    )  # no negative prompt: nothing to warn about
+    assert "warning" not in capsys.readouterr().err
+    _generate_kwargs("schnell", tmp_path, "--negative-prompt", "blurry")
+    assert "--negative-prompt is ignored" in capsys.readouterr().err
+
+
+def test_the_watchdog_context_names_the_tier_and_label(tmp_path):
+    # Bug caught: a --tier 16 abort artifact that cannot say which tier it was (the README row needs it).
+    _, watchdogs, _, _ = _limits_run(["--tier", "16", "--model", "z-image-turbo"], tmp_path)
+    context = watchdogs[0].context
+    assert context["tier_gb"] == 16
+    assert context["label"] == "CAPPED"
+    assert context["model"] == "z-image-turbo"
+    assert context["steps"] == 9
+    _, watchdogs, _, _ = _limits_run([], tmp_path)
+    assert (watchdogs[0].context["tier_gb"], watchdogs[0].context["label"]) == (32, "MEASURED")
+
+
+def test_family_refused_flags_are_refused_beyond_the_common_ones(monkeypatch):
+    # Bug caught: a family's own refusal list ignored (the flag reaching the model) or applied to the other family.
+    from dataclasses import replace
+
+    from mlx_dfloat.mflux import families
+
+    monkeypatch.setitem(
+        families.FAMILIES,
+        "zimage",
+        replace(families.FAMILIES["zimage"], refused_flags={"--shift": "not on this family"}),
+    )
+    args = gen.build_parser().parse_args(["--model", "z-image", "--prompt", "p", "--shift", "3"])
+    assert gen.refused_option(args) == "--shift: not on this family"
+    flux = gen.build_parser().parse_args(["--model", "schnell", "--prompt", "p", "--shift", "3"])
+    assert gen.refused_option(flux) is None
+
+
+def test_the_model_class_comes_from_the_registry_per_model_name(monkeypatch):
+    # Bug caught: the FLUX.1 class built for every name (z-image run through DFloatFlux1).
+    from dataclasses import replace
+
+    from mlx_dfloat.mflux import families
+
+    for fam in ("flux1", "zimage"):
+        monkeypatch.setitem(
+            families.FAMILIES,
+            fam,
+            replace(families.FAMILIES[fam], load_model_class=lambda fam=fam: fam),
+        )
+    assert gen._model_class("dev") == "flux1"
+    assert gen._model_class("z-image") == "zimage"
+
+
+def test_the_help_says_one_image_not_one_flux_image():
+    # Bug caught: the help still describing a FLUX.1-only command.
+    text = gen.build_parser().format_help()
+    assert "one image" in text
+    assert "FLUX.1 image" not in text
+
+
+def test_the_abort_context_reads_the_phase_open_now_build_before_the_model_exists(tmp_path):
+    # Bug caught: an abort artifact that cannot say where the run was (the 16 GB stop happened in the encode
+    # phase, and the README states it), or a phase frozen at watchdog start.
+    log, phases = [], []
+    watchdogs = []
+
+    class Phased(_Model):
+        open_phase = None
+
+        def generate_image(self, **kwargs):
+            self.open_phase = "encode"
+            phases.append(watchdogs[0].live_context["phase"]())
+            self.open_phase = "vae"
+            phases.append(watchdogs[0].live_context["phase"]())
+            return super().generate_image(**kwargs)
+
+    def factory(**kw):
+        phases.append(watchdogs[0].live_context["phase"]())
+        return Phased(log, **kw)
+
+    def watchdog_factory(out_dir, **kw):
+        watchdogs.append(_Watchdog(out_dir, **kw))
+        return watchdogs[-1]
+
+    args = gen.build_parser().parse_args(["--prompt", "p", "--output", str(tmp_path / "o.png")])
+    code = gen.run(
+        args,
+        model_factory=factory,
+        install_caps=lambda: (20, 22),
+        watchdog_factory=watchdog_factory,
+        resolve_output=_resolve,
+        **_host_kwargs(),
+    )
+    assert code == 0
+    assert phases == ["build", "encode", "vae"]
+
+
+def test_the_report_records_the_wall_clock_of_the_whole_run_including_the_build(tmp_path):
+    # Bug caught: no elapsed time in the report (README rows then quote times from memory), or one measured from
+    # after the model build (the set load and encoder load would vanish from it).
+    ticks = iter([100.0, 172.5])
+    order = []
+
+    def clock():
+        order.append("clock")
+        return next(ticks)
+
+    def factory(**kw):
+        order.append("build")
+        return _Model([], **kw)
+
+    code = gen.run(
+        _args("--output", str(tmp_path / "o.png"), "--report", str(tmp_path / "r.json")),
+        model_factory=factory,
+        install_caps=lambda: (20, 22),
+        watchdog_factory=_Watchdog,
+        resolve_output=_resolve,
+        clock=clock,
+        **_host_kwargs(),
+    )
+    assert code == 0
+    assert order == ["clock", "build", "clock"]
+    assert json.loads((tmp_path / "r.json").read_text())["elapsed_seconds"] == 72.5

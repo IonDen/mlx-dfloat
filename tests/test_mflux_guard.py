@@ -103,3 +103,12 @@ def test_a_star_import_of_the_mflux_package_needs_no_mflux(monkeypatch):
     exec("from mlx_dfloat.mflux import *", namespace)
     assert callable(namespace["require_mflux"])
     assert "DFloatFlux1" not in namespace
+
+
+def test_importing_the_registry_needs_no_mflux(monkeypatch):
+    # Bug caught: the registry importing a family adapter at module level (`--help` would need mflux).
+    monkeypatch.delitem(sys.modules, "mlx_dfloat.mflux.families", raising=False)
+    _hide_mflux(monkeypatch)
+    import mlx_dfloat.mflux.families as families  # must not raise
+
+    assert "z-image" in families.MODELS

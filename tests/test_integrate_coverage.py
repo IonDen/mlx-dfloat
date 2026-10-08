@@ -3,6 +3,7 @@
 import dataclasses
 
 import mlx.core as mx
+import mlx.nn as nn
 import numpy as np
 import pytest
 from tests._df11_fixtures import random_bf16, write_checkpoint
@@ -27,9 +28,11 @@ from mlx_dfloat.integrate.coverage import (
     check_extras_cover,
     decode_resident,
     extras_plan,
+    load_extras,
     load_resident_set,
     read_extra,
 )
+from mlx_dfloat.integrate.names import StaticNameMap
 from mlx_dfloat.integrate.placeholders import install_placeholders
 from mlx_dfloat.integrate.providers import DF11Provider
 
@@ -89,6 +92,9 @@ def test_decode_resident_raises_on_a_flagged_block():
 
 PATTERN = r"transformer_blocks\.\d+"
 SUBS = ("attn.to_q", "ff.net.0.proj")
+FLUX_TABLE_TABLES = {
+    "transformer_blocks": {"attn.to_q": "attn.to_q", "ff.net.0.proj": "ff.linear1"}
+}
 
 
 def _ckpt(tmp_path, extras=None):
@@ -241,3 +247,42 @@ def test_check_extras_cover_passes_only_when_every_non_matrix_parameter_has_an_e
             },
             matrices,
         )
+
+
+def test_extras_plan_refuses_two_sources_renamed_onto_one_parameter(tmp_path):
+    # Bug caught: a rename table mapping a second source onto an existing parameter (the later one silently wins).
+    extras = {
+        "a.weight": np.arange(6, dtype=np.uint16).reshape(2, 3) + 0x3F80,
+        "b.weight": np.arange(6, dtype=np.uint16).reshape(2, 3) + 0x4000,
+    }
+    ckpt, _ = _ckpt(tmp_path, extras=extras)
+    name_map = StaticNameMap(FLUX_TABLE_TABLES, renames={"a.weight": "b.weight"})
+    with pytest.raises(DFloatFormatError, match=r"'a\.weight'.*'b\.weight'"):
+        extras_plan(ckpt, name_map, counts={"transformer_blocks": 2})
+
+
+def _load_extras_fixture(tmp_path, transforms):
+    # One (2, 3) extra "p" with distinct literal values, a module whose parameter "p" is (3, 2).
+    src = np.arange(6, dtype=np.uint16).reshape(2, 3) + 0x3F80
+    ckpt, _ = _ckpt(tmp_path, extras={"p": src})
+    name_map = StaticNameMap(FLUX_TABLE_TABLES, transforms=transforms)
+    plan = extras_plan(ckpt, name_map, counts={"transformer_blocks": 2})
+    assert [name for name, _p, _i in plan] == ["p"]
+    module = nn.Module()
+    module.p = mx.zeros((3, 2), dtype=mx.bfloat16)
+    return src, module, plan, name_map
+
+
+def test_load_extras_applies_the_transform_before_the_shape_check(tmp_path):
+    # Bug caught: the shape check run on the raw tensor (a conv weight stored OIHW refused although mflux would
+    # transpose it), or the transform skipped (wrong layout loaded silently).
+    src, module, plan, name_map = _load_extras_fixture(tmp_path, {"p": lambda a: a.T})
+    load_extras(module, plan, name_map)
+    assert np.array_equal(np.array(module.p.view(mx.uint16)), src.T)
+
+
+def test_load_extras_without_the_transform_refuses_the_stored_shape(tmp_path):
+    # Bug caught: a shape mismatch loaded anyway (strict=False would drop or broadcast it).
+    _src, module, plan, name_map = _load_extras_fixture(tmp_path, None)
+    with pytest.raises(DFloatFormatError, match="shape"):
+        load_extras(module, plan, name_map)

@@ -1,14 +1,16 @@
 """Name maps: how a checkpoint's matrix names land on a module's attributes."""
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+import mlx.core as mx
 import mlx.nn as nn
 
 from mlx_dfloat.errors import DFloatIntegrationError
 
+Transform = Callable[[mx.array], mx.array]
 BlockShapes = dict[str, tuple[int, ...]]
 Shapes = dict[str, BlockShapes]
 
@@ -46,6 +48,10 @@ class NameMap(Protocol):
         """The module parameter name of a non-matrix checkpoint tensor (biases, norms, embedders)."""
         ...
 
+    def transform_of(self, param: str) -> Transform | None:
+        """The transform applied to the extra loaded into module parameter ``param`` (None for most)."""
+        ...
+
     def is_matrix_module(self, module: Any) -> bool:
         """Whether ``module`` is one the seam swaps weights on."""
         ...
@@ -58,14 +64,34 @@ class StaticNameMap:
     ``nn.Linear``.
     """
 
-    def __init__(self, tables: Mapping[str, Mapping[str, str]]) -> None:
-        """Keep one table per kind, checkpoint sub-path -> attribute path, in the given order."""
+    def __init__(
+        self,
+        tables: Mapping[str, Mapping[str, str]],
+        *,
+        renames: Mapping[str, str] | None = None,
+        transforms: Mapping[str, Transform] | None = None,
+    ) -> None:
+        """Keep one table per kind, checkpoint sub-path -> attribute path, in the given order.
+
+        ``renames`` maps non-block checkpoint names to module parameter names; ``transforms`` maps a module
+        parameter name to the transform applied to the extra loaded into it.
+
+        Raises:
+            DFloatIntegrationError: A rename's source is a block name.
+        """
         self._tables = {k: dict(v) for k, v in tables.items()}
         self.kinds = tuple(self._tables)
         # `[0-9]`, not `\d`: `\d` matches any Unicode digit, and int("٣") == 3 would alias block 3.
         self._block = re.compile(
             rf"^({'|'.join(re.escape(k) for k in self.kinds)})\.([0-9]+)\.(.+)$"
         )
+        self._renames = dict(renames or {})
+        self._transforms = dict(transforms or {})
+        blocky = sorted(s for s in self._renames if self._split(s) is not None)
+        if blocky:
+            raise DFloatIntegrationError(
+                f"renames {blocky} are block names; block extras are renamed through the block tables"
+            )
 
     def attrs_of(self, kind: str) -> tuple[str, ...]:
         """Attribute paths of every matrix module of a block of ``kind``, in table order."""
@@ -105,16 +131,20 @@ class StaticNameMap:
     def param_name(self, checkpoint_name: str) -> str:
         """The module parameter name of a non-matrix checkpoint tensor.
 
-        A block extra is renamed through the same table as its block's matrices; every other name
-        (already the module's own) is returned unchanged.
+        A block extra is renamed through the same table as its block's matrices; a non-block name follows
+        ``renames`` and is otherwise returned unchanged.
         """
         parsed = self._split(checkpoint_name)
         if parsed is None:
-            return checkpoint_name
+            return self._renames.get(checkpoint_name, checkpoint_name)
         kind, idx, rest = parsed
         head, _dot, leaf = rest.rpartition(".")
         mapped = self._tables[kind].get(head)
         return checkpoint_name if mapped is None else f"{kind}.{idx}.{mapped}.{leaf}"
+
+    def transform_of(self, param: str) -> Transform | None:
+        """The transform for the extra loaded into module parameter ``param`` (None when it has none)."""
+        return self._transforms.get(param)
 
     def is_matrix_module(self, module: Any) -> bool:
         """Whether ``module`` is an ``nn.Linear``, the only matrix module this map swaps weights on."""

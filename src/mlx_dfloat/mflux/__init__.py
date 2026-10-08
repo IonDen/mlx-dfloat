@@ -19,13 +19,25 @@ def require_mflux() -> None:
 
 
 def __getattr__(name: str) -> Any:
-    """``DFloatFlux1`` is imported on first use, so ``import mlx_dfloat.mflux`` never needs mflux."""
+    """``DFloatModel``, ``DFloatFlux1`` and ``DFloatZImage`` are imported on first use.
+
+    So ``import mlx_dfloat.mflux`` needs neither mflux nor MLX.
+    """
+    if name == "DFloatModel":
+        from mlx_dfloat.mflux.families import DFloatModel
+
+        return DFloatModel
     if name == "DFloatFlux1":
         from mlx_dfloat.mflux.flux1.model import DFloatFlux1
 
         return DFloatFlux1
+    if name == "DFloatZImage":
+        from mlx_dfloat.mflux.zimage.model import DFloatZImage
+
+        return DFloatZImage
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-# DFloatFlux1 stays out of __all__: a star-import must not need mflux; `mlx_dfloat.mflux.DFloatFlux1` still works.
-__all__ = ["require_mflux"]
+# The model classes stay out of __all__: a star-import must not need mflux; `mlx_dfloat.mflux.DFloatFlux1` and
+# `mlx_dfloat.mflux.DFloatZImage` still work.
+__all__ = ["DFloatModel", "require_mflux"]

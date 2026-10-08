@@ -12,8 +12,10 @@ sampling failure (psutil, MLX, the footprint read, or the artifact write itself)
 process instead of leaving the job running unwatched; its artifact names no counter
 (``verdict_counter: "none"``, ``verdict_memory: null``). A caller may pass a ``context`` mapping
 (``generate`` passes its model, size, seed and steps); it is written verbatim under ``"context"``
-in the abort artifact, so the artifact names the run it stopped. Without one there is no
-``"context"`` key. ``peak_mlx`` is None until a sample has read MLX's counters.
+in the abort artifact, so the artifact names the run it stopped. ``live_context`` maps keys to
+readers called when the abort fires (``generate`` reads the phase open at that moment); their
+values join ``"context"``. Without either there is no ``"context"`` key. ``peak_mlx`` is None
+until a sample has read MLX's counters.
 """
 
 import ctypes
@@ -22,7 +24,7 @@ import os
 import sys
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -134,11 +136,14 @@ class Watchdog:
         budget: float,
         interval: float = 0.05,
         context: Mapping[str, Any] | None = None,
+        live_context: Mapping[str, Callable[[], Any]] | None = None,
     ) -> None:
         """Configure the ceiling (bytes), wall budget (seconds), poll interval and run context.
 
         ``context`` (JSON-serialisable) is written verbatim under ``"context"`` in the abort
-        artifact; None writes no ``"context"`` key.
+        artifact; None writes no ``"context"`` key. Each ``live_context`` reader is called when
+        the abort fires and its value joins ``"context"`` under its key (a reader that raises
+        records ``"unreadable: <exception name>"``, and the artifact is still written).
 
         Raises:
             DFloatDependencyError: ``psutil`` (the RSS diagnostic) is not installed; refused here,
@@ -147,6 +152,7 @@ class Watchdog:
         self._psutil = _psutil()
         self.out_dir, self.ceiling, self.budget, self.interval = out_dir, ceiling, budget, interval
         self.context = None if context is None else dict(context)
+        self.live_context = None if live_context is None else dict(live_context)
         # Peaks seen so far: the OS footprint, MLX active + cache (None until a sample read MLX's
         # counters), and the watched maximum the ceiling is enforced on. Read and written under
         # ``_lock``, so a reset cannot interleave with a sample's update.
@@ -224,6 +230,15 @@ class Watchdog:
                 self._fire(reason, sample)
                 return
 
+    def _read_live(self) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        for key, read in (self.live_context or {}).items():
+            try:
+                values[key] = read()
+            except Exception as exc:  # a broken reader must not cost the run its abort artifact
+                values[key] = f"unreadable: {type(exc).__name__}"
+        return values
+
     def _fire(self, reason: str, sample: dict[str, float | str | None]) -> None:
         with self._lock:
             if self._stop.is_set():
@@ -246,8 +261,8 @@ class Watchdog:
                     "peak_watched": self.peak_watched,
                     "peak_mlx": self.peak_mlx,
                 }
-                if self.context is not None:
-                    artifact["context"] = self.context
+                if self.context is not None or self.live_context is not None:
+                    artifact["context"] = {**(self.context or {}), **self._read_live()}
                 (self.out_dir / "abort.json").write_text(json.dumps(artifact, indent=1))
             finally:
                 _exit(code)  # always exits, even if the artifact write above raised

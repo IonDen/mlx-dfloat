@@ -5,8 +5,8 @@ import mlx.core as mx
 import pytest
 
 from mlx_dfloat.errors import DFloatResourceError
-from mlx_dfloat.mflux.flux1 import lifecycle as lc
-from mlx_dfloat.mflux.flux1.lifecycle import Lifecycle
+from mlx_dfloat.mflux import lifecycle as lc
+from mlx_dfloat.mflux.lifecycle import Lifecycle
 
 MIB = 1024**2
 

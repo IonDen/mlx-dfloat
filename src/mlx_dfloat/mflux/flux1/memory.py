@@ -7,6 +7,7 @@ from typing import Any
 
 from mlx_dfloat.format import DF11Checkpoint
 from mlx_dfloat.integrate.memory import FitEstimate, fit_estimate
+from mlx_dfloat.integrate.memory import safetensors_bytes as safetensors_bytes
 from mlx_dfloat.mflux.flux1.names import DOUBLE_PREFIX, SINGLE_PREFIX
 
 ALLOWANCE_AT_REFERENCE = (
@@ -137,16 +138,6 @@ class FluxSizes:
     extras: int
     encoders: int
     vae: int
-
-
-def safetensors_bytes(root: Path, *subdirs: str) -> int:
-    """The size of every ``*.safetensors`` file directly under each ``root/subdir`` (missing subdirs count zero)."""
-    return sum(
-        p.stat().st_size
-        for sub in subdirs
-        for p in (root / sub).glob("*.safetensors")
-        if p.is_file()
-    )
 
 
 def sizes_for(ckpt: DF11Checkpoint, base_root: Path) -> FluxSizes:

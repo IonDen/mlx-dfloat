@@ -1,9 +1,11 @@
 """Coverage bookkeeping: the extras plan, block-extra filtering, the resident set, full-block decode."""
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import mlx.core as mx
+from mlx.utils import tree_flatten
 
 from mlx_dfloat._safetensors import TensorInfo
 from mlx_dfloat.errors import DFloatFormatError, DFloatIntegrationError
@@ -82,6 +84,30 @@ def read_extra(path: Path, info: TensorInfo) -> mx.array:
         DFloatFormatError: The tensor is not BF16.
     """
     return read_bf16(path, info)
+
+
+def load_extras(
+    module: Any, plan: Sequence[tuple[str, Path, TensorInfo]], name_map: NameMap
+) -> None:
+    """Read every planned extra, apply its transform, check its shape, load them (``strict=False``) and evaluate.
+
+    Raises:
+        DFloatFormatError: An extra is not BF16, or its (transformed) shape differs from its parameter's.
+    """
+    params = dict(tree_flatten(module.parameters()))
+    weights: list[tuple[str, mx.array]] = []
+    for name, path, info in plan:
+        array = read_extra(path, info)
+        transform = name_map.transform_of(name)
+        if transform is not None:
+            array = transform(array)
+        if tuple(array.shape) != tuple(params[name].shape):
+            raise DFloatFormatError(
+                f"{name}: extra has shape {tuple(array.shape)}, parameter {tuple(params[name].shape)}"
+            )
+        weights.append((name, array))
+    module.load_weights(weights, strict=False)
+    mx.eval([array for _name, array in weights])
 
 
 def check_extras_cover(

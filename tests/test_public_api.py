@@ -48,3 +48,20 @@ def test_access_error_is_package_rooted_and_a_permission_error():
     assert issubclass(DFloatAccessError, DFloatError)
     assert issubclass(DFloatAccessError, PermissionError)
     assert "DFloatAccessError" in mlx_dfloat.__all__
+
+
+def test_dfloat_model_is_exported_from_the_mflux_package():
+    # Bug caught: the name-based constructor missing from the adapters' public surface.
+    import mlx_dfloat.mflux as adapters
+
+    assert "DFloatModel" in adapters.__all__
+    assert callable(adapters.DFloatModel)
+
+
+@pytest.mark.mflux
+def test_dfloat_zimage_is_reachable_lazily():
+    # Bug caught: DFloatZImage missing from the lazy attribute hook (AttributeError on first use).
+    import mlx_dfloat.mflux as adapters
+    from mlx_dfloat.mflux.zimage.model import DFloatZImage
+
+    assert adapters.DFloatZImage is DFloatZImage
