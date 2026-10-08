@@ -41,12 +41,14 @@ def _row(**over):
 
 def test_tier_table_renders_gib_labels_and_the_source_file():
     # Red when: render_tier_table truncates instead of rounding GiB, drops the source column, or
-    # names the fit budget a watchdog ceiling or the MLX column without what it counts.
+    # names the MLX column without what it counts; or the second column is called the fit budget,
+    # which on a CAPPED row it is not (working set - 1.5 GiB is the watchdog ceiling there; the
+    # fit budget takes 2 GiB).
     # By hand: 16_195_141_095 / 2**30 = 15.0829 -> "15.08 GiB"; int(22.96 * GIB) / 2**30 rounds to 22.96
     # (a truncating renderer would print 22.95).
     text = render_tier_table([_row()])
     assert text.startswith(
-        "| Mac | Fit budget (budget − reserve) | Model | DF11 size | Peak (watched) | Peak footprint "  # noqa: RUF001
+        "| Mac | Working set − reserve | Model | DF11 size | Peak (watched) | Peak footprint "  # noqa: RUF001
         "| Peak MLX (sampled active + cache, or exact phase peak) | Label | Status | Limits | Result |"
     )
     assert (
@@ -246,6 +248,11 @@ PASS_REPORT = json.loads((REPO / "bench/results/harness-proof/pass-512.json").re
 PROOF_CAP = PASS_REPORT["memory_ceiling_bytes"]
 
 
+# The limits `generate` reads back after installing the host caps (20 GiB wired, 22 GiB memory) and
+# puts in the run context it hands the watchdog; the cache value is illustrative.
+HOST_LIMITS = {"memory": 22 * GIB, "cache": 24_653_119_488, "wired": 20 * GIB}
+
+
 def _abort_artifact(tmp_path, monkeypatch, *argv, ceiling=PROOF_CAP, peak=None):
     """An abort artifact written by the real producers: generate's run context, the watchdog's _fire."""
     import mlx_dfloat._watchdog as wd
@@ -257,7 +264,7 @@ def _abort_artifact(tmp_path, monkeypatch, *argv, ceiling=PROOF_CAP, peak=None):
         tmp_path,
         ceiling=ceiling,
         budget=60.0,
-        context=gen._run_context(args, tier_gb=32, label="MEASURED"),
+        context=gen._run_context(args, tier_gb=32, label="MEASURED", limits=HOST_LIMITS),
     )
     watchdog.peak_watched = peak if peak is not None else ceiling + 1
     watchdog._fire(
@@ -356,13 +363,30 @@ def test_tier_row_needs_the_mlx_peak_of_the_report():
         tier_row_from_generate_report(bad, source="s")
 
 
-def test_tier_row_tier_defaults_note():
-    # Red when: limits_note ignores limits["applied"], or reads as limits of the tier's own choosing
-    # rather than MLX's defaults for a Mac of that size.
+def test_tier_row_tier_caps_note():
+    # Red when: limits_note ignores limits["applied"], or still says a CAPPED row ran under MLX's
+    # defaults when it ran under the caps mlx-dfloat installs on a Mac of that size.
+    row = tier_row_from_generate_report(
+        {**REPORT, "limits": {**REPORT["limits"], "applied": "tier-caps"}}, source="s"
+    )
+    assert row.limits_note == "mlx-dfloat caps for the tier"
+
+
+def test_a_report_from_a_run_under_tier_defaults_says_mlx_defaults():
+    # Bug caught: a report written before the tier caps existed (applied "tier-defaults": MLX's
+    # own limits, wired 0) labelled with mlx-dfloat's caps, which that run never had.
     row = tier_row_from_generate_report(
         {**REPORT, "limits": {**REPORT["limits"], "applied": "tier-defaults"}}, source="s"
     )
     assert row.limits_note == "MLX defaults for the tier"
+
+
+def test_a_report_with_an_unknown_limits_path_is_refused():
+    # Bug caught: an unrecognised `applied` value silently given a note (any note would be a guess).
+    with pytest.raises(DFloatFormatError, match="applied"):
+        tier_row_from_generate_report(
+            {**REPORT, "limits": {**REPORT["limits"], "applied": "tier-guess"}}, source="s"
+        )
 
 
 def test_overhead_line_names_the_model_and_size():
@@ -406,6 +430,11 @@ def test_caption_keeps_the_dirty_suffix():
     assert "git abc1234-dirty, d" in caption(prov, date="d")
 
 
+# The limits a 16 GB tier's run reads back after installing that Mac's caps, by hand: 8 GiB wired,
+# 10 GiB memory, 10 GiB cache (the memory cap binds).
+TIER16_CAPS = {"memory": 10_737_418_240, "cache": 10_737_418_240, "wired": 8_589_934_592}
+
+
 def _abort(**over):
     # ceiling: 16 GiB * 2 // 3 - 1.5 GiB = 9_842_633_386 (bench/capped.py:87-99).
     base = {
@@ -421,6 +450,7 @@ def _abort(**over):
             "label": "CAPPED",
             "height": 1024,
             "width": 1024,
+            "limits": TIER16_CAPS,
         },
     }
     return {**base, **over}
@@ -442,9 +472,44 @@ def test_a_watchdog_stop_renders_as_a_capped_row_with_unrecorded_df11_size():
     assert (
         "| 16 GB | 9.17 GiB | Z-Image-Turbo | not recorded | at least 9.22 GiB (stopped after 5.6 s) "
         "| at least 9.13 GiB | at least 9.03 GiB "
-        "| CAPPED | stopped by the watchdog | MLX defaults for the tier "
+        "| CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier "
         "| `bench/results/tiers/aborts/t.json` |"
     ) in render_tier_table([row])
+
+
+def _capped_abort_note(limits):
+    """The limits note of a CAPPED abort row whose run context records ``limits`` (None: no key)."""
+    context = {k: v for k, v in _abort()["context"].items() if k != "limits"}
+    if limits is not None:
+        context["limits"] = limits
+    return tier_row_from_abort_artifact(_abort(context=context), source="s").limits_note
+
+
+def test_a_capped_abort_under_a_wired_cap_says_it_ran_under_mlx_dfloats_caps():
+    # Bug caught: the note read from the label alone, or from the memory limit (a CAPPED run under
+    # MLX's defaults also has one), instead of the wired cap only mlx-dfloat's caps install.
+    assert _capped_abort_note(TIER16_CAPS) == "mlx-dfloat caps for the tier"
+
+
+def test_a_capped_abort_with_no_wired_limit_says_it_ran_under_mlx_defaults():
+    # Bug caught: an artifact from a run that kept MLX's defaults (wired 0, as CAPPED runs did
+    # before the tier caps existed) labelled with caps it never ran under.
+    defaults = {"memory": 17_179_869_184, "cache": 10_880_583_815, "wired": 0}
+    assert _capped_abort_note(defaults) == "MLX defaults for the tier"
+
+
+def test_a_capped_abort_without_recorded_limits_says_not_recorded():
+    # Bug caught: an artifact written before the run context carried `limits` given a note it
+    # cannot back, either way.
+    assert _capped_abort_note(None) == "not recorded"
+
+
+def test_a_measured_abort_keeps_the_host_caps_note():
+    # Bug caught: the wired-limit reading applied to every label, so a host-tier stop (which also
+    # records a wired cap) read "mlx-dfloat caps for the tier".
+    context = {**_abort()["context"], "label": "MEASURED", "tier_gb": 32}
+    row = tier_row_from_abort_artifact(_abort(context=context), source="s")
+    assert row.limits_note == "host caps"
 
 
 def test_an_abort_without_an_mlx_peak_renders_it_as_not_recorded():

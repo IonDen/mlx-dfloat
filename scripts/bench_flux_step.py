@@ -45,8 +45,8 @@ scenario file (``mlx_dfloat.bench.scenario``); giving any of those flags as well
 carry the scenario hash. ``q8`` is a scenario-only mode (``SCENARIO_MODES``): mflux's transformer
 quantized to 8 bits at load (the record carries the bits, group size and mode read off a built
 block, refused unless 8 / 64 / affine), no decode launches, no eval inside the step. ``--tier GB`` (single
-runs only) emulates a smaller Mac: the tier's MLX defaults instead of the host caps, and a
-watchdog ceiling at the tier's budget minus its reserve (``mlx_dfloat.bench.capped``); the host's
+runs only) emulates a smaller Mac: the caps mlx-dfloat installs on a Mac of that size instead of
+the host caps, and a watchdog ceiling at the tier's budget minus its reserve (``mlx_dfloat.bench.capped``); the host's
 own tier keeps the host caps. Every child JSON carries a ``limits`` record (the tier's numbers,
 the limits in force after the cache limit was set, and which path installed them), its ``label``
 (MEASURED for the host tier, CAPPED below it), ``tier_gb``, ``scenario_hash``, and the watchdog's
@@ -1180,7 +1180,8 @@ def run_one(
 
     ``limits`` is the tier to run under (``limits_for_process``); None means this host's own tier.
     The host tier installs the host caps and keeps the default watchdog ceiling; a smaller tier
-    installs its MLX defaults instead (``apply_limits``; no host caps, recorded as ``[0, 0]``) and
+    installs the caps mlx-dfloat installs on a Mac of that size instead (``apply_limits``; the
+    host caps are not installed, so ``memory_caps_gb`` is recorded as ``[0, 0]``) and
     the watchdog aborts at its ceiling. Either way the cache limit is set afterwards, then the
     limits in force are read back into the ``limits`` record, and the ``limits_recorded`` parity
     condition holds only when the read-back equals what was requested (``requested_limits``). A
@@ -1199,8 +1200,8 @@ def run_one(
             ceiling, applied = default_ceiling(), "host-caps"
         else:
             apply_limits(limits)
-            ceiling, applied = limits.ceiling_bytes, "tier-defaults"
-        mx.set_cache_limit(cache_limit)  # after the tier's defaults, so the requested value wins
+            ceiling, applied = limits.ceiling_bytes, "tier-caps"
+        mx.set_cache_limit(cache_limit)  # after the tier's caps, so the requested value wins
         effective = current_limits()
         limits_recorded = limits_in_force(effective, requested_limits(limits, caps, cache_limit))
         record = limits_record(

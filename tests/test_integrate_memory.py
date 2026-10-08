@@ -4,7 +4,12 @@ import pytest
 
 from mlx_dfloat.errors import DFloatIntegrationError
 from mlx_dfloat.integrate import memory
-from mlx_dfloat.integrate.memory import budget_bytes, decoded_bytes, largest_decoded_bytes
+from mlx_dfloat.integrate.memory import (
+    budget_bytes,
+    budget_for,
+    decoded_bytes,
+    largest_decoded_bytes,
+)
 
 
 def _group(name, n_elements):
@@ -67,3 +72,11 @@ def test_largest_decoded_bytes_skips_the_named_nonblock_groups():
     # The default still refuses a group of no kind: skipping is opt-in.
     with pytest.raises(DFloatIntegrationError):
         largest_decoded_bytes(ckpt, ZIMAGE_TABLE)
+
+
+def test_budget_for_subtracts_a_2_gib_reserve_from_a_given_working_set():
+    # Bug caught: the rule budget_bytes() applies on a device not available for a working set that
+    # is not this device's (a CAPPED tier), or a reserve other than 2 GiB.
+    # By hand: 11_453_246_122 - 2_147_483_648 = 9_305_762_474 (a 16 GB Mac at 2/3).
+    assert budget_for(11_453_246_122) == 9_305_762_474
+    assert budget_for(11_453_246_122, reserve_bytes=1) == 11_453_246_121
