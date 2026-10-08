@@ -172,6 +172,8 @@ omit = [
   "src/mlx_dfloat/mflux/flux1/model.py",
   # the same for Z-Image's model class: every test is @pytest.mark.mflux, gated in the integration lane.
   "src/mlx_dfloat/mflux/zimage/model.py",
+  # the same for FLUX.2 Klein's model class: every test is @pytest.mark.mflux, gated in the integration lane.
+  "src/mlx_dfloat/mflux/flux2/model.py",
 ]
 
 [tool.coverage.report]
