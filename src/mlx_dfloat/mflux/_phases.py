@@ -23,6 +23,8 @@ class PhaseConstants:
     ``max_measured_pixels`` is the largest image the constants were measured at. ``encode_activation_bytes``, when
     set, is what a prompt encode measured to hold beyond the encoder's weights, and sizes the encode phase's
     activations; unset (None), the encode phase carries the denoise allowance instead.
+    ``denoise_activation_floor_bytes``, when set, is a size-independent lower bound on the denoise activation term (a
+    buffer a step holds whatever the image size); unset (None), the term is the scaled one alone.
     """
 
     overhead_bytes: int
@@ -34,6 +36,7 @@ class PhaseConstants:
     allowance_floor: int = 500_000_000
     max_measured_pixels: int = 1024 * 1024
     encode_activation_bytes: int | None = None
+    denoise_activation_floor_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -117,10 +120,14 @@ def denoise_activation_bytes(
 ) -> int:
     """The activation volume a denoise step holds beyond the cache limit, linear in the token count.
 
-    Calibrated at ``c.reference_tokens``; every other size is a prediction.
+    Calibrated at ``c.reference_tokens``; every other size is a prediction. A family's
+    ``denoise_activation_floor_bytes`` bounds it from below.
     """
     tokens = height * width // 256 + text_tokens
-    return int(c.denoise_activation_at_reference * tokens / c.reference_tokens)
+    scaled = int(c.denoise_activation_at_reference * tokens / c.reference_tokens)
+    if c.denoise_activation_floor_bytes is None:
+        return scaled
+    return max(scaled, c.denoise_activation_floor_bytes)
 
 
 def family_phases(

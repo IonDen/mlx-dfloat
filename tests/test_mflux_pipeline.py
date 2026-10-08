@@ -273,6 +273,103 @@ def test_the_command_path_keeps_its_caps_through_a_call():
     assert current_limits() == before
 
 
+class RecordingLimits(FakeLimits):
+    """FakeLimits that records every wired-limit call; with ``refuse_wired`` it raises as MLX does for a wired limit
+    above what the system allows (``[metal::set_wired_limit] ... is not allowed``, a ValueError)."""
+
+    def __init__(self, *, refuse_wired=False, **kwargs):
+        super().__init__(**kwargs)
+        self.wired_calls = []
+        self.refuse_wired = refuse_wired
+
+    def set_wired_limit(self, n):
+        self.wired_calls.append(n)
+        if self.refuse_wired and n > 0:
+            raise ValueError(
+                "[metal::set_wired_limit] Setting a wired limit larger than the maximum is not allowed."
+            )
+        return super().set_wired_limit(n)
+
+
+def test_a_wired_cap_mlx_refuses_still_installs_the_memory_cap_and_warns_once(monkeypatch):
+    # Bug caught (P1): a Python generate_image raising MLX's raw ValueError when the system's wired limit was lowered
+    # (sysctl iogpu.wired_limit_mb), where install_memory_caps keeps the memory cap and goes on; or a warning on every
+    # call. The memory cap (22 GiB here) is installed for the block and MLX's default restored after it.
+    monkeypatch.setattr(_pipeline, "_wired_refusal_warned", False)
+    limits = RecordingLimits(refuse_wired=True, wired=0, memory=DEFAULT_MEMORY)
+    import warnings
+
+    inside = []
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with _pipeline.call_caps(limits) as installed:
+            inside.append((installed, limits.wired, limits.memory))
+    assert [str(w.message) for w in caught if "wired" in str(w.message)] != []
+    assert inside == [((0, 23_622_320_128), 0, 23_622_320_128)]
+    assert (limits.wired, limits.memory) == (0, DEFAULT_MEMORY)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with _pipeline.call_caps(limits) as again:
+            assert again == (0, 23_622_320_128)
+
+
+def test_a_second_call_does_not_probe_the_wired_limit():
+    # Bug caught (P2): the probe (set the wired limit to 0, read the previous value, set it back) run at every call,
+    # with a compressed set resident, when this process already knows the limit it left in force. First call: probe
+    # (0, then the 0 it read), install 20 GiB, restore 0; the second: install and restore only.
+    limits = RecordingLimits(wired=0, memory=DEFAULT_MEMORY)
+    with _pipeline.call_caps(limits):
+        pass
+    with _pipeline.call_caps(limits):
+        pass
+    assert limits.wired_calls == [0, 0, 21_474_836_480, 0, 21_474_836_480, 0]
+
+
+def test_the_command_path_never_probes(monkeypatch):
+    # Bug caught (P2): a call probing the wired limit after the command installed its caps (install_memory_caps
+    # records what it installed): the only wired-limit call is the command's own 20 GiB.
+    from mlx_dfloat import _memory_caps
+
+    limits = RecordingLimits(wired=0, memory=DEFAULT_MEMORY)
+    monkeypatch.setattr(_memory_caps, "mx", limits)
+    assert _memory_caps.install_memory_caps() == (20, 22)
+    with _pipeline.call_caps(limits) as installed:
+        assert installed == (0, 0)
+    assert limits.wired_calls == [21_474_836_480]
+
+
+def test_a_wired_cap_the_command_could_not_install_is_recorded_so_calls_never_probe(monkeypatch):
+    # Bug caught (R2): install_memory_caps leaving the wired limit unknown when MLX refuses its cap, so the first call
+    # probes it after all (set to 0 and back). Recorded as 0: the call tries the cap once (refused again, one warning)
+    # and never writes 0. The only wired-limit calls are the two refused 20 GiB attempts.
+    import warnings
+
+    from mlx_dfloat import _memory_caps
+
+    monkeypatch.setattr(_pipeline, "_wired_refusal_warned", False)
+    limits = RecordingLimits(refuse_wired=True, wired=0, memory=DEFAULT_MEMORY)
+    monkeypatch.setattr(_memory_caps, "mx", limits)
+    assert _memory_caps.install_memory_caps() == (0, 22)
+    assert _memory_caps.known_wired_limit(limits) == 0
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
+        with _pipeline.call_caps(limits) as installed:
+            assert installed == (0, 23_622_320_128)
+    assert limits.wired_calls == [21_474_836_480, 21_474_836_480]
+
+
+def test_a_nested_call_leaves_the_outer_calls_caps_alone():
+    # Bug caught: an encode() run inside generate_image (both capped) restoring MLX's defaults when it returns, so
+    # the rest of the generation runs uncapped.
+    limits = RecordingLimits(wired=0, memory=DEFAULT_MEMORY)
+    with _pipeline.call_caps(limits):
+        with _pipeline.call_caps(limits) as inner:
+            assert inner == (0, 0)
+        assert (limits.wired, limits.memory) == (21_474_836_480, 23_622_320_128)
+    assert (limits.wired, limits.memory) == (0, DEFAULT_MEMORY)
+
+
 # --- the phase tracker --------------------------------------------------------------------------------------------
 
 

@@ -167,8 +167,17 @@ def test_apply_installs_the_three_limits_and_returns_the_previous_ones(monkeypat
     monkeypatch.setattr(
         capped.mx, "set_wired_limit", lambda b: (calls.__setitem__("wired", b), 33)[1]
     )
+    from mlx_dfloat import _memory_caps
+
+    known = _memory_caps.known_wired_limit(capped.mx)
     lim = tier_limits(16, host_ram_bytes=HOST_RAM, host_recommended_bytes=HOST_REC)
-    previous = apply(lim)
+    try:
+        previous = apply(lim)
+        # The per-call caps read the wired limit from this record instead of probing it (P2): a tier's 8 GiB.
+        assert _memory_caps.known_wired_limit(capped.mx) == 8_589_934_592
+    finally:
+        if known is not None:
+            _memory_caps.remember_wired_limit(capped.mx, known)
     # The 16 GB tier's caps, worked by hand in test_a_16_gb_tier_gets_the_caps_...: wired 8 GiB,
     # memory 10 GiB, cache 10 GiB.
     assert calls == {

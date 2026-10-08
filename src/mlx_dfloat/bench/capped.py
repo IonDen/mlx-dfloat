@@ -25,7 +25,7 @@ import dataclasses
 
 import mlx.core as mx
 
-from mlx_dfloat._memory_caps import caps_for_recommended_bytes
+from mlx_dfloat._memory_caps import caps_for_recommended_bytes, remember_wired_limit
 from mlx_dfloat.errors import DFloatUnsupportedError
 from mlx_dfloat.integrate.memory import budget_for
 
@@ -125,12 +125,18 @@ def tier_limits(
 
 
 def apply(limits: TierLimits) -> dict[str, int]:
-    """Install the tier's memory, cache and wired limits; returns the previous values."""
-    return {
+    """Install the tier's memory, cache and wired limits; returns the previous values.
+
+    The wired limit is recorded (``_memory_caps.remember_wired_limit``), so a model's per-call caps see it without
+    probing it again.
+    """
+    previous = {
         "memory": int(mx.set_memory_limit(limits.memory_limit_bytes)),
         "cache": int(mx.set_cache_limit(limits.cache_limit_bytes)),
         "wired": int(mx.set_wired_limit(limits.wired_limit_bytes)),
     }
+    remember_wired_limit(mx, limits.wired_limit_bytes)
+    return previous
 
 
 def current_limits() -> dict[str, int]:

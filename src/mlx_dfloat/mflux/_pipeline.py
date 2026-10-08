@@ -8,13 +8,18 @@ decode. The family supplies its measured numbers (``PhaseConstants``) and sizes;
 import functools
 import logging
 import math
+import warnings
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any, NoReturn, ParamSpec, TypeVar
 
 import mlx.core as mx
 
-from mlx_dfloat._memory_caps import caps_for_recommended_bytes
+from mlx_dfloat._memory_caps import (
+    caps_for_recommended_bytes,
+    known_wired_limit,
+    remember_wired_limit,
+)
 from mlx_dfloat._watchdog import phys_footprint
 from mlx_dfloat.errors import DFloatResourceError, DFloatUnsupportedError
 from mlx_dfloat.integrate.memory import CallPlan
@@ -71,19 +76,29 @@ def refuse_construction_args(
         refuse("bake_lora", "LoRA of any kind")
 
 
+_wired_refusal_warned = False
+
+
 @contextmanager
 def call_caps(limits: Any = mx) -> Iterator[tuple[int, int]]:
     """Run the block under the ``mlx-dfloat`` command's memory caps when no wired cap is in force; restore after.
 
     The Python API starts at MLX's default wired limit 0 (no cap), while every VAE term was measured under the caps
     the command installs (``install_memory_caps``: with wired 0 a FLUX.2 Klein VAE decode's MLX peak rose from 6.89
-    to 9.49 GiB). A wired limit already set (the command's own caps, or a CAPPED tier's) is left untouched. mlx 0.32.2
-    has no getters: the wired limit is read by setting it to 0 and back (``bench.capped.current_limits``), which
-    leaves nothing behind. ``limits`` is the object holding the setters and the device report (``mlx.core``).
-    Yields the (wired, memory) caps in bytes installed for the block, (0, 0) when none were.
+    to 9.49 GiB). A wired limit already set (the command's own caps, a CAPPED tier's, an outer call's) is left
+    untouched. mlx 0.32.2 has no getters: the wired limit is read by setting it to 0 and back, once per process; after
+    that the limit this package installed or read is remembered (``_memory_caps.known_wired_limit``), so a call with
+    the compressed set resident does not touch it. Where MLX refuses the wired cap (the system's wired limit was
+    lowered), the memory cap is still installed and one warning is issued, as ``install_memory_caps`` goes on without
+    it. ``limits`` is the object holding the setters and the device report (``mlx.core``). Yields the (wired, memory)
+    caps in bytes installed for the block, 0 for one that was not.
     """
-    wired_now = int(limits.set_wired_limit(0))
-    limits.set_wired_limit(wired_now)
+    global _wired_refusal_warned
+    wired_now = known_wired_limit(limits)
+    if wired_now is None:
+        wired_now = int(limits.set_wired_limit(0))
+        limits.set_wired_limit(wired_now)
+        remember_wired_limit(limits, wired_now)
     if wired_now != 0:
         yield (0, 0)
         return
@@ -97,11 +112,23 @@ def call_caps(limits: Any = mx) -> Iterator[tuple[int, int]]:
         return
     previous_memory = int(limits.set_memory_limit(memory))
     try:
-        limits.set_wired_limit(wired)
+        try:
+            limits.set_wired_limit(wired)
+        except Exception as exc:  # MLX refuses a wired limit above what the system allows
+            wired = 0
+            if not _wired_refusal_warned:
+                _wired_refusal_warned = True
+                warnings.warn(
+                    f"MLX refused the wired memory cap ({exc}); the call runs with the memory cap only",
+                    stacklevel=4,
+                )
+        remember_wired_limit(limits, wired)
         try:
             yield (wired, memory)
         finally:
-            limits.set_wired_limit(wired_now)
+            if wired:
+                limits.set_wired_limit(wired_now)
+            remember_wired_limit(limits, wired_now)
     finally:
         limits.set_memory_limit(previous_memory)
 
@@ -111,7 +138,7 @@ _R = TypeVar("_R")
 
 
 def with_call_caps(method: Callable[_P, _R]) -> Callable[_P, _R]:
-    """Wrap a model's ``generate_image`` in ``call_caps``: the whole call, prelude to VAE decode, runs capped."""
+    """Wrap a model's ``generate_image`` or ``encode`` in ``call_caps``: the whole call runs capped."""
 
     @functools.wraps(method)
     def capped(*args: _P.args, **kwargs: _P.kwargs) -> _R:

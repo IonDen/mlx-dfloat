@@ -757,3 +757,22 @@ def test_a_python_api_call_runs_under_the_commands_caps_and_restores_mlxs_defaul
         after = current_limits()
     assert (seen["limits_at_entry"]["wired"], seen["limits_at_entry"]["memory"]) == (wired, memory)
     assert after == start
+
+
+def test_encode_runs_under_the_commands_caps_and_restores_mlxs_defaults(tmp_path, monkeypatch):
+    # Bug caught (X4): encode() from Python run at MLX's default wired limit 0 (a prompt encode is one of the measured
+    # phases, sized under the command's caps), or the caps left installed after it returns.
+    from tests._mlx_limits import command_caps, current_limits, mlx_without_wired_cap
+
+    model = fake_model(tmp_path, monkeypatch)
+    seen = []
+    monkeypatch.setattr(
+        model._lifecycle, "ensure_embeddings", lambda *prompts: seen.append(current_limits())
+    )
+    wired, memory = command_caps()
+    assert wired > 0
+    with mlx_without_wired_cap() as start:
+        model.encode("p")
+        after = current_limits()
+    assert (seen[0]["wired"], seen[0]["memory"]) == (wired, memory)
+    assert after == start
