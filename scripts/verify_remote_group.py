@@ -12,7 +12,9 @@ Usage (from the repository root of a synced checkout):
 A repository without a ``config.json`` (a single-file ComfyUI export) is read through a pinned layout: its header
 sha256 and spot checks of its stored bytes, fetched by range reads, must match one; a fused stored matrix is then cut
 into its row blocks and each block compared with the original of its own name.
-Exit codes: 0 all sampled matrices equal, 1 a mismatch, 2 an error, 70/71 watchdog abort.
+``--extras`` also compares every uncompressed tensor (the extras) with its original of the same name, BF16 as is or,
+with ``--cast-fp32-to-bf16``, FP32 rounded to BF16; ``--groups none --extras`` compares the extras alone.
+Exit codes: 0 all sampled matrices (and extras) equal, 1 a mismatch, 2 an error, 70/71 watchdog abort.
 """
 
 import argparse
@@ -382,7 +384,13 @@ def _group_arrays(src: RangeSource, file: str, header: dict, group: str) -> Grou
 
 
 def pick_groups(stats: dict[str, dict], selector: str) -> list[str]:
-    """Resolve a selector list to group names (natural order; KeyError for unknown names)."""
+    """Resolve a selector list to group names (natural order; KeyError for unknown names).
+
+    ``none`` on its own selects no group (an extras-only run); mixed with other selectors it is
+    refused as an unknown name.
+    """
+    if selector == "none":
+        return []
     ordered = sorted(stats, key=natural_key)
     picked: list[str] = []
     for token in selector.split(","):
@@ -474,6 +482,98 @@ def verify_group(
     return record
 
 
+def verify_extras(
+    df11: RangeSource,
+    bf16: RangeSource,
+    *,
+    dindex: dict[str, tuple[str, dict]],
+    bindex: dict[str, str],
+    cast_fp32: bool = False,
+    require_any: bool = False,
+) -> dict:
+    """Compare every DF11 extra (each tensor that is not a group field) with its original, by name.
+
+    The DF11 files are the checkpoint's own: the group index's files plus the shards a
+    ``*.safetensors.index.json`` lists, or, without an index, every safetensors file at the top
+    (an extras-only shard holds no group); a file outside an index is not the checkpoint's. Each
+    header is parsed once. A DF11 extra must be BF16, with the same shape as its original, which is
+    read as is when BF16, or rounded to BF16 (nearest even) when FP32 and ``cast_fp32`` is set.
+    Extras are compared in name order. ``require_any`` (an extras-only run) makes a checkpoint
+    without extras an error.
+    """
+    record: dict = {"compared": 0, "mismatched": 0, "extras": []}
+    try:
+        headers: dict[str, dict[str, TensorInfo]] = dict(dindex.values())
+        names = df11.files()
+        indexed: set[str] = set()
+        for name in names:
+            if name.endswith(".safetensors.index.json"):
+                indexed |= set(json.loads(df11.text(name))["weight_map"].values())
+        own = indexed or {n for n in names if n.endswith(".safetensors")}
+        for name in sorted(own):
+            if name not in headers:
+                length = _header_length(df11, name)
+                headers[name] = parse_header(
+                    df11.read(name, 8, length),
+                    data_start=8 + length,
+                    file_size=df11.size(name),
+                    source=name,
+                )
+        fields = {f"{group}.{field}" for group in dindex for field in GROUP_FIELDS}
+        extras = sorted(
+            (
+                (tensor, file, info)
+                for file, header in headers.items()
+                for tensor, info in header.items()
+                if tensor not in fields
+            ),
+            key=lambda item: item[0],
+        )
+        if require_any and not extras:
+            raise VerifyError(
+                "the checkpoint holds no extras: --groups none --extras compares nothing"
+            )
+        header_cache: dict[str, tuple[dict, int]] = {}
+        for tensor, file, info in extras:
+            if info.dtype != "BF16":
+                raise VerifyError(f"extra {tensor} is {info.dtype}, not BF16")
+            shard = bindex.get(tensor)
+            if shard is None:
+                raise VerifyError(f"no original for extra {tensor}")
+            if shard not in header_cache:
+                header_cache[shard] = independent_header(bf16, shard)
+            bheader, base = header_cache[shard]
+            start, length, _n, dtype = original_range(
+                bheader.get(tensor), tensor, cast_fp32=cast_fp32
+            )
+            original_shape = tuple(bheader[tensor]["shape"])
+            if tuple(info.shape) != original_shape:
+                raise VerifyError(
+                    f"extra {tensor}: shape {tuple(info.shape)}, original has {original_shape}"
+                )
+            got = np.frombuffer(df11.read(file, info.offset, info.nbytes), "<u2")
+            raw = bf16.read(shard, base + start, length)
+            if dtype == "F32":
+                original = fp32_to_bf16_rne(np.frombuffer(raw, "<u4"))
+            else:
+                original = np.frombuffer(raw, "<u2")
+            record["extras"].append(
+                {
+                    "name": tensor,
+                    "n": int(got.size),
+                    "equal": bool(np.array_equal(got, original)),
+                    "original_dtype": dtype,
+                }
+            )
+        record["status"] = "equal" if all(e["equal"] for e in record["extras"]) else "mismatch"
+    except (DFloatError, VerifyError, KeyError, ValueError) as exc:
+        record["status"] = "error"
+        record["error"] = str(exc)
+    record["compared"] = len(record["extras"])
+    record["mismatched"] = sum(not e["equal"] for e in record["extras"])
+    return record
+
+
 def main(
     argv: list[str] | None = None,
     *,
@@ -511,7 +611,16 @@ def main(
         action="store_true",
         help="compare an FP32 original rounded to BF16 (nearest even, as torch does); parity mode only",
     )
-    parser.add_argument("--groups", default="first,last,max-block,max-code")
+    parser.add_argument(
+        "--extras",
+        action="store_true",
+        help="also compare every uncompressed tensor with its original, by name; parity mode only",
+    )
+    parser.add_argument(
+        "--groups",
+        default="first,last,max-block,max-code",
+        help="selectors or group names, comma-separated; 'none' alone compares no group (with --extras)",
+    )
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--wall-budget", type=float, default=3 * 3600.0)
     args = parser.parse_args(argv)
@@ -519,6 +628,10 @@ def main(
         parser.error(
             "--cast-fp32-to-bf16 needs a BF16 original; it is not allowed with --structural-only"
         )
+    if args.extras and args.structural_only:
+        parser.error("--extras needs the originals; it is not allowed with --structural-only")
+    if args.groups == "none" and not args.extras:
+        parser.error("--groups none compares nothing; add --extras or select groups")
     mode = "structural-only" if args.structural_only else "parity"
     if args.out.is_dir():
         print(f"error: --out {args.out} is a directory; name the result file", file=sys.stderr)
@@ -578,11 +691,25 @@ def main(
             )
             for g in pick_groups(stats, args.groups)
         ]
+        extras = None
+        if args.extras and bf16 is not None:  # --extras is refused with --structural-only above
+            extras = verify_extras(
+                df11,
+                bf16,
+                dindex=dindex,
+                bindex=bindex,
+                cast_fp32=args.cast_fp32_to_bf16,
+                require_any=args.groups == "none",
+            )
         matrices = [m for r in records for m in r["matrices"]]
+        compared_extras = [] if extras is None else extras["extras"]
         mismatched = sum(not m["equal"] for m in matrices)
         # "Error wins" (exit 2), but a mismatch found alongside it stays visible in the counts.
-        errored = any(r["status"] == "error" for r in records)
-        code = 2 if errored else (1 if mismatched else 0)
+        errored = any(r["status"] == "error" for r in records) or (
+            extras is not None and extras["status"] == "error"
+        )
+        any_mismatch = mismatched or (extras is not None and extras["mismatched"])
+        code = 2 if errored else (1 if any_mismatch else 0)
         watchdog.stop()  # no abort may follow the verdict written below
         result = {
             "df11_repo": args.df11_repo,
@@ -592,7 +719,7 @@ def main(
             "mode": mode,
             "config_source": config_source,
             "control": "fp32 rounded to bf16 (nearest even)"
-            if any(m.get("original_dtype") == "F32" for m in matrices)
+            if any(m.get("original_dtype") == "F32" for m in [*matrices, *compared_extras])
             else "bf16",
             "exit_code": code,
             "compared": len(matrices),
@@ -600,6 +727,10 @@ def main(
             "memory_caps_gb": caps,
             "groups": records,
         }
+        if extras is not None:
+            result["extras_compared"] = extras["compared"]
+            result["extras_mismatched"] = extras["mismatched"]
+            result["extras"] = extras
         tmp = args.out.with_name(args.out.name + ".tmp")
         tmp.write_text(json.dumps(result, indent=1))
         tmp.replace(args.out)
