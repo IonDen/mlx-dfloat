@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-10-08
+## [0.2.0] - 2026-10-09
 
 0.2.0 adds five image-model families to the FLUX.1 support of 0.1.0. Each runs from its DFloat11 checkpoint through
 mflux, and the GPU decodes every compressed weight to exactly the bits the checkpoint stores. The peaks below are from

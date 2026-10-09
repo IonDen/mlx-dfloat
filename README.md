@@ -60,7 +60,7 @@ other Mac has been measured. The numbers are under "Measured numbers" below.
 
 ## Status
 
-Pre-alpha: version 0.2.0 is on PyPI.
+Alpha: version 0.2.0 is on PyPI.
 
 Released in 0.1.0:
 
