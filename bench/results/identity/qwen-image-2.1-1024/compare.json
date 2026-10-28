@@ -12,7 +12,7 @@
   "eval_policy": "per-block",
   "df11": "~/.cache/huggingface/hub/models--mingyi456--Qwen-Image-2.1-DF11-ComfyUI/snapshots/1b22a3a1f96293f3b328d03abe22ab2e51cbd9cc",
   "base": "~/.cache/huggingface/hub/models--Qwen--Qwen-Image-2.1/snapshots/d26bb61231c349cf6b7896fa83353113880e1ba3",
-  "source": "ff655ce6cbf4d5cc134863c936c49711d16a252c0009f67c4d05a3182ed9933a",
+  "source": "2cb25229c0305c6c99ceb949c28e00c4e9e967de940da5c7858f50e8e8089241",
   "mlx": "0.32.2",
   "negative_prompt": " "
  },
@@ -26,11 +26,11 @@
   "eval_policy": "per-block",
   "df11": "~/.cache/huggingface/hub/models--mingyi456--Qwen-Image-2.1-DF11-ComfyUI/snapshots/1b22a3a1f96293f3b328d03abe22ab2e51cbd9cc",
   "base": "~/.cache/huggingface/hub/models--Qwen--Qwen-Image-2.1/snapshots/d26bb61231c349cf6b7896fa83353113880e1ba3",
-  "source": "ff655ce6cbf4d5cc134863c936c49711d16a252c0009f67c4d05a3182ed9933a",
+  "source": "2cb25229c0305c6c99ceb949c28e00c4e9e967de940da5c7858f50e8e8089241",
   "mlx": "0.32.2",
   "negative_prompt": " "
  },
  "pixels_identical": true,
- "df11_png_sha256": "172f2c760124b619ba1656b939585899bec3050808cfcf8d8ae06d322206773e",
- "bf16_png_sha256": "7522a96aa16f2687f0df52a53f7f417b09b55cd88ef068580d821ba03d505829"
+ "df11_png_sha256": "f12bf107af82839a2d30b7b9b3c85e2a2412e28d85c556ca9bd29339356404e4",
+ "bf16_png_sha256": "a9593471778d2125445f4c3143066887150f32c1de8b8f0cddde1c1b34cea1bb"
 }

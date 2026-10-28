@@ -12,7 +12,7 @@
   "eval_policy": "per-block",
   "df11": "~/.cache/huggingface/hub/models--DFloat11--FLUX.1-schnell-DF11/snapshots/51a428b928197e0531cb93d6e438941e2d0b247e",
   "base": "~/.cache/huggingface/hub/models--black-forest-labs--FLUX.1-schnell/snapshots/741f7c3ce8b383c54771c7003378a50191e9efe9",
-  "source": "d5992851091bf4a00217cc012c6382ffe6887d62655fc4bc306d4731d40cd801",
+  "source": "2cb25229c0305c6c99ceb949c28e00c4e9e967de940da5c7858f50e8e8089241",
   "mlx": "0.32.2"
  },
  "bf16_key": {
@@ -25,10 +25,10 @@
   "eval_policy": "per-block",
   "df11": "~/.cache/huggingface/hub/models--DFloat11--FLUX.1-schnell-DF11/snapshots/51a428b928197e0531cb93d6e438941e2d0b247e",
   "base": "~/.cache/huggingface/hub/models--black-forest-labs--FLUX.1-schnell/snapshots/741f7c3ce8b383c54771c7003378a50191e9efe9",
-  "source": "d5992851091bf4a00217cc012c6382ffe6887d62655fc4bc306d4731d40cd801",
+  "source": "2cb25229c0305c6c99ceb949c28e00c4e9e967de940da5c7858f50e8e8089241",
   "mlx": "0.32.2"
  },
  "pixels_identical": true,
- "df11_png_sha256": "75b9af5d084de91d69e11a5a5e1a444aeba3a498cadc3a106ac6e2492db7e2c4",
- "bf16_png_sha256": "e7c07257317efb656b88f18d65a45be0e914d44603888ca3312f0fc290e767c1"
+ "df11_png_sha256": "a60b5a88e1c8b06f46781aad345e154f57155b34b7f6da9d5b51cd0b7259ad35",
+ "bf16_png_sha256": "f348fd558d9881122e75368e061f82db075001677f3782e5ae7bf20f8b2fd59b"
 }

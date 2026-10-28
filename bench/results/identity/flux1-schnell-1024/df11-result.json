@@ -21,7 +21,7 @@
    "phases": {
     "encode": 11518505446,
     "denoise": 21411230501,
-    "vae": 8808361940
+    "vae": 8922261588
    },
    "peak_phase": "denoise",
    "peak_bytes": 21411230501,
@@ -37,28 +37,28 @@
   "peaks": {
    "label": "sampled at phase boundaries",
    "encode": {
-    "footprint_start": 363021464,
-    "mlx_peak": 10976952538,
-    "footprint_end": 9915833616,
-    "active_at_start": 115538184
+    "footprint_start": 363136104,
+    "mlx_peak": 10283117198,
+    "footprint_end": 9807518992,
+    "active_at_start": 115550472
    },
    "set_load": {
-    "footprint_start": 9915833616,
-    "mlx_peak": 16315890952,
-    "footprint_end": 16608785104,
-    "active_at_start": 119734024
+    "footprint_start": 9807518992,
+    "mlx_peak": 16315903240,
+    "footprint_end": 16609849944,
+    "active_at_start": 119746312
    },
    "denoise": {
-    "footprint_start": 16608785104,
-    "mlx_peak": 18725842260,
-    "footprint_end": 19131576992,
-    "active_at_start": 16315890952
+    "footprint_start": 16609849944,
+    "mlx_peak": 18725854548,
+    "footprint_end": 19095040600,
+    "active_at_start": 16315903240
    },
    "vae": {
-    "footprint_start": 9832683784,
-    "mlx_peak": 10257014912,
-    "footprint_end": 583550464,
-    "active_at_start": 121831228
+    "footprint_start": 10246560248,
+    "mlx_peak": 10257027200,
+    "footprint_end": 566068640,
+    "active_at_start": 121843516
    }
   },
   "decode_launches": 228,
@@ -66,12 +66,12 @@
    "encoder_loads": 0,
    "encoder_seconds": 0.0,
    "set_loads": 1,
-   "set_seconds": 26.188013666018378,
+   "set_seconds": 26.534756542067043,
    "forced_set_drops": 0
   },
   "versions": {
    "mlx": "0.32.2",
-   "mflux": "0.20.0"
+   "mflux": "0.23.0"
   }
  },
  "output_shape": [
@@ -80,8 +80,8 @@
   64
  ],
  "output_dtype": "mlx.core.float32",
- "footprint_peak_bytes": 21237592736,
- "mlx_peak_bytes_max_over_phases": 18725842260,
+ "footprint_peak_bytes": 21303128664,
+ "mlx_peak_bytes_max_over_phases": 18725854548,
  "key": {
   "model": "schnell",
   "seed": 42,
@@ -92,7 +92,7 @@
   "eval_policy": "per-block",
   "df11": "~/.cache/huggingface/hub/models--DFloat11--FLUX.1-schnell-DF11/snapshots/51a428b928197e0531cb93d6e438941e2d0b247e",
   "base": "~/.cache/huggingface/hub/models--black-forest-labs--FLUX.1-schnell/snapshots/741f7c3ce8b383c54771c7003378a50191e9efe9",
-  "source": "d5992851091bf4a00217cc012c6382ffe6887d62655fc4bc306d4731d40cd801",
+  "source": "2cb25229c0305c6c99ceb949c28e00c4e9e967de940da5c7858f50e8e8089241",
   "mlx": "0.32.2"
  },
  "memory_caps_gb": [
@@ -100,10 +100,10 @@
   22
  ],
  "provenance": {
-  "git": "89ff46a6614e9fd4611cfea28c809c84243cca11",
-  "source_hash": "d5992851091bf4a00217cc012c6382ffe6887d62655fc4bc306d4731d40cd801",
+  "git": "cbed93b2b10483834f2b3eee4f8b5c453204cffa",
+  "source_hash": "2cb25229c0305c6c99ceb949c28e00c4e9e967de940da5c7858f50e8e8089241",
   "mlx": "0.32.2",
-  "mflux": "0.20.0",
+  "mflux": "0.23.0",
   "macos": "27.0.1",
   "device_info": {
    "device_name": "Apple M1 Max",
@@ -118,11 +118,11 @@
    22
   ],
   "cache_limit": 32641751449,
-  "cache_memory": 1836212,
+  "cache_memory": 2884788,
   "power": {
    "ac": true,
-   "battery_pct": 94
+   "battery_pct": 100
   },
-  "date": "2026-10-08"
+  "date": "2026-10-24"
  }
 }

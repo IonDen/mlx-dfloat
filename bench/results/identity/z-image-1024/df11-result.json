@@ -27,10 +27,10 @@
    "phases": {
     "encode": 10143248230,
     "denoise": 13101538864,
-    "vae": 13054789110
+    "vae": 14115020240
    },
-   "peak_phase": "denoise",
-   "peak_bytes": 13101538864,
+   "peak_phase": "vae",
+   "peak_bytes": 14115020240,
    "budget_bytes": 24653119488,
    "fits": true
   },
@@ -44,28 +44,28 @@
   "peaks": {
    "label": "sampled at phase boundaries",
    "encode": {
-    "footprint_start": 480249176,
+    "footprint_start": 472679600,
     "mlx_peak": 9177190600,
-    "footprint_end": 8849448088,
+    "footprint_end": 8992119912,
     "active_at_start": 6580692
    },
    "set_load": {
-    "footprint_start": 8849448088,
+    "footprint_start": 8992119912,
     "mlx_peak": 8401205524,
-    "footprint_end": 8883248784,
+    "footprint_end": 8876400080,
     "active_at_start": 11823560
    },
    "denoise": {
-    "footprint_start": 8883248784,
-    "mlx_peak": 10637496148,
-    "footprint_end": 11316797072,
+    "footprint_start": 8876400080,
+    "mlx_peak": 9719201160,
+    "footprint_end": 11234663864,
     "active_at_start": 8387910856
    },
    "vae": {
-    "footprint_start": 11315814032,
-    "mlx_peak": 13100904742,
-    "footprint_end": 9278840512,
-    "active_at_start": 8389483772
+    "footprint_start": 11190132152,
+    "mlx_peak": 14332359206,
+    "footprint_end": 9808682448,
+    "active_at_start": 8388959484
    }
   },
   "decode_launches": 272,
@@ -73,12 +73,12 @@
    "encoder_loads": 0,
    "encoder_seconds": 0.0,
    "set_loads": 1,
-   "set_seconds": 15.174747042008676,
+   "set_seconds": 13.422165415948257,
    "forced_set_drops": 0
   },
   "versions": {
    "mlx": "0.32.2",
-   "mflux": "0.20.0"
+   "mflux": "0.23.0"
   }
  },
  "output_shape": [
@@ -88,8 +88,8 @@
   128
  ],
  "output_dtype": "mlx.core.bfloat16",
- "footprint_peak_bytes": 14066196160,
- "mlx_peak_bytes_max_over_phases": 13100904742,
+ "footprint_peak_bytes": 15085673936,
+ "mlx_peak_bytes_max_over_phases": 14332359206,
  "key": {
   "model": "z-image",
   "seed": 42,
@@ -100,7 +100,7 @@
   "eval_policy": "per-block",
   "df11": "~/.cache/huggingface/hub/models--mingyi456--Z-Image-DF11/snapshots/36d582560630bfe2f5b78183c4164c66d6919e5b",
   "base": "~/.cache/huggingface/hub/models--Tongyi-MAI--Z-Image/snapshots/04cc4abb7c5069926f75c9bfde9ef43d49423021",
-  "source": "bdc540a383c402237ff4dd69c5c49a6d833f9822f86326332076ddd9008fdc4b",
+  "source": "2cb25229c0305c6c99ceb949c28e00c4e9e967de940da5c7858f50e8e8089241",
   "mlx": "0.32.2"
  },
  "memory_caps_gb": [
@@ -108,10 +108,10 @@
   22
  ],
  "provenance": {
-  "git": "1038f5ea0ce6a8ad9db48f982eb3c05ab6163165",
-  "source_hash": "bdc540a383c402237ff4dd69c5c49a6d833f9822f86326332076ddd9008fdc4b",
+  "git": "cbed93b2b10483834f2b3eee4f8b5c453204cffa",
+  "source_hash": "2cb25229c0305c6c99ceb949c28e00c4e9e967de940da5c7858f50e8e8089241",
   "mlx": "0.32.2",
-  "mflux": "0.20.0",
+  "mflux": "0.23.0",
   "macos": "27.0.1",
   "device_info": {
    "device_name": "Apple M1 Max",
@@ -129,8 +129,8 @@
   "cache_memory": 4687032,
   "power": {
    "ac": true,
-   "battery_pct": 80
+   "battery_pct": 100
   },
-  "date": "2026-10-08"
+  "date": "2026-10-24"
  }
 }

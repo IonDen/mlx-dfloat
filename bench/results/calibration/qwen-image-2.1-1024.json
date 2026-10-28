@@ -17,7 +17,7 @@
  "constants_from": {
   "encode": "derisk-1",
   "denoise": "ab-new-limit-1",
-  "vae": "ab-old-limit-2"
+  "vae": "identity-4-steps-cfg-mflux023"
  },
  "runs": [
   {

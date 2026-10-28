@@ -1,0 +1,50 @@
+{
+  "model": "qwen-image-2.1",
+  "purpose": "the 1024² VAE-phase samples on mflux 0.23 the Qwen-Image 2.1 VAE transient is calibrated on together with qwen-image-2.1-1024.json (mlx_dfloat.mflux.qwen21.memory); copied from the committed records named in each run's source, no new run",
+  "df11": "mingyi456/Qwen-Image-2.1-DF11-ComfyUI@1b22a3a1f96293f3b328d03abe22ab2e51cbd9cc",
+  "base": "Qwen/Qwen-Image-2.1@d26bb61231c349cf6b7896fa83353113880e1ba3",
+  "prompt": "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water",
+  "size": 1024,
+  "seed": 42,
+  "text_tokens": 33,
+  "device": "Apple M1 Max, 32 GB",
+  "macos": "27.0.1",
+  "versions": {
+    "mlx": "0.32.2",
+    "mflux": "0.23.0"
+  },
+  "footprint_peaks_label": "OS phys_footprint in bytes: the run's watched peak, reached in the VAE phase",
+  "constants_from": {
+    "vae": "identity-4-steps-cfg-mflux023"
+  },
+  "runs": [
+    {
+      "label": "measured-40-steps-mflux023",
+      "date": "2026-10-24/25",
+      "run": "the MEASURED tier-32 generate run: 40 steps, the VAE decode on the resident set",
+      "steps": 40,
+      "cache_limit": 2731761634,
+      "source": {
+        "record": "bench/results/tiers/qwen-image-2.1-1024.json",
+        "field": "watched_peak_bytes"
+      },
+      "footprint_peaks": {
+        "vae": 21877154888
+      }
+    },
+    {
+      "label": "identity-4-steps-cfg-mflux023",
+      "date": "2026-10-24",
+      "run": "the identity check's df11 side: 4 steps, guidance 4 with the negative prompt \" \"",
+      "steps": 4,
+      "cache_limit": 2731761634,
+      "source": {
+        "record": "bench/results/identity/qwen-image-2.1-1024/df11-result.json",
+        "field": "footprint_peak_bytes"
+      },
+      "footprint_peaks": {
+        "vae": 22831539272
+      }
+    }
+  ]
+}
