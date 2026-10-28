@@ -357,8 +357,9 @@ def test_the_committed_reports_render_each_command_and_the_dev_runs_skipped_pref
     assert collected.preflight_skipped == {"flux1-dev-1024": ("not_charging",)}
     block = bt.render_readme(README, collected, date=collected.date)
     for name in ("flux1-dev-1024", "flux1-schnell-1024"):
-        assert f"bench/scenarios/{name}.toml`" in block
-    assert "flux1-dev-1024.toml` (preflight skipped: not_charging)" in block
+        assert f"bench/scenarios/{name}.toml" in block
+    assert "flux1-dev-1024.toml --skip-preflight` (preflight skipped: not_charging)" in block
+    assert "flux1-schnell-1024.toml`\n" in block  # the schnell run passed its launch check
 
 
 def test_collect_reads_the_watchdog_stops_next_to_the_tier_reports(tmp_path):

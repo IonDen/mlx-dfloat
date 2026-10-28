@@ -17,6 +17,8 @@ from mlx_dfloat.mflux.families import MODELS
 _NOT_MEASURED = "not measured"
 _NOT_RECORDED = "not recorded"
 _STOPPED = "stopped by the watchdog"
+# The bench command's flag; a report records that the run used it.
+_SKIP_PREFLIGHT = "--skip-preflight"
 # A CAPPED row ran under the wired and memory caps mlx-dfloat installs on a Mac of that size.
 _TIER_CAPS_NOTE = "mlx-dfloat caps for the tier"
 # A CAPPED row ran under MLX's own defaults for a Mac of that size (no wired limit).
@@ -50,6 +52,7 @@ class TierRow:
     limits_note: str
     source: str
     stopped_after_s: float | None = None  # a run the watchdog stopped: its peaks are lower bounds
+    mflux: str | None = None  # the record's versions.mflux; None when the record carries none
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -118,7 +121,16 @@ def tier_row_from_generate_report(report: Mapping[str, Any], *, source: str) -> 
         status="target" if watched <= ceiling else "over",
         limits_note=_applied_note(_need(limits, "applied", "limits")),
         source=source,
+        mflux=_mflux_version(report),
     )
+
+
+def _mflux_version(report: Mapping[str, Any]) -> str | None:
+    """The report's ``versions.mflux``; None when the report records no versions."""
+    versions = report.get("versions")
+    if not isinstance(versions, Mapping) or versions.get("mflux") is None:
+        return None
+    return str(versions["mflux"])
 
 
 def _applied_note(applied: Any) -> str:
@@ -158,7 +170,8 @@ def tier_row_from_abort_artifact(artifact: Mapping[str, Any], *, source: str) ->
     watchdog); the DF11 size was never recorded, and the status says the run was stopped. On a
     CAPPED row the limits note comes from the context's ``limits`` (the MLX limits read back after
     the install): a wired limit above zero is mlx-dfloat's caps for the tier, zero is MLX's
-    defaults, and an older artifact without ``limits`` reads "not recorded".
+    defaults, and an older artifact without ``limits`` reads "not recorded". The mflux version is the context's
+    ``versions.mflux``; an older artifact without ``versions`` reads "not recorded" too.
 
     Raises:
         DFloatFormatError: The artifact has no run context, the context lacks ``model``,
@@ -184,6 +197,7 @@ def tier_row_from_abort_artifact(artifact: Mapping[str, Any], *, source: str) ->
         limits_note=_abort_limits_note(label, context),
         source=source,
         stopped_after_s=float(_need(artifact, "elapsed", "abort artifact")),
+        mflux=_mflux_version(context),
     )
 
 
@@ -259,8 +273,30 @@ def _pct(x: float | None) -> str:
 
 _TIER_HEADER = (
     "| Mac | Working set − reserve | Model | DF11 size | Peak (watched) | Peak footprint "  # noqa: RUF001
-    "| Peak MLX (sampled active + cache, or exact phase peak) | Label | Status | Limits | Result |"
+    "| Peak MLX (sampled active + cache, or exact phase peak) | Label | Status | Limits | Result | mflux |"
 )
+
+
+def _version_key(version: str) -> tuple[int, ...]:
+    """``"0.23.0"`` as ``(0, 23, 0)``, so versions compare as numbers, not strings.
+
+    Only the first three numbers count: ``"0.23.0rc1"`` is ``(0, 23, 0)``, never above ``"0.23.0"``.
+    """
+    return tuple(int(part) for part in re.findall(r"\d+", version)[:3])
+
+
+def _minor(version: str) -> str:
+    """``"0.20.0"`` as ``"0.20"``: the major and minor parts."""
+    return ".".join(re.findall(r"\d+", version)[:2]) or version
+
+
+def _mflux_cell(version: str | None, newest: str | None) -> str:
+    """The row's mflux version; a row older than the table's newest says it was not re-run on that one."""
+    if version is None:
+        return _NOT_RECORDED
+    if newest is None or _version_key(version) >= _version_key(newest):
+        return _minor(version)
+    return f"{_minor(version)}, not re-run on {_minor(newest)}"
 
 
 def _peaks(r: TierRow) -> tuple[str, str, str]:
@@ -278,14 +314,21 @@ def _peaks(r: TierRow) -> tuple[str, str, str]:
 
 
 def render_tier_table(rows: Sequence[TierRow]) -> str:
-    """Render the tier table: GiB with two decimals, one row per measured tier."""
-    lines = [_TIER_HEADER, "|" + "---|" * 11]
+    """Render the tier table: GiB with two decimals, one row per measured tier.
+
+    The last column is the mflux version from each row's record; a row on an older mflux than the newest row's
+    says it was not re-run on the newest, and a record without a version reads "not recorded".
+    """
+    versions = [r.mflux for r in rows if r.mflux is not None]
+    newest = max(versions, key=_version_key) if versions else None
+    lines = [_TIER_HEADER, "|" + "---|" * 12]
     for r in rows:
         watched, footprint, mlx = _peaks(r)
         lines.append(
             f"| {r.mac_gb} GB | {_gib(r.ceiling_bytes)} | {_model_label(r.model)} "
             f"| {_gib_or_unrecorded(r.df11_bytes)} | {watched} "
-            f"| {footprint} | {mlx} | {r.label} | {r.status} | {r.limits_note} | `{r.source}` |"
+            f"| {footprint} | {mlx} | {r.label} | {r.status} | {r.limits_note} | `{r.source}` "
+            f"| {_mflux_cell(r.mflux, newest)} |"
         )
     return "\n".join(lines) + "\n"
 
@@ -309,7 +352,7 @@ def render_overhead_block(
     """Render each scenario's overhead line and recorded command, then the caption and cache note.
 
     ``preflight_skipped`` maps a scenario whose run skipped the launch check to the gates that
-    failed; its command line says so.
+    failed; its command carries ``--skip-preflight`` (the flag the run used) and says which gates failed.
     """
     skipped = preflight_skipped or {}
     lines = []
@@ -324,7 +367,10 @@ def render_overhead_block(
             f"(one eval per step, same cache limit): {q8}"
         )
         lines.append("")
-        command = f"Command: `{reproducers.get(key, '')}`"
+        reproducer = reproducers.get(key, "")
+        if key in skipped and _SKIP_PREFLIGHT not in reproducer.split():
+            reproducer = f"{reproducer} {_SKIP_PREFLIGHT}".strip()
+        command = f"Command: `{reproducer}`"
         if key in skipped:
             command += f" (preflight skipped: {', '.join(skipped[key]) or 'no gate failed'})"
         lines += [command, ""]
