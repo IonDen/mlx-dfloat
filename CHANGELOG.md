@@ -6,6 +6,57 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-28
+
+0.2.1 runs on mflux 0.23 and requires it; the `mflux` extra's pin excludes 0.20. FLUX.1-schnell, Z-Image, distilled
+FLUX.2-klein-4B and Qwen-Image-2.1 were run again on mflux 0.23.0 on a 32 GB M1 Max (macOS 27.0.1, mlx 0.32.2). For
+each, the final latents are equal to those of the same transformer streaming its BF16 weights (4 steps at 1024²), the
+images are identical pixel for pixel, and the peaks stayed under the machine's 22.96 GiB budget
+(`bench/results/identity/` and `bench/results/tiers/`). The distilled FLUX.2-klein-4B now has its first such record. ERNIE-Image and
+ERNIE-Image-Turbo, Krea 2 Turbo and Raw, FLUX.2-klein-base-4B, base-9B and 9B, Z-Image-Turbo, FLUX.1-dev and
+FLUX.1-Krea-dev, and the stopped 16 GB and 24 GB rows were not run again. Their numbers keep the mflux 0.20.0 they were
+measured on, and the README's tier table says so in its new `mflux` column.
+
+Peaks at 1024² on that Mac, on mflux 0.23.0: FLUX.1-schnell 19.77 GiB (was 19.78), Z-Image 14.40 GiB (was 13.15 on mflux 0.20.0),
+FLUX.2-klein-4B 11.85 GiB (was 11.88), Qwen-Image-2.1 20.37 GiB (was 20.42). Each is the file under
+`bench/results/tiers/`; the 0.2.0 values were measured on mflux 0.20.0.
+
+### Changed
+
+- The `mflux` extra and the `bench` group require `mflux>=0.23,<0.24` and `pillow<13`, replacing `mflux>=0.20,<0.21`.
+  mflux 0.23.0 fails at import with Pillow 13.
+- Qwen-Image-2.1 runs mflux's packed projections one block at a time. Its compiled step functions stay out of the
+  generation path, and a step function compiled between calls is refused. Both sides of its identity check run
+  without mflux's step compilation: one decodes the DF11 weights, the other streams the BF16 weights one block at a time
+  through a copy of mflux's own loop body. Stock mflux's compiled step can differ in the last bits from the same graph
+  run without that compilation, so an image from stock mflux's default path can differ in the last bits from this
+  package's, which matches the BF16 path run without it bit for bit.
+- Z-Image and FLUX.2 Klein set the attributes mflux 0.23 reads when it generates, and refuse mflux's precision options.
+- Each model's BF16 base repository (text encoders, VAE, tokenizer) is pinned to a fixed revision, the snapshot the
+  recorded runs used. A base you pass with `--base` is used as given.
+- `mlx-dfloat generate` reports record the macOS version.
+- The README's tier table has a last column, `mflux`, with the mflux version each row ran on. A row on the newest
+  version shows that version, an older row shows `0.20, not re-run on 0.23`, and a stopped run, whose file records no
+  version, shows `not recorded`.
+- A tier run that the watchdog stops now records the mflux version in its abort file. The stopped rows already in the
+  table come from 0.2.0 files and still show `not recorded`.
+
+### Fixed
+
+- The memory estimate for Z-Image was too low on mflux 0.23. In the committed Z-Image run the VAE
+  step peaked at 14.40 GiB, above the old estimate of 13.15 GiB (the 0.20.0 peak it was calibrated on, not the 0.23
+  one). The estimate is raised and now covers every committed Z-Image run. The raised estimate also applies to
+  Z-Image-Turbo, which shares it and was not measured on mflux 0.23. The estimate for Qwen-Image-2.1 was raised
+  too, by 0.04 GiB. One consequence for users: on a 24 GB Mac (not measured), a Z-Image or Z-Image-Turbo call is now
+  planned to drop the compressed transformer before the VAE decode, so the next call has to load it again.
+- FLUX.1 loads `norm_out.linear.bias`, which mflux 0.23 builds and loads.
+- When a base checkpoint lacks required weights, the error names the missing tensors.
+
+### Added
+
+- Identity records for the distilled FLUX.2-klein-4B (`bench/results/identity/flux2-klein-4b-1024/`): 4 steps at
+  guidance 1.0, latents equal and images identical pixel for pixel.
+
 ## [0.2.0] - 2026-10-09
 
 0.2.0 adds five image-model families to the FLUX.1 support of 0.1.0. Each runs from its DFloat11 checkpoint through
@@ -338,6 +389,7 @@ The first release.
 - CI's mflux lane gets the Hub token for its test step only, so the three tokenizer tests against the gated FLUX.1
   bases run there instead of skipping.
 
-[Unreleased]: https://github.com/IonDen/mlx-dfloat/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/IonDen/mlx-dfloat/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/IonDen/mlx-dfloat/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/IonDen/mlx-dfloat/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/IonDen/mlx-dfloat/releases/tag/v0.1.0
