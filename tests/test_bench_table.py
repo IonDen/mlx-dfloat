@@ -413,9 +413,26 @@ def test_overhead_block_gives_each_scenario_its_command_and_a_skipped_preflight(
     lines = text.splitlines()
     dev = lines.index(next(x for x in lines if x.startswith("FLUX.1-dev")))
     schnell = lines.index(next(x for x in lines if x.startswith("FLUX.1-schnell")))
-    assert lines[dev + 2] == "Command: `uv run dev` (preflight skipped: not_charging)"
+    assert (
+        lines[dev + 2] == "Command: `uv run dev --skip-preflight` (preflight skipped: not_charging)"
+    )
     assert lines[schnell + 2] == "Command: `uv run schnell`"
     assert text.count("preflight skipped") == 1
+    assert text.count("--skip-preflight") == 1
+
+
+def test_a_skipped_preflight_reproducer_that_already_carries_the_flag_prints_it_once():
+    # Bug caught: the flag appended unconditionally, so a report whose recorded command already ends in
+    # --skip-preflight renders a command that names it twice.
+    text = render_overhead_block(
+        {"flux1-dev-1024": _summary()},
+        caption="c",
+        reproducers={"flux1-dev-1024": "uv run dev --skip-preflight"},
+        preflight_skipped={"flux1-dev-1024": ("not_charging",)},
+        cache_limit_note="n",
+    )
+    assert "Command: `uv run dev --skip-preflight` (preflight skipped: not_charging)" in text
+    assert text.count("--skip-preflight") == 1
 
 
 def test_caption_keeps_the_dirty_suffix():

@@ -78,7 +78,7 @@ def test_the_mflux_lane_installs_the_locked_extra_and_proves_it_ran_tests():
     # job dies before a single test), dropping `-m mflux` / `--run-network`, or a lane that goes
     # green having collected zero mflux tests, or a `uv run` step that could drop the extra.
     job = _integration_job()
-    assert job["strategy"]["matrix"]["mflux"] == ["0.20.0"]
+    assert job["strategy"]["matrix"]["mflux"] == ["0.23.0"]
     runs = [step.get("run", "") for step in job["steps"]]
     assert "uv sync --locked --group dev --extra mflux" in runs
     assert not any("uv pip install" in run or "--no-sync" in run for run in runs)
@@ -111,6 +111,17 @@ def test_the_mflux_lane_installs_the_locked_extra_and_proves_it_ran_tests():
     assert len(guard) == 1
     assert "-m mflux" in guard[0]
     assert "-ge 2" in guard[0]
+
+
+def test_the_mflux_lane_fails_when_the_lock_installs_another_mflux_than_its_row_names():
+    # Bug caught: the lane named for one mflux release (the matrix row, which is the required check's name on main)
+    # while `uv sync --locked` installs whatever the lock pins, so a stale lock runs the old mflux under the new name
+    # and the lane stays green. The sanity step must compare the installed version with the row and exit non-zero.
+    runs = [step.get("run", "") for step in _integration_job()["steps"]]
+    sanity = [run for run in runs if "version('mflux')" in run]
+    assert len(sanity) == 1
+    assert "== '${{ matrix.mflux }}'" in sanity[0]
+    assert "sys.exit(" in sanity[0]
 
 
 def test_the_mflux_lane_gates_the_model_module_on_its_own():

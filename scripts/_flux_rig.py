@@ -42,7 +42,7 @@ from mlx_dfloat.integrate.providers import (
 )
 from mlx_dfloat.integrate.seam import MAX_NONE_POLICY_LAUNCHING_BLOCKS, _async_eval, _eval
 from mlx_dfloat.mflux import require_mflux
-from mlx_dfloat.mflux.flux1.names import DOUBLE_PREFIX, DROPPED_EXTRAS, SINGLE_PREFIX, flux_name_map
+from mlx_dfloat.mflux.flux1.names import DOUBLE_PREFIX, SINGLE_PREFIX, flux_name_map
 from mlx_dfloat.mflux.flux1.transformer import (
     MAX_BUILD_ACTIVE_BYTES,
     SeamMixin,
@@ -311,7 +311,6 @@ def build_transformer(
 
 __all__ = [
     "DOUBLE_PREFIX",
-    "DROPPED_EXTRAS",
     "EVAL_POLICIES",
     "FLUX_CACHE_LIMIT",
     "MAX_BUILD_ACTIVE_BYTES",

@@ -996,11 +996,58 @@ def run_df11_qwen21(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, A
     }
 
 
+def qwen21_denoise(
+    transformer: Any,
+    config: Any,
+    latents: mx.array,
+    *,
+    prompt_embeds: mx.array,
+    prompt_mask: mx.array,
+    negative_prompt_embeds: mx.array | None = None,
+    negative_prompt_mask: mx.array | None = None,
+) -> mx.array:
+    """The Qwen-Image 2.1 loop body of mflux over ``config.time_steps``; returns the final latents (evaluated per step).
+
+    Classifier-free guidance runs when ``negative_prompt_embeds`` is given: a second call on the negative pair per
+    step, combined as ``negative + guidance * (positive - negative)``. The whole loop runs inside the transformer's
+    ``inference_projections()`` window (packed Q/K/V and gate/up projections), as mflux's ``generate_image`` runs it
+    on the df11 side.
+    """
+    with transformer.inference_projections():
+        for t in config.time_steps:
+            # mflux qwen_image_21.py's step body: scale, positive call, negative call when CFG ran, combine, step,
+            # eval.
+            latents = config.scheduler.scale_model_input(latents, t)
+            noise = transformer(
+                t=t,
+                config=config,
+                hidden_states=latents,
+                encoder_hidden_states=prompt_embeds,
+                encoder_hidden_states_mask=prompt_mask,
+            )
+            if negative_prompt_embeds is not None:
+                noise_negative = transformer(
+                    t=t,
+                    config=config,
+                    hidden_states=latents,
+                    encoder_hidden_states=negative_prompt_embeds,
+                    encoder_hidden_states_mask=negative_prompt_mask,
+                )
+                noise = noise_negative + config.guidance * (noise - noise_negative)
+            latents = config.scheduler.step(noise=noise, timestep=t, latents=latents)
+            mx.eval(latents)
+            # No verify_step(): attach(..., verify_in_call=True) checks inside each call, and this provider defers
+            # nothing.
+    return latents
+
+
 def run_bf16_qwen21(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, Any]:
     """Stream the base's BF16 transformer shards through the seam and mflux's Qwen-Image 2.1 loop body, then the VAE.
 
     ``modulation.1`` loads from the base as a plain weight; the blocks stream as they run, the forward pass
-    uncompiled as on the df11 side (``EagerForward`` sets mflux's ``_step_fn`` to the plain method).
+    uncompiled as on the df11 side (``EagerForward`` sets mflux's ``_step_fn`` to the plain method and refuses a
+    compiled one on every call). The loop body (``qwen21_denoise``) runs inside the transformer's
+    ``inference_projections()`` window.
 
     Raises:
         VerifyImageError: The df11 side's saved embeddings are not present yet.
@@ -1053,31 +1100,18 @@ def run_bf16_qwen21(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, A
     )
     mx.eval(latents, prompt_embeds, prompt_mask)
 
-    for t in config.time_steps:
-        # mflux qwen_image_21.py's step body: scale, positive call, negative call when CFG ran, combine, step, eval.
-        latents = config.scheduler.scale_model_input(latents, t)
-        noise = transformer(
-            t=t,
-            config=config,
-            hidden_states=latents,
-            encoder_hidden_states=prompt_embeds,
-            encoder_hidden_states_mask=prompt_mask,
-        )
-        if do_true_cfg:
-            noise_negative = transformer(
-                t=t,
-                config=config,
-                hidden_states=latents,
-                encoder_hidden_states=negative_prompt_embeds,
-                encoder_hidden_states_mask=negative_prompt_mask,
-            )
-            noise = noise_negative + config.guidance * (noise - noise_negative)
-        latents = config.scheduler.step(noise=noise, timestep=t, latents=latents)
-        mx.eval(latents)
-        # No verify_step(): attach(..., verify_in_call=True) checks inside each call, and this provider defers nothing.
+    latents = qwen21_denoise(
+        transformer,
+        config,
+        latents,
+        prompt_embeds=prompt_embeds,
+        prompt_mask=prompt_mask,
+        negative_prompt_embeds=negative_prompt_embeds,
+        negative_prompt_mask=negative_prompt_mask,
+    )
 
-    if not qtf.is_eager(transformer):
-        raise VerifyImageError("the bf16 side's forward pass was compiled; the df11 side's is not")
+    # No post-window is_eager check: the window clears both step functions on exit, so it would always pass. The
+    # check runs inside the window instead: the seam's EagerForward refuses a compiled step function on every call.
     mx.save_safetensors(str(out_dir / "latents.safetensors"), {"latents": latents})
 
     vae = qinit.load_vae(base_root)

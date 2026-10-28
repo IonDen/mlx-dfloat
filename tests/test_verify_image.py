@@ -771,7 +771,7 @@ class _QwenConfig:
 
 
 class _UnpackedQwenTransformer:
-    """A transformer without mflux 0.23's packing window (mflux 0.20, or any family without it).
+    """The packing transformer's base: its call outside any window.
 
     Its noise is the prompt embedding plus 1, so the positive and negative calls give different noise.
     """
@@ -833,13 +833,6 @@ def test_the_qwen_bf16_loop_runs_inside_the_transformers_packing_window():
     assert latents.tolist() == [[[22.0, 22.0, 22.0], [22.0, 22.0, 22.0]]]
     assert transformer.windows == 1
     assert transformer.packed is False  # the window is closed before the VAE decode
-
-
-def test_the_qwen_bf16_loop_runs_a_transformer_without_a_packing_window_unchanged():
-    # Bug caught: the window required (an AttributeError on mflux 0.20's transformer), or entered on some other
-    # object. Two steps of noise 1 give 2.
-    latents = _qwen_denoise(_UnpackedQwenTransformer(), _QwenConfig(2))
-    assert latents.tolist() == [[[2.0, 2.0, 2.0], [2.0, 2.0, 2.0]]]
 
 
 def test_the_qwen_bf16_loop_combines_the_negative_call_with_mfluxs_guidance():
