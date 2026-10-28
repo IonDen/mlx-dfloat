@@ -1,0 +1,55 @@
+{
+ "exit_code": 0,
+ "reads": 400,
+ "output_shape": [
+  1,
+  4096,
+  128
+ ],
+ "output_dtype": "mlx.core.bfloat16",
+ "footprint_peak_bytes": 7409108240,
+ "mlx_peak_bytes_process": 7796048558,
+ "key": {
+  "model": "flux2-klein-4b",
+  "seed": 42,
+  "steps": 4,
+  "size": 1024,
+  "prompt": "A stone lighthouse on a rocky shore at dawn, waves breaking below it and a small fishing boat far out on the water",
+  "guidance": 1.0,
+  "eval_policy": "per-block",
+  "df11": "~/.cache/huggingface/hub/models--mingyi456--FLUX.2-klein-4B-DF11/snapshots/d29a2c249ff0afeb678da101e707bd134596c96f",
+  "base": "~/.cache/huggingface/hub/models--black-forest-labs--FLUX.2-klein-4B/snapshots/e7b7dc27f91deacad38e78976d1f2b499d76a294",
+  "source": "2cb25229c0305c6c99ceb949c28e00c4e9e967de940da5c7858f50e8e8089241",
+  "mlx": "0.32.2"
+ },
+ "memory_caps_gb": [
+  20,
+  22
+ ],
+ "provenance": {
+  "git": "cbed93b2b10483834f2b3eee4f8b5c453204cffa",
+  "source_hash": "2cb25229c0305c6c99ceb949c28e00c4e9e967de940da5c7858f50e8e8089241",
+  "mlx": "0.32.2",
+  "mflux": "0.23.0",
+  "macos": "27.0.1",
+  "device_info": {
+   "device_name": "Apple M1 Max",
+   "max_recommended_working_set_size": 26800603136,
+   "memory_size": 34359738368,
+   "architecture": "applegpu_g13s",
+   "max_buffer_length": 20100448256,
+   "resource_limit": 499000
+  },
+  "memory_caps_gb": [
+   20,
+   22
+  ],
+  "cache_limit": 0,
+  "cache_memory": 0,
+  "power": {
+   "ac": true,
+   "battery_pct": 100
+  },
+  "date": "2026-10-24"
+ }
+}

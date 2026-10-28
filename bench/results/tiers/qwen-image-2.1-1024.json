@@ -42,6 +42,7 @@
   },
   "applied": "host-caps"
  },
+ "macos": "27.0.1",
  "family": "qwen21",
  "model": "qwen-image-2.1",
  "df11": {
@@ -87,45 +88,45 @@
  "peaks": {
   "label": "sampled at phase boundaries",
   "encode": {
-   "footprint_start": 611714344,
-   "mlx_peak": 15353361928,
-   "footprint_end": 13554035800,
+   "footprint_start": 611026168,
+   "mlx_peak": 15367452640,
+   "footprint_end": 13621226656,
    "active_at_start": 146825876
   },
   "set_load": {
-   "footprint_start": 13554035800,
+   "footprint_start": 13621226656,
    "mlx_peak": 9869450888,
-   "footprint_end": 10343883224,
+   "footprint_end": 10343539208,
    "active_at_start": 147219592
   },
   "denoise": {
-   "footprint_start": 10343883224,
-   "mlx_peak": 11503639112,
-   "footprint_end": 12186051032,
+   "footprint_start": 10343539208,
+   "mlx_peak": 11413002830,
+   "footprint_end": 12439347720,
    "active_at_start": 9775978888
   },
   "vae": {
-   "footprint_start": 12172665304,
-   "mlx_peak": 21171435010,
-   "footprint_end": 15541412888,
-   "active_at_start": 9779206710
+   "footprint_start": 12410053128,
+   "mlx_peak": 21171418626,
+   "footprint_end": 15541167176,
+   "active_at_start": 9779190326
   }
  },
- "decode_launches": 1280,
+ "decode_launches": 1312,
  "lifecycle": {
   "encoder_loads": 0,
   "encoder_seconds": 0.0,
   "set_loads": 1,
-  "set_seconds": 13.601246499980334,
+  "set_seconds": 14.332625124952756,
   "forced_set_drops": 0
  },
  "versions": {
   "mlx": "0.32.2",
-  "mflux": "0.20.0"
+  "mflux": "0.23.0"
  },
- "footprint_peak_bytes": 21929337856,
+ "footprint_peak_bytes": 21877154888,
  "footprint_peak_label": "OS phys_footprint, sampled every 0.05 s by the watchdog",
- "watched_peak_bytes": 21929337856,
- "mlx_peak_bytes": 19963475458,
- "elapsed_seconds": 413.966
+ "watched_peak_bytes": 21877154888,
+ "mlx_peak_bytes": 19963459074,
+ "elapsed_seconds": 397.941
 }

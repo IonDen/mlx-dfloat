@@ -1,14 +1,14 @@
 {
  "exit_code": 0,
- "output": "/tmp/tier-schnell.png",
+ "output": "schnell.png",
  "memory_caps_gb": [
   20,
   22
  ],
  "model_kwargs": {
   "model": "schnell",
-  "df11_path": null,
-  "base_path": null,
+  "df11_path": "~/.cache/huggingface/hub/models--DFloat11--FLUX.1-schnell-DF11/snapshots/51a428b928197e0531cb93d6e438941e2d0b247e",
+  "base_path": "~/.cache/huggingface/hub/models--black-forest-labs--FLUX.1-schnell/snapshots/741f7c3ce8b383c54771c7003378a50191e9efe9",
   "eval_policy": "per-block",
   "cache_limit": null,
   "fit_check": true
@@ -30,6 +30,7 @@
    "reserve_bytes": 2147483648,
    "budget_bytes": 26800603136,
    "ceiling_bytes": 24653119488,
+   "fit_budget_bytes": 24653119488,
    "budget_source": "device",
    "is_host": true,
    "label": "MEASURED"
@@ -41,15 +42,16 @@
   },
   "applied": "host-caps"
  },
+ "macos": "27.0.1",
  "model": "schnell",
  "df11": {
   "root": "~/.cache/huggingface/hub/models--DFloat11--FLUX.1-schnell-DF11/snapshots/51a428b928197e0531cb93d6e438941e2d0b247e",
-  "repo_id": "DFloat11/FLUX.1-schnell-DF11",
+  "repo_id": null,
   "revision": "51a428b928197e0531cb93d6e438941e2d0b247e"
  },
  "base": {
   "root": "~/.cache/huggingface/hub/models--black-forest-labs--FLUX.1-schnell/snapshots/741f7c3ce8b383c54771c7003378a50191e9efe9",
-  "repo_id": "black-forest-labs/FLUX.1-schnell",
+  "repo_id": null,
   "revision": "741f7c3ce8b383c54771c7003378a50191e9efe9"
  },
  "eval_policy": "per-block",
@@ -60,7 +62,7 @@
   "phases": {
    "encode": 11518505446,
    "denoise": 21411230501,
-   "vae": 8808361940
+   "vae": 8922261588
   },
   "peak_phase": "denoise",
   "peak_bytes": 21411230501,
@@ -76,28 +78,28 @@
  "peaks": {
   "label": "sampled at phase boundaries",
   "encode": {
-   "footprint_start": 358565016,
-   "mlx_peak": 10829791578,
-   "footprint_end": 10080869816,
-   "active_at_start": 115521672
+   "footprint_start": 362808448,
+   "mlx_peak": 10976964826,
+   "footprint_end": 10218462816,
+   "active_at_start": 115550472
   },
   "set_load": {
-   "footprint_start": 10080869816,
-   "mlx_peak": 16315874440,
-   "footprint_end": 16579015424,
-   "active_at_start": 119717512
+   "footprint_start": 10218462816,
+   "mlx_peak": 16315903240,
+   "footprint_end": 16609899264,
+   "active_at_start": 119746312
   },
   "denoise": {
-   "footprint_start": 16579015424,
-   "mlx_peak": 18725825760,
-   "footprint_end": 19133838008,
-   "active_at_start": 16315874440
+   "footprint_start": 16609899264,
+   "mlx_peak": 18725854548,
+   "footprint_end": 19132789528,
+   "active_at_start": 16315903240
   },
   "vae": {
-   "footprint_start": 9721010320,
-   "mlx_peak": 10255949836,
-   "footprint_end": 853100104,
-   "active_at_start": 121814728
+   "footprint_start": 8916276792,
+   "mlx_peak": 10255978624,
+   "footprint_end": 851920408,
+   "active_at_start": 121843516
   }
  },
  "decode_launches": 228,
@@ -105,15 +107,16 @@
   "encoder_loads": 0,
   "encoder_seconds": 0.0,
   "set_loads": 1,
-  "set_seconds": 27.269080250000115,
+  "set_seconds": 25.723129791091196,
   "forced_set_drops": 0
  },
  "versions": {
   "mlx": "0.32.2",
-  "mflux": "0.20.0"
+  "mflux": "0.23.0"
  },
- "footprint_peak_bytes": 21233332920,
+ "footprint_peak_bytes": 21232349976,
  "footprint_peak_label": "OS phys_footprint, sampled every 0.05 s by the watchdog",
- "watched_peak_bytes": 21233332920,
- "mlx_peak_bytes": 20438596158
+ "watched_peak_bytes": 21232349976,
+ "mlx_peak_bytes": 20489009842,
+ "elapsed_seconds": 106.051
 }

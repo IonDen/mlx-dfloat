@@ -12,7 +12,7 @@
   "eval_policy": "per-block",
   "df11": "~/.cache/huggingface/hub/models--mingyi456--Z-Image-DF11/snapshots/36d582560630bfe2f5b78183c4164c66d6919e5b",
   "base": "~/.cache/huggingface/hub/models--Tongyi-MAI--Z-Image/snapshots/04cc4abb7c5069926f75c9bfde9ef43d49423021",
-  "source": "bdc540a383c402237ff4dd69c5c49a6d833f9822f86326332076ddd9008fdc4b",
+  "source": "2cb25229c0305c6c99ceb949c28e00c4e9e967de940da5c7858f50e8e8089241",
   "mlx": "0.32.2"
  },
  "bf16_key": {
@@ -25,10 +25,10 @@
   "eval_policy": "per-block",
   "df11": "~/.cache/huggingface/hub/models--mingyi456--Z-Image-DF11/snapshots/36d582560630bfe2f5b78183c4164c66d6919e5b",
   "base": "~/.cache/huggingface/hub/models--Tongyi-MAI--Z-Image/snapshots/04cc4abb7c5069926f75c9bfde9ef43d49423021",
-  "source": "bdc540a383c402237ff4dd69c5c49a6d833f9822f86326332076ddd9008fdc4b",
+  "source": "2cb25229c0305c6c99ceb949c28e00c4e9e967de940da5c7858f50e8e8089241",
   "mlx": "0.32.2"
  },
  "pixels_identical": true,
- "df11_png_sha256": "c319d85dd834266aa9eed5bdcf9dd0b5ad7bca43fa3e844d2881ed52cb5d0d6c",
- "bf16_png_sha256": "46e6724149ac21e1ff3276cf240d9c10e5d25934ec26f82a0c00ba88f3c765d3"
+ "df11_png_sha256": "9e3f5d3266d0f29787a5dc508c8f07bac77a08710cea4b2bced6435cd2d78c09",
+ "bf16_png_sha256": "99269a4d125cf0519b6ce4821e56e8c1f932cda075bd8d260eba8e67af9f08a4"
 }
