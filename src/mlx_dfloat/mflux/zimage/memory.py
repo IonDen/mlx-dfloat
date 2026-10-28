@@ -23,15 +23,22 @@ MAX_MEASURED_PIXELS = 1024 * 1024  # no run above 1024² on this path
 # VAE_TRANSIENT (see below). Re-measure before changing any.
 # OVERHEAD: the footprint MLX's counters do not see after the build phase (turbo 510_030_936, base 470_479_960).
 OVERHEAD_BYTES = 510_030_936  # 0.475 GiB
-# VAE_TRANSIENT: calibrated on the two measured 1024² generate runs (2026-10-08, same versions, Z-Image base and
-# Turbo; footprint peaks 14_115_020_240 and 14_074_273_664, both in the VAE phase) so the VAE phase reproduces the
-# larger one: base peak minus the phase's other terms (8_369_046_600 + 6_088_832 + 19_660_800 + 167_666_902 +
-# OVERHEAD_BYTES) = 5_042_526_170 (Turbo needs 4_996_540_342). It absorbs the float32 decoder's own activations
-# and the footprint the OS has not yet taken back from the denoise phase when the decode starts: MLX's cache is
-# cleared by then, yet at the VAE start the footprint sits about 2.2 GiB above MLX's active memory plus OVERHEAD
-# (turbo 11_254_325_096 - 8_392_187_384 - 510_030_936; base 11_312_586_144 - 8_389_484_140 - 510_030_936). The
-# one-step value it replaces (VAE-phase peak minus the footprint after denoise, 3_982_295_040) left that part out.
-VAE_TRANSIENT_BYTES = 5_042_526_170  # 4.696 GiB
+# VAE_TRANSIENT, by the overall-peak rule over every committed 1024² sample with the set resident through the VAE
+# decode (each peak reached in the VAE phase): the highest peak minus the VAE phase's other terms of the same run.
+# The binding sample is the MEASURED Z-Image run on mflux 0.23 (2026-10-24, git cbed93b, mlx 0.32.2, 50 steps,
+# guidance 4; bench/results/tiers/z-image-1024.json watched_peak_bytes): 15_462_030_800 - (8_369_046_600 +
+# 6_088_832 + 19_660_800 + 167_666_902 + OVERHEAD_BYTES) = 6_389_536_730. Margins over the other samples: the 0.23
+# identity df11 side 376_356_864 (15_085_673_936); on mflux 0.20, Z-Image's MEASURED run 1_347_010_560
+# (14_115_020_240) and identity 1_395_834_640 (14_066_196_160), and on Turbo's 5_239_252 B larger set its MEASURED
+# run 1_392_996_388 (14_074_273_664) and five repeats 158_937_556 to 756_412_836 (15_308_332_496 to
+# 14_710_857_216). The 0.20 value, 5_042_526_170 from the 0.20 MEASURED run alone, is under both 0.23 runs and four
+# of the Turbo repeats. Z-Image-Turbo shares the term (its 0.23 peak is not measured); a larger term is conservative
+# for it. The term absorbs the float32 decoder's own activations and the footprint the OS has not yet taken back
+# from the denoise phase when the decode starts: MLX's cache is cleared by then, yet at the VAE start the footprint
+# sits about 2.2 GiB above MLX's active memory plus OVERHEAD (0.20 turbo 11_254_325_096 - 8_392_187_384 -
+# 510_030_936; base 11_312_586_144 - 8_389_484_140 - 510_030_936), and the run-to-run spread of that footprint is
+# about 1 GiB (Turbo's repeats).
+VAE_TRANSIENT_BYTES = 6_389_536_730  # 5.951 GiB
 # DENOISE_ACTIVATION: denoise footprint peak minus (compressed + extras + non-block + in-flight + cache limit +
 # overhead) of the same unit: turbo 12_781_477_784 - 11_583_577_874 = 1_197_899_910; base 13_061_987_888 -
 # 11_538_787_646 = 1_523_200_242, at 4096 image + 512 text tokens.

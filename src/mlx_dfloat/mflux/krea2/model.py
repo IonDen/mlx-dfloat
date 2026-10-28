@@ -407,7 +407,7 @@ class DFloatKrea2(Krea2):  # type: ignore[misc]  # mflux ships no type informati
     ) -> tuple[str, ...]:
         """The prompts a call encodes: the prompt, then the negative one when classifier-free guidance runs.
 
-        mflux 0.20's rule for Krea 2: the negative branch runs for any guidance other than 1.0 (below 1.0 too); a
+        mflux 0.23's rule for Krea 2: the negative branch runs for any guidance other than 1.0 (below 1.0 too); a
         blank or missing negative prompt is encoded as ``" "``.
         """
         if guidance == 1.0:

@@ -30,6 +30,7 @@ from mlx_dfloat.integrate.memory import budget_bytes, largest_decoded_bytes
 from mlx_dfloat.integrate.names import NameMap, Shapes
 from mlx_dfloat.integrate.providers import DF11Provider
 from mlx_dfloat.mflux import _pipeline, require_mflux
+from mlx_dfloat.mflux import families as registry
 from mlx_dfloat.mflux.flux1 import init as base_init
 from mlx_dfloat.mflux.flux1.init import BaseComponents, ResolvedRepo
 from mlx_dfloat.mflux.flux1.lifecycle import Lifecycle
@@ -170,7 +171,11 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
         df11 = base_init.resolve(df11_path or df11_default, patterns=base_init.DF11_PATTERNS)
         ckpt = open_checkpoint(df11.root)
         check_flux_groups(ckpt)
-        base = base_init.resolve(base_path or base_default, patterns=base_init.BASE_PATTERNS)
+        # The default base is pinned to the snapshot the recorded runs used; a user's own base is taken as given.
+        base_pin = None if base_path else registry.MODELS[model].base_revision
+        base = base_init.resolve(
+            base_path or base_default, patterns=base_init.BASE_PATTERNS, revision=base_pin
+        )
         components = base_init.load_base(base.root, model_config)
         transformer, shapes = build_transformer(model_config, ckpt)
         self._assemble(

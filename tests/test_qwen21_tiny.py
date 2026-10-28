@@ -26,7 +26,8 @@ def test_one_tiny_generation_decodes_once_per_block_per_transformer_call(
     # Bug caught: anything between our prelude and mflux's loop not composing (the eager forward pass, the pairs in
     # mflux's prompt cache, the VAE guard), or the negative branch run at guidance 1.0 or with an empty negative
     # (mflux's rule: guidance > 1.0 and bool(negative_prompt), qwen_image_21.py:89). Tiny transformer: 2 blocks; 2
-    # steps: launches == 2 steps x calls x 2 blocks == 8 with CFG, 4 without.
+    # steps: launches == (2 steps + 1 text pass per prompt, mflux 0.23's text-prefix cache) x calls x 2 blocks == 12
+    # with CFG, 6 without.
     from mflux.utils.apple_silicon import AppleSiliconUtil
 
     # mflux compiles this transformer's forward on every chip; a Max chip shows no chip check is relied on.
@@ -57,7 +58,7 @@ def test_one_tiny_generation_decodes_once_per_block_per_transformer_call(
     assert seen["latents"].shape == (1, 16, 64)
     assert np.isfinite(seen["latents"]).all()
     report = model.report()
-    assert report["decode_launches"] == 2 * calls * 2
+    assert report["decode_launches"] == (2 + 1) * calls * 2
     assert report["cfg_calls_per_step"] == calls
     assert report["predict"] == "uncompiled"
     # The tiny block group (4 x 32 x 32 + 2 x 96 x 32 + 32 x 96 = 13_312 elements, 26_624 B) next to the allowance's

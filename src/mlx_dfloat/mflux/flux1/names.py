@@ -9,9 +9,8 @@ from mlx_dfloat.mflux import require_mflux
 DOUBLE_PREFIX = "transformer_blocks"
 SINGLE_PREFIX = "single_transformer_blocks"
 MATRICES_PER_KIND = {DOUBLE_PREFIX: 14, SINGLE_PREFIX: 6}
-# mflux 0.20 builds `norm_out.linear` with bias=False and drops this bias through update(strict=False);
-# the seam follows mflux so its output equals mflux's.
-DROPPED_EXTRAS: frozenset[str] = frozenset({"norm_out.linear.bias"})
+# Every extra the checkpoint carries is loaded. mflux 0.23 builds `norm_out.linear` with a bias and loads it, so the
+# checkpoint's `norm_out.linear.bias` is an extra like any other and the coverage check refuses a build without it.
 
 
 def flux_name_map() -> StaticNameMap:

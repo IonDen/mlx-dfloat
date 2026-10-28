@@ -1,6 +1,6 @@
 """FLUX.2 Klein naming: the block kinds in run order, the compressed sub-paths, the map derived from mflux, the check.
 
-Block kinds and run order: mflux 0.20.0 ``Flux2Transformer.__call__`` (double blocks, then single blocks). Compressed
+Block kinds and run order: mflux 0.23.0 ``Flux2Transformer.__call__`` (double blocks, then single blocks). Compressed
 sub-paths: the ``pattern_dict`` of the mingyi456 FLUX.2 Klein DF11 checkpoints (base and distilled, 4B and 9B). An
 empty pattern list there means the group is the module itself, so its one matrix is ``<group>.weight``.
 """

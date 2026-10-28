@@ -23,7 +23,7 @@ TOKENIZER_PATTERNS: tuple[str, ...] = ("tokenizer/*",)
 BASE_PATTERNS: tuple[str, ...] = ENCODER_PATTERNS + VAE_PATTERNS + TOKENIZER_PATTERNS
 
 _WHAT = "FLUX.2 Klein base"
-# Parameters no checkpoint holds: built at construction, so a base never replaces them. mflux 0.20.0:
+# Parameters no checkpoint holds: built at construction, so a base never replaces them. mflux 0.23.0:
 # ``Qwen3TextEncoder.rotary_emb`` (qwen3_text_encoder.py:47-52) computes ``inv_freq`` in
 # ``Qwen3TextRotaryEmbedding.__init__`` (qwen3_text_rotary_embedding.py:18). The VAE has none: its batch-norm
 # statistics ``bn.running_mean`` / ``bn.running_var`` come from the file (flux2_weight_mapping.py:202-209).

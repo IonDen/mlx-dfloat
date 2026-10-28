@@ -172,6 +172,45 @@ def test_a_failed_gpu_canary_refuses_the_model_before_any_resolution_or_load(mon
         DFloatFlux1("schnell")
 
 
+def test_the_default_bases_resolve_at_their_pins_and_a_user_base_unpinned(tmp_path, monkeypatch):
+    # Bug caught: the base pin not reaching the resolver (T5, CLIP, the VAE and the tokenizers following whatever lands
+    # on main instead of the snapshot the recorded runs used), a pin taken from another model's entry, or a pin applied
+    # to a user's own --base.
+    from mlx_dfloat import _metal_decode
+    from mlx_dfloat.mflux.flux1 import model as model_module
+    from mlx_dfloat.mflux.flux1.model import DFloatFlux1
+
+    class StopError(Exception):
+        pass
+
+    base_calls = []
+
+    def stop_at_base(spec, *, patterns, revision=None):
+        if patterns == base_init.DF11_PATTERNS:
+            return ResolvedRepo(root=tmp_path, repo_id=spec, revision=revision)
+        base_calls.append((spec, revision))
+        raise StopError
+
+    monkeypatch.setattr(_metal_decode, "ensure_canary", lambda **kwargs: None)
+    monkeypatch.setattr(model_module, "open_checkpoint", lambda root: None)
+    monkeypatch.setattr(model_module, "check_flux_groups", lambda ckpt: None)
+    monkeypatch.setattr(base_init, "resolve", stop_at_base)
+    for kwargs in (
+        {"model": "schnell"},
+        {"model": "dev"},
+        {"model": "krea-dev"},
+        {"model": "dev", "base_path": "me/base"},
+    ):
+        with pytest.raises(StopError):
+            DFloatFlux1(**kwargs)
+    assert base_calls == [
+        ("black-forest-labs/FLUX.1-schnell", "741f7c3ce8b383c54771c7003378a50191e9efe9"),
+        ("black-forest-labs/FLUX.1-dev", "3de623fc3c33e44ffbe2bad470d0f45bccf2eb21"),
+        ("black-forest-labs/FLUX.1-Krea-dev", "8162a9c7b05a641be098422bf2fcf335615c2f28"),
+        ("me/base", None),
+    ]
+
+
 def test_an_unknown_model_and_the_none_policy_are_refused(monkeypatch, tmp_path):
     # Bug caught: mflux's from_name accepting "dev-fill" (another class upstream) and this path
     # building a FLUX.1 model for it; or policy "none" (every decode resident) accepted, whether

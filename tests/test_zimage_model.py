@@ -32,10 +32,22 @@ def test_every_attribute_upstreams_generate_image_reads_exists_on_the_model(tmp_
     assert [n for n in sorted(names) if not hasattr(model, n)] == []
     assert isinstance(model, ZImage)
     assert (model.bits, model.lora_paths, model.lora_scales) == (None, [], [])
+    # mflux 0.23 records both in the image metadata; ours are mflux's defaults (bfloat16 stream, no compute precision).
+    assert model.float32 is False
+    assert model.transformer.float32 is False
+    assert model.compute_precision.dtype is None
 
 
 @pytest.mark.parametrize(
-    "kwargs", [{"quantize": 8}, {"lora_paths": ["a"]}, {"lora_scales": [1.0]}, {"bake_lora": False}]
+    "kwargs",
+    [
+        {"quantize": 8},
+        {"lora_paths": ["a"]},
+        {"lora_scales": [1.0]},
+        {"bake_lora": False},
+        {"float32": True},
+        {"compute_precision": mx.float16},
+    ],
 )
 def test_constructor_refusals_come_before_any_resolution(monkeypatch, kwargs):
     # Bug caught: resolving (downloading 8 GB) before refusing an option this path cannot honour.
@@ -99,6 +111,44 @@ def test_the_default_checkpoint_resolves_at_its_pin_and_a_user_checkpoint_unpinn
         ("mingyi456/Z-Image-Turbo-DF11", "422db601eac214d0f1e2cc99e2cf34906e8a7267"),
         ("mingyi456/Z-Image-DF11", "36d582560630bfe2f5b78183c4164c66d6919e5b"),
         ("me/fork", None),
+    ]
+
+
+def test_the_default_base_resolves_at_its_pin_and_a_user_base_unpinned(tmp_path, monkeypatch):
+    # Bug caught: the base pin not reaching the resolver (the text encoder, VAE and tokenizer following whatever lands
+    # on main instead of the snapshot the recorded runs used), a pin taken from the other model's entry, or a pin
+    # applied to a user's own --base.
+    from mlx_dfloat import _metal_decode
+    from mlx_dfloat.mflux._hub import ResolvedRepo
+    from mlx_dfloat.mflux.zimage import model as model_module
+    from mlx_dfloat.mflux.zimage.model import DFloatZImage
+
+    class StopError(Exception):
+        pass
+
+    base_calls = []
+
+    def stop_at_base(spec, *, patterns, revision=None):
+        if patterns == zinit.DF11_PATTERNS:
+            return ResolvedRepo(root=tmp_path, repo_id=spec, revision=revision)
+        base_calls.append((spec, revision))
+        raise StopError
+
+    monkeypatch.setattr(_metal_decode, "ensure_canary", lambda **kwargs: None)
+    monkeypatch.setattr(model_module, "open_checkpoint", lambda root: None)
+    monkeypatch.setattr(model_module, "check_zimage_groups", lambda ckpt: None)
+    monkeypatch.setattr(zinit, "resolve", stop_at_base)
+    for kwargs in (
+        {"model": "z-image"},
+        {"model": "z-image-turbo"},
+        {"model": "z-image-turbo", "base_path": "me/base"},
+    ):
+        with pytest.raises(StopError):
+            DFloatZImage(**kwargs)
+    assert base_calls == [
+        ("Tongyi-MAI/Z-Image", "04cc4abb7c5069926f75c9bfde9ef43d49423021"),
+        ("Tongyi-MAI/Z-Image-Turbo", "f332072aa78be7aecdf3ee76d5c247082da564a6"),
+        ("me/base", None),
     ]
 
 
@@ -408,8 +458,8 @@ def unforced_largest(root):
 def test_the_vae_decision_follows_the_budget_and_an_over_budget_call_is_refused(
     tmp_path, monkeypatch, caplog
 ):
-    # Bug caught: the set kept through a decode that does not fit (VAE phase 12e9 + 5_042_526_170 + 510_030_936 =
-    # 17_552_557_106 against a 16e9 budget), the drop made unconditional (a reload per call on a big Mac), the
+    # Bug caught: the set kept through a decode that does not fit (VAE phase 12e9 + 6_389_536_730 + 510_030_936 =
+    # 18_899_567_666 against a 16e9 budget), the drop made unconditional (a reload per call on a big Mac), the
     # constructor's budget ignored, or the fit rule not enforced.
     from mlx_dfloat.errors import DFloatResourceError
     from mlx_dfloat.mflux.zimage.memory import ZImageSizes
@@ -420,7 +470,7 @@ def test_the_vae_decision_follows_the_budget_and_an_over_budget_call_is_refused(
     assert plan.drop_set_before_vae
     assert plan.estimate.fits
     assert plan.estimate.peak_phase == "denoise"
-    assert plan.estimate.phases["vae"] == 5_042_526_170 + 510_030_936  # the set left the phase
+    assert plan.estimate.phases["vae"] == 6_389_536_730 + 510_030_936  # the set left the phase
     roomy = fake_model(tmp_path / "r", monkeypatch, sizes=big, budget_bytes=40 * GIB)
     assert not roomy.plan_call(height=1024, width=1024).drop_set_before_vae
     refused = fake_model(tmp_path / "x", monkeypatch, sizes=big, budget_bytes=10 * GIB)

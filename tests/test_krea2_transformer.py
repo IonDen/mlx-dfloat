@@ -172,7 +172,7 @@ def test_the_swap_keeps_parameter_paths_and_nothing_is_computed():
         else:
             targets.add(t.to_pattern)
     assert frozenset(params - targets) == COMPUTED_PARAMS
-    assert len(COMPUTED_PARAMS) == 0  # mflux 0.20.0: every parameter is a mapping target
+    assert len(COMPUTED_PARAMS) == 0  # mflux 0.23.0: every parameter is a mapping target
 
 
 @pytest.mark.mflux

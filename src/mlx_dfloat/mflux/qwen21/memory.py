@@ -7,8 +7,8 @@ tokens are counted per prompt (``prompt_tokens``) rather than read from the mode
 
 The transformer has one block kind, so the cache limit holds one decoded block next to the activations (per-block
 evaluation frees one block-sized buffer at a time), and the family carries its own activation allowance. The VAE
-transient is mflux's VAE decode, which runs in float32 (mflux 0.20.0 ``qwen21_vae.py:46-48``: the float32 latent
-mean and standard deviation promote the latents): re-measure it when an mflux upgrade changes that dtype. No Qwen-Image 2.1 per-block overhead scenario is benched.
+transient is mflux's VAE decode, which runs in float32 (mflux 0.23.0 ``qwen21_vae.py:17-18``, and ``28-29`` on the
+encode side: the float32 latent mean and standard deviation promote the latents): re-measure it when an mflux upgrade changes that dtype. No Qwen-Image 2.1 per-block overhead scenario is benched.
 """
 
 from dataclasses import replace
@@ -42,14 +42,18 @@ REFERENCE_TOKENS = 4096 + 33
 OVERHEAD = 459_445_098  # 0.428 GiB
 # VAE_TRANSIENT, by the overall-peak rule over every 1024² sample: the highest measured peak of the VAE decode on the
 # resident set minus the VAE phase's other terms (compressed + extras + decoded non-block + VAE file + OVERHEAD):
-# 22_788_580_400 - (9_587_103_379 + 137_388_032 + 134_217_728 + 1_350_989_512 + 459_445_098). Eleven samples on
-# 2026-10-08 (the calibration run above, four calibration reruns of one step at two cache limits, three 40-step MEASURED
-# runs, three 4-step identity runs with CFG; the highest is the second one-step rerun at the old cache limit)
-# peaked at 21.76 to 22.79 GB in the VAE phase, with MLX's own VAE peak the same in every calibration run: about 1 GiB of
-# run-to-run spread outside MLX's counters, as Z-Image's VAE phase shows too. A fit check must not under-predict, so
-# the term covers the highest sample; the first run alone (22_139_643_024) would put the VAE phase 0.60 GiB under it.
-# About 1.32x the FLUX.1 VAE's 7.82 GiB.
-VAE_TRANSIENT = 11_119_436_651  # 10.356 GiB
+# 22_831_539_272 - (9_587_103_379 + 137_388_032 + 134_217_728 + 1_350_989_512 + 459_445_098). Thirteen samples, all
+# peaking in the VAE phase at 21.76 to 22.83 GB. Eleven on mflux 0.20 (2026-10-08: the calibration run above, four
+# calibration reruns of one step at two cache limits, three 40-step MEASURED runs, three 4-step identity runs with CFG;
+# bench/results/calibration/qwen-image-2.1-1024.json), with MLX's own VAE peak the same in every calibration run: about
+# 1 GiB of run-to-run spread outside MLX's counters, as Z-Image's VAE phase shows too. Two on mflux 0.23 (2026-10-24,
+# git cbed93b: the 40-step MEASURED run, 21_877_154_888, and the identity check's df11 side, 22_831_539_272;
+# bench/results/calibration/qwen-image-2.1-1024-mflux023.json names the record fields). The 0.23 identity run binds;
+# the highest 0.20 sample (the second one-step rerun at the old cache limit, 22_788_580_400, the 0.20 value's source)
+# is 42_958_872 B under it and the 0.23 MEASURED run 954_384_384 B. A fit check must not under-predict, so the term
+# covers the highest sample; the first run alone (22_139_643_024) would put the VAE phase 0.64 GiB under it.
+# About 1.33x the FLUX.1 VAE's 7.82 GiB.
+VAE_TRANSIENT = 11_162_395_523  # 10.396 GiB
 # DENOISE_ACTIVATION: denoise footprint peak minus the denoise phase's other terms at the planner's cache limit
 # (compressed + extras + non-block + in-flight + cache limit + OVERHEAD), at REFERENCE_TOKENS:
 # 13_939_106_072 - (9_587_103_379 + 137_388_032 + 134_217_728 + 436_207_616 + 2_731_761_634 + 459_445_098). Measured

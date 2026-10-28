@@ -5,6 +5,7 @@ real forward of mflux's FLUX.1 Transformer through the seam.
 from types import SimpleNamespace
 
 import mlx.core as mx
+import mlx.nn as nn
 import numpy as np
 import pytest
 from mlx.utils import tree_flatten
@@ -92,8 +93,8 @@ def _fake_seam_class():
     return build
 
 
-def _write_flux(tmp_path, *, n_double=2, n_single=1):
-    """A DF11 checkpoint for the fake transformer: one group per block and every non-matrix extra."""
+def _write_flux(tmp_path, *, n_double=2, n_single=1, more=None):
+    """A DF11 checkpoint for the fake transformer: one group per block and every non-matrix extra (plus ``more``)."""
     rng = np.random.default_rng(51)
     fake = FakeTransformer(Recorder(), n_double=n_double, n_single=n_single)
     shapes = install_placeholders(block_lists(fake), FLUX_TABLE)
@@ -104,6 +105,7 @@ def _write_flux(tmp_path, *, n_double=2, n_single=1):
         for name, p in tree_flatten(fake.parameters())
         if p.size > 0
     }
+    extras.update(more or {})
     write_flux_checkpoint(tmp_path / "ckpt", shapes, rng, extras=extras)
     return open_checkpoint(tmp_path / "ckpt"), extras
 
@@ -128,6 +130,45 @@ def test_build_transformer_loads_every_extra_and_leaves_every_matrix_a_placehold
     assert np.array_equal(
         np.array(scale.view(mx.uint16)), extras["single_transformer_blocks.0.attn.norm_q.weight"]
     )
+
+
+class _OutputNorm(nn.Module):
+    """mflux 0.23's FLUX.1 ``norm_out`` shape: ``AdaLayerNormContinuous`` with ``linear`` built with a bias."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.linear = nn.Linear(4, 8, bias=True)
+
+
+def _fake_seam_class_with_output_norm():
+    plain = _fake_seam_class()
+
+    def build(model_config, *, num_transformer_blocks, num_single_transformer_blocks):
+        tf = plain(
+            model_config,
+            num_transformer_blocks=num_transformer_blocks,
+            num_single_transformer_blocks=num_single_transformer_blocks,
+        )
+        tf.norm_out = _OutputNorm()
+        return tf
+
+    return build
+
+
+def test_build_transformer_loads_the_output_norm_bias_from_the_checkpoint(tmp_path, monkeypatch):
+    # Bug caught: norm_out.linear.bias still left out of the extras plan (what mflux 0.20, which built that layer
+    # without a bias, needed) while mflux 0.23 builds and loads it: the build refuses the uncovered parameter, or,
+    # with the coverage check loosened, the output norm runs on mflux's zero bias instead of the checkpoint's.
+    monkeypatch.setattr(transformer, "seam_transformer_class", _fake_seam_class_with_output_norm)
+    rng = np.random.default_rng(839)
+    bias = np.asarray(rng.integers(0x3C00, 0x3F80, size=(8,)), dtype=np.uint16)
+    weight = np.asarray(rng.integers(0x3C00, 0x3F80, size=(8, 4)), dtype=np.uint16)
+    ckpt, _extras = _write_flux(
+        tmp_path, more={"norm_out.linear.weight": weight, "norm_out.linear.bias": bias}
+    )
+    tf, _shapes = build_transformer(None, ckpt, name_map=FLUX_TABLE)
+    assert np.array_equal(np.array(tf.norm_out.linear.bias.view(mx.uint16)), bias)
+    assert np.array_equal(np.array(tf.norm_out.linear.weight.view(mx.uint16)), weight)
 
 
 def test_build_transformer_names_the_active_memory_the_extras_added(tmp_path, monkeypatch):

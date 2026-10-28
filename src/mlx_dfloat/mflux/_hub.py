@@ -4,6 +4,7 @@ mflux's initializers want every component under one path, so they would download
 adapters load the other components through mflux's own loader and applier with weight definitions that name only them.
 """
 
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,12 @@ from typing import Any
 from mlx_dfloat.errors import DFloatAccessError, DFloatFormatError, DFloatIntegrationError
 
 _SHA_LENGTH = 40
+# mflux 0.23's required-weights refusal (WeightLoader._describe_missing_weights, weight_loader.py:500-505): the
+# component, the total count and at most three of the missing checkpoint names.
+_MISSING_WEIGHTS = re.compile(
+    r"The (?P<component>\S+) weights in .*? do not fit this model: (?P<count>\d+) required "
+    r"weights? (?:has|have) no match \(expected names like (?P<names>[^;]+); found "
+)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -141,15 +148,31 @@ def subset_definition(source: type, names: tuple[str, ...], patterns: tuple[str,
     )
 
 
+def missing_weights(message: str) -> str | None:
+    """``"<component> <names>[ and N more]"`` from mflux's required-weights refusal; None for any other message."""
+    match = _MISSING_WEIGHTS.search(message)
+    if match is None:
+        return None
+    shown = match["names"].split(", ")
+    more = int(match["count"]) - len(shown)
+    return f"{match['component']} {', '.join(shown)}" + (f" and {more} more" if more > 0 else "")
+
+
 def load_into(root: Path, definition: Any, models: dict[str, Any], *, what: str) -> None:
     """Mflux's loader and applier over ``definition`` into ``models``; the weights stay lazy until evaluated.
 
     The ``LoadedWeights`` object is not kept: it references every lazily loaded array, and the encoders must be
     droppable.
 
+    ``root`` is a local directory (``resolve`` already fetched it at its pin), so mflux takes it as given and its own
+    pinned revisions never apply. ``definition`` needs only ``get_components``, ``get_download_patterns`` and
+    ``quantization_predicate`` (``get_tokenizers`` for the tokenizer loader); mflux 0.23's loader and applier read
+    nothing else.
+
     Raises:
-        DFloatFormatError: The directory lacks the components (a checkpoint or model repository without them), or
-            holds an mflux-saved quantized model.
+        DFloatFormatError: The directory lacks the components (a checkpoint or model repository without them; mflux
+            reports a component missing its required weights as ``ModelConfigError``, a ``ValueError``; that
+            refusal is reported with the missing tensors' names first), or holds an mflux-saved quantized model.
         DFloatIntegrationError: The applier quantized the components unasked.
     """
     from mflux.models.common.weights.loading.weight_applier import WeightApplier
@@ -163,6 +186,12 @@ def load_into(root: Path, definition: Any, models: dict[str, Any], *, what: str)
             download_patterns=definition.get_download_patterns(),
         )
     except (FileNotFoundError, ValueError) as exc:
+        missing = missing_weights(str(exc))
+        if missing is not None:
+            raise DFloatFormatError(
+                f"{root}: not a {what} with {names}: {missing} not in the base (a missing shard, a renamed "
+                f"tensor or another model's checkpoint?): {exc}"
+            ) from exc
         raise DFloatFormatError(
             f"{root}: not a {what} with {names} (a DFloat11 checkpoint or model repository?): {exc}"
         ) from exc

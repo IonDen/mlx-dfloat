@@ -2,11 +2,14 @@ import builtins
 import importlib.util
 import json
 import os
+import platform
 import subprocess
 import sys
+from importlib import metadata
 from pathlib import Path
 from types import SimpleNamespace
 
+import mlx.core as mx
 import pytest
 
 from mlx_dfloat import DFloatDependencyError, DFloatResourceError, DFloatUnsupportedError
@@ -239,6 +242,7 @@ def test_generate_builds_the_model_from_the_flags_writes_the_image_and_the_repor
         "tier_gb": 32,
         "label": "MEASURED",
         "limits": {"memory": 111, "cache": 222, "wired": 333},  # what read_limits found
+        **_HOST_VERSIONS,  # as the generate report records them
     }
     assert report["footprint_peak_bytes"] == 10**15
     assert (
@@ -258,6 +262,7 @@ def test_the_watchdog_context_carries_the_models_default_steps(tmp_path):
         "tier_gb": 32,
         "label": "MEASURED",
         "limits": {"memory": 111, "cache": 222, "wired": 333},  # what read_limits found
+        **_HOST_VERSIONS,  # as the generate report records them
     }
 
 
@@ -1568,3 +1573,17 @@ def test_the_help_names_the_krea_defaults_and_the_cards_recipe():
         "classifier-free guidance, two transformer calls per step, for any value other than 1.0"
     ) in text
     assert "Krea 2: er_sde (default), euler" in text
+
+
+def _installed_mflux() -> str | None:
+    try:
+        return metadata.version("mflux")
+    except metadata.PackageNotFoundError:
+        return None
+
+
+# The versions and macOS the watchdog context records, read here from the installed packages and the OS.
+_HOST_VERSIONS = {
+    "versions": {"mlx": mx.__version__, "mflux": _installed_mflux()},
+    "macos": platform.mac_ver()[0],
+}

@@ -105,22 +105,28 @@ def test_the_build_installs_placeholders_and_loads_every_extra_by_name(tmp_path)
 
 @pytest.mark.mflux
 def test_the_computed_tables_are_left_as_mflux_built_them(tmp_path):
-    # Bug caught: the coverage exemption replaced by loading something into the computed tables (a zero or stale
-    # RoPE table would wreck the positions while every check passes).
+    # Bug caught: the build loading something into the computed tables (a zero or stale RoPE table would wreck the
+    # positions while every check passes). mflux 0.23 keeps them outside the parameters; the oracle is a fresh module.
     from mflux.models.qwen21.model.qwen21_transformer.qwen21_rope import Qwen21Rope
     from mflux.models.qwen21.model.qwen21_transformer.qwen21_time_text_embed import (
         Qwen21Timesteps,
     )
 
+    from mlx_dfloat.mflux.qwen21.transformer import computed_tables
+
     ckpt, _m, _c = _open(tmp_path)
-    params = _params(build_transformer(ckpt, transformer_kwargs=TINY))
-    rope = Qwen21Rope(axes_dim=[4, 6, 6])
-    for i in range(3):
-        for table, fresh in (("cos", rope.cos_tables[i]), ("sin", rope.sin_tables[i])):
-            got = params[f"pos_embed.{table}_tables.{i}"]
-            assert mx.array_equal(got.view(mx.uint32), fresh.view(mx.uint32)).item(), (table, i)
-    freqs = params["time_text_embed.time_proj.freqs"]
-    assert mx.array_equal(freqs.view(mx.uint32), Qwen21Timesteps().freqs.view(mx.uint32)).item()
+    tables = computed_tables(build_transformer(ckpt, transformer_kwargs=TINY).transformer)
+    rope = Qwen21Rope(axes_dim=(4, 6, 6))
+    fresh = {
+        **{f"pos_embed._cos_tables.{i}": t for i, t in enumerate(rope._cos_tables)},
+        **{f"pos_embed._sin_tables.{i}": t for i, t in enumerate(rope._sin_tables)},
+        "time_text_embed.time_proj._freqs": Qwen21Timesteps()._freqs,
+    }
+    assert set(tables) == set(fresh)
+    for name, want in fresh.items():
+        got = tables[name]
+        assert got.dtype == want.dtype, name
+        assert mx.array_equal(got.view(mx.uint32), want.view(mx.uint32)).item(), name
 
 
 @pytest.mark.mflux

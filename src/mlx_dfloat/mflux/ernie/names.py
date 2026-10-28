@@ -1,6 +1,6 @@
 """ERNIE-Image naming: the block kind, the decoded sub-paths, the map derived from mflux, the group check.
 
-The block kind and its run order: mflux 0.20.0 ``ErnieTransformer`` runs one list, ``layers``. The decoded sub-paths
+The block kind and its run order: mflux 0.23.0 ``ErnieTransformer`` runs one list, ``layers``. The decoded sub-paths
 and the three non-block groups are the ``pattern_dict`` of both mingyi456 DF11 checkpoints (ERNIE-Image and
 ERNIE-Image-Turbo, identical). mflux's ``ErnieWeightMapping`` already templates its block targets with ``{layer}``,
 so the shared derivation reads it as it is.
@@ -31,7 +31,7 @@ NONBLOCK_GROUPS: dict[str, tuple[str, ...]] = {
     "adaLN_modulation.1": ("adaLN_modulation.1.weight",),
     "final_norm.linear": ("final_norm.linear.weight",),
 }
-DEFAULT_LAYERS = 36  # mflux 0.20.0 ``ErnieTransformer.__init__(num_layers=36)``
+DEFAULT_LAYERS = 36  # mflux 0.23.0 ``ErnieTransformer.__init__(num_layers=36)``
 
 
 def ernie_name_map() -> StaticNameMap:

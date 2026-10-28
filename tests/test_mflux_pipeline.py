@@ -75,6 +75,27 @@ def test_the_default_construction_arguments_pass():
     _pipeline.refuse_construction_args(quantize=None, lora_paths=[], lora_scales=[], bake_lora=True)
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "name"),
+    [
+        ({"compute_precision": mx.float16}, "compute_precision"),
+        ({"float32": True}, "float32"),
+    ],
+)
+def test_each_precision_argument_this_path_cannot_honour_is_refused_by_name(kwargs, name):
+    # Bug caught: mflux 0.23's compute_precision (casts the attention and feed-forward weights in place) or
+    # Z-Image's float32 stream silently accepted: the output would no longer follow the run the checkpoint was
+    # checked against, and the memory constants were not measured for it.
+    args = {"float32": False, "compute_precision": None, **kwargs}
+    with pytest.raises(DFloatUnsupportedError, match=rf"^{name}: .*not on the DFloat11 path"):
+        _pipeline.refuse_precision_args(**args)
+
+
+def test_the_default_precision_arguments_pass():
+    # Bug caught: mflux's defaults (no compute precision, the model's own stream dtype) refused.
+    _pipeline.refuse_precision_args(float32=False, compute_precision=None)
+
+
 def test_an_eval_policy_outside_the_familys_is_refused():
     # Bug caught: policy "none" (every decoded block kept resident) accepted.
     _pipeline.check_eval_policy("depth2", ("per-block", "depth2"))

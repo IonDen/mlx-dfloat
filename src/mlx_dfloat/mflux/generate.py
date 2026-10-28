@@ -6,10 +6,12 @@ prints it as is.
 
 import argparse
 import json
+import platform
 import sys
 import time
 import traceback
 from collections.abc import Callable, Mapping
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
@@ -355,13 +357,23 @@ def _scheduler(args: argparse.Namespace) -> str | None:
     return args.scheduler if args.scheduler is not None else entry(args.model).default_scheduler
 
 
+def _versions() -> dict[str, str | None]:
+    """The mlx and mflux versions, the generate report's ``versions`` (mflux None when it is not installed)."""
+    try:
+        mflux: str | None = metadata.version("mflux")
+    except metadata.PackageNotFoundError:
+        mflux = None
+    return {"mlx": mx.__version__, "mflux": mflux}  # type: ignore[attr-defined]
+
+
 def _run_context(
     args: argparse.Namespace, *, tier_gb: int, label: str, limits: Mapping[str, int]
 ) -> dict[str, Any]:
     """What the watchdog's abort artifact records about the run it may stop.
 
     ``limits`` is the MLX ``memory`` / ``cache`` / ``wired`` limits read back after the install,
-    so a stopped run still says which limits it ran under.
+    so a stopped run still says which limits it ran under; ``versions`` and ``macos`` have the generate report's
+    shape, so its tier-table row still names the mflux it ran on.
     """
     return {
         "model": args.model,
@@ -372,6 +384,8 @@ def _run_context(
         "tier_gb": tier_gb,
         "label": label,
         "limits": {name: int(limits[name]) for name in ("memory", "cache", "wired")},
+        "versions": _versions(),
+        "macos": platform.mac_ver()[0],  # as the generate report records it
     }
 
 
@@ -510,6 +524,7 @@ def run(
         "label": None,
         "watchdog_ceiling_bytes": None,
         "limits": None,
+        "macos": platform.mac_ver()[0],  # as the bench provenance records it
     }
     try:
         host_ram, host_recommended = host_facts()
@@ -575,9 +590,12 @@ def run(
             call["negative_prompt"] = args.negative_prompt
         image = model.generate_image(**call)
         final = Path(resolve(output))
-        image.save(str(final), export_json_metadata=args.metadata, overwrite=True)
+        try:
+            image.save(str(final), export_json_metadata=args.metadata, overwrite=True)
+        except OSError as exc:  # mflux 0.23 raises when the image file itself cannot be written
+            raise DFloatError(f"{final}: the image was not written: {exc}") from exc
         if not final.is_file() or final.stat().st_size == 0:
-            # mflux's save logs a write failure and returns normally
+            # an empty or missing file after a save that returned normally is still no image
             raise DFloatError(f"{final}: the image was not written")
         report["output"] = str(final)
         report.update(exit_code=EXIT_OK, **model.report())

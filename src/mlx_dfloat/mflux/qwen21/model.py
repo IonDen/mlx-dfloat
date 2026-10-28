@@ -54,7 +54,7 @@ POLICIES: tuple[str, ...] = ("per-block", "depth2")
 # accepted, and the report labels it unmeasured.
 MEASURED_POLICIES: frozenset[str] = frozenset({"per-block"})
 RETAINED_SLACK_BYTES = 2 * 1024**3
-# mflux 0.20.0 ``QwenImage21.generate_image``: its guidance and scheduler defaults.
+# mflux 0.23.0 ``QwenImage21.generate_image``: its guidance and scheduler defaults (unchanged since 0.20.0).
 DEFAULT_GUIDANCE = 1.0
 DEFAULT_SCHEDULER = "linear"
 
@@ -107,6 +107,7 @@ class DFloatQwenImage21(QwenImage21):  # type: ignore[misc]  # mflux ships no ty
         lora_paths: list[str] | None = None,
         lora_scales: list[float] | None = None,
         bake_lora: bool = True,
+        compute_precision: Any = None,
     ) -> None:
         """Resolve the checkpoint and the base repository and build the model.
 
@@ -115,7 +116,7 @@ class DFloatQwenImage21(QwenImage21):  # type: ignore[misc]  # mflux ships no ty
         estimate and VAE decision.
 
         Raises:
-            DFloatUnsupportedError: ``quantize``, ``lora_paths``, ``lora_scales`` or ``bake_lora=False``
+            DFloatUnsupportedError: ``quantize``, ``lora_paths``, ``lora_scales``, ``bake_lora=False`` or a ``compute_precision``
                 (accepted only to refuse), an eval policy other than ``"per-block"`` / ``"depth2"``, or an unknown
                 ``model``.
             DFloatBackendError: The GPU decoder fails its check on the two packaged self-check groups (raised before
@@ -131,6 +132,7 @@ class DFloatQwenImage21(QwenImage21):  # type: ignore[misc]  # mflux ships no ty
         _pipeline.refuse_construction_args(
             quantize=quantize, lora_paths=lora_paths, lora_scales=lora_scales, bake_lora=bake_lora
         )
+        _pipeline.refuse_precision_args(float32=False, compute_precision=compute_precision)
         _pipeline.check_eval_policy(eval_policy, POLICIES)
         if model not in MODELS:
             raise DFloatUnsupportedError(f"model {model!r}: this path runs {sorted(MODELS)}")
@@ -194,11 +196,12 @@ class DFloatQwenImage21(QwenImage21):  # type: ignore[misc]  # mflux ships no ty
         budget_bytes: int | None = None,
         decode: Callable[[MxGroup], DecodeResult] | None = None,
     ) -> None:
+        from mflux.models.common.compute_precision import ComputePrecision
         from mflux.models.qwen21.qwen21_initializer import Qwen21Initializer
 
         _pipeline.check_eval_policy(eval_policy, POLICIES)
         nn.Module.__init__(self)  # type: ignore[attr-defined]  # not QwenImage21.__init__: mflux's initializer loads the whole base
-        Qwen21Initializer._init_config(
+        Qwen21Initializer.init_config(
             self, model_config
         )  # prompt_cache, model_config, callbacks, tiling_config
         self.vae = components.vae
@@ -206,6 +209,10 @@ class DFloatQwenImage21(QwenImage21):  # type: ignore[misc]  # mflux ships no ty
         self.tokenizers = components.tokenizers
         self.transformer = build.transformer
         self.bits = None
+        # mflux's defaults (Qwen21Initializer.init sets them): no compute precision, no LoRA; generate_image records them.
+        self.compute_precision = ComputePrecision()
+        self.lora_paths: list[str] = []
+        self.lora_scales: list[float] = []
         self._model = model
         self._constants = qmem.CONSTANTS
         self._ckpt, self._df11, self._base, self._sizes = ckpt, df11, base, sizes
@@ -373,7 +380,7 @@ class DFloatQwenImage21(QwenImage21):  # type: ignore[misc]  # mflux ships no ty
     ) -> tuple[str, ...]:
         """The prompts a call encodes: the prompt, and the negative prompt when classifier-free guidance runs.
 
-        mflux 0.20's rule (``QwenImage21.generate_image``): the negative branch runs, and the transformer is called
+        mflux 0.23's rule (``QwenImage21.generate_image``, unchanged since 0.20): the negative branch runs, and the transformer is called
         twice per step, only for a guidance above 1.0 together with a non-empty negative prompt.
         """
         if guidance is None or guidance <= 1.0 or not negative_prompt:
@@ -385,7 +392,7 @@ class DFloatQwenImage21(QwenImage21):  # type: ignore[misc]  # mflux ships no ty
         self,
         seed: int,
         prompt: str,
-        num_inference_steps: int = 40,
+        num_inference_steps: int | None = None,
         height: int = 1024,
         width: int = 1024,
         guidance: float | None = DEFAULT_GUIDANCE,
@@ -393,19 +400,25 @@ class DFloatQwenImage21(QwenImage21):  # type: ignore[misc]  # mflux ships no ty
         image_strength: float | None = None,
         scheduler: str | None = DEFAULT_SCHEDULER,
         negative_prompt: str | None = None,
+        step_cache_ratio: float | None = None,
+        teacache_ratio: float | None = None,
     ) -> Any:
         """Mflux's ``generate_image`` behind a prelude: refusals, cache limit, fit check, prompt encoding, set load.
 
-        ``guidance`` or ``scheduler`` given as None take mflux's defaults (1.0, ``"linear"``). As in mflux,
+        ``guidance`` or ``scheduler`` given as None take mflux's defaults (1.0, ``"linear"``); ``num_inference_steps``
+        None takes mflux's (``Qwen21TurboScheduler.default_steps``). As in mflux,
         classifier-free guidance runs only for a guidance above 1.0 with a non-empty ``negative_prompt``.
 
         Raises:
-            DFloatUnsupportedError: ``image_path`` / ``image_strength`` (img2img).
+            DFloatUnsupportedError: ``image_path`` / ``image_strength`` (img2img), ``step_cache_ratio`` /
+                ``teacache_ratio`` (step reuse: it skips transformer calls, a different image).
             DFloatResourceError: The fit check refuses the call (the estimate, or a size above 1024²), or
                 memory stayed active after a drop.
             DFloatFormatError: A block's decode reported an error; the set is dropped for a clean retry.
             DFloatIntegrationError: mflux compiled the transformer's forward pass.
         """
+        if step_cache_ratio is not None or teacache_ratio is not None:
+            _pipeline.refuse("step_cache_ratio/teacache_ratio", "step reuse")
         if image_path is not None or image_strength is not None:
             _pipeline.refuse("image_path/image_strength", "img2img")
         guidance = DEFAULT_GUIDANCE if guidance is None else guidance

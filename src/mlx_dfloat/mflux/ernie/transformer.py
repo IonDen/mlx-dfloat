@@ -1,6 +1,6 @@
 """mflux's ERNIE-Image transformer with the class-swap seam; the build from a DF11 checkpoint.
 
-mflux 0.20.0 ``ErnieTransformer.__call__`` runs its one block list, ``layers``, inline. The pipeline's ``_predict``
+mflux 0.23.0 ``ErnieTransformer.__call__`` runs its one block list, ``layers``, inline. The pipeline's ``_predict``
 factory compiles the step function off base and Pro M1/M2 chips; the model runs it through
 ``mlx_dfloat.mflux._compile.uncompiled`` on every chip, because the block seam evaluates at block boundaries, which
 cannot happen inside ``mx.compile``.
@@ -40,7 +40,7 @@ from mlx_dfloat.mflux.flux2.transformer import base_transformer_files_index
 
 MAX_BUILD_ACTIVE_BYTES = 2 * 1024**3
 
-# mflux 0.20.0's ErnieTransformer builds no parameter of its own: the RoPE embedder holds no arrays, the timestep
+# mflux 0.23.0's ErnieTransformer builds no parameter of its own: the RoPE embedder holds no arrays, the timestep
 # frequencies are computed per call, and ``_pos_cache`` (an underscore attribute) is not a parameter. Kept as a named
 # constant so the build reads like the other families' and a future mflux table has one place to go.
 COMPUTED_PARAMS: frozenset[str] = frozenset()

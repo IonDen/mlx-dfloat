@@ -1,6 +1,6 @@
 """mflux's Krea 2 transformer with the class-swap seam.
 
-mflux 0.20.0 ``Krea2Transformer.__call__`` runs its one block list, ``blocks``, inline, after the text fusion, the
+mflux 0.23.0 ``Krea2Transformer.__call__`` runs its one block list, ``blocks``, inline, after the text fusion, the
 timestep MLP and the text MLP have run once. The pipeline's ``_predict`` factory compiles the step function off base
 and Pro M1/M2 chips (an M1 Max or Ultra, and every M3 or later, compile); the model runs it through
 ``mlx_dfloat.mflux._compile.uncompiled`` on every chip, because the block seam evaluates at block boundaries, which
@@ -64,7 +64,8 @@ from mlx_dfloat.mflux.krea2.names import (
 
 MAX_BUILD_ACTIVE_BYTES = 2 * 1024**3
 
-# mflux 0.20.0's Krea2Transformer builds no parameter of its own: the RoPE embedder holds no arrays, the timestep
+# mflux 0.23.0's Krea2Transformer builds no parameter of its own (the depth ControlNet's ``control_first`` is added
+# only by its own initializer; the txt2img path never passes ``control``, and the seam forwards it unchanged): the RoPE embedder holds no arrays, the timestep
 # frequencies are computed per call, and the modulation tables and norm scales come from the checkpoint. Kept as a
 # named constant so the build reads like the other families' and a future mflux table has one place to go.
 COMPUTED_PARAMS: frozenset[str] = frozenset()

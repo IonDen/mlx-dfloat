@@ -76,6 +76,24 @@ def refuse_construction_args(
         refuse("bake_lora", "LoRA of any kind")
 
 
+def refuse_precision_args(*, float32: bool, compute_precision: Any) -> None:
+    """Refuse mflux's precision options (Z-Image's ``float32`` stream, ``compute_precision``), accepted only to refuse.
+
+    ``compute_precision`` casts the attention and feed-forward weights in place and ``float32`` changes the
+    transformer's stream dtype; neither run was checked or measured on this path.
+
+    Raises:
+        DFloatUnsupportedError: ``compute_precision`` set or ``float32=True``.
+    """
+    if compute_precision is not None:
+        refuse(
+            "compute_precision",
+            "a lower compute precision changes the output the format exists to keep",
+        )
+    if float32:
+        refuse("float32", "the float32 transformer stream")
+
+
 _wired_refusal_warned = False
 
 

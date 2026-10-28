@@ -35,10 +35,10 @@ TOKENIZER_PATTERNS: tuple[str, ...] = (
 BASE_PATTERNS: tuple[str, ...] = ENCODER_PATTERNS + VAE_PATTERNS + TOKENIZER_PATTERNS
 
 _WHAT = "Qwen-Image 2.1 base"
-# Parameters no checkpoint holds: built at construction, so a base never replaces them. mflux 0.20.0: the text
+# Parameters no checkpoint holds: built at construction, so a base never replaces them. mflux 0.23.0: the text
 # encoder's ``rotary_emb.inv_freq`` is computed in ``Qwen3VLRotaryEmbedding.__init__`` (qwen3_vl_rope.py:21). The
 # VAE has none: every one of its parameters is a target of mflux's VAE mapping, and its latent mean and standard
-# deviation are NumPy class attributes, not parameters (qwen21_vae.py:12-32).
+# deviation are NumPy class attributes, not parameters (qwen21_vae.py:9-10, from qwen21_vae_config.py:6-17).
 COMPUTED: dict[str, frozenset[str]] = {
     "text_encoder": frozenset({"rotary_emb.inv_freq"}),
     "vae": frozenset(),
