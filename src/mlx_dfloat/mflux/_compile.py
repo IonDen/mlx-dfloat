@@ -1,6 +1,6 @@
 """mflux's compiled ``predict``, turned off for the duration of one factory call.
 
-mflux 0.20's ``_predict`` factories (Z-Image, FLUX.2 Klein, ERNIE-Image, Krea 2) return ``mx.compile(predict)``
+mflux 0.23's ``_predict`` factories (Z-Image, FLUX.2 Klein, ERNIE-Image, Krea 2) return ``mx.compile(predict)``
 unless ``AppleSiliconUtil.is_m1_or_m2()``, which they read at call time. The block seam evaluates at block
 boundaries, which cannot happen inside ``mx.compile``, so the adapters take the plain function on every chip. The
 override is process-wide but lasts only while the factory runs (it builds a closure; nothing else executes). A

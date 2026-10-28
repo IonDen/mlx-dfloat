@@ -169,7 +169,9 @@ FAMILIES: dict[str, FamilySpec] = {
 }
 
 
-def _flux(name: str, label: str, steps: int, df11: str, base: str) -> ModelEntry:
+def _flux(
+    name: str, label: str, steps: int, df11: str, base: str, *, base_revision: str
+) -> ModelEntry:
     return ModelEntry(
         name=name,
         family="flux1",
@@ -182,11 +184,14 @@ def _flux(name: str, label: str, steps: int, df11: str, base: str) -> ModelEntry
         default_scheduler="linear",
         cfg_two_calls=False,
         uses_negative_prompt=False,
+        base_revision=base_revision,
     )
 
 
-def _klein(name: str, label: str, steps: int, revision: str, *, base: bool) -> ModelEntry:
-    """A FLUX.2 Klein entry, with mflux 0.20.0's defaults for it.
+def _klein(
+    name: str, label: str, steps: int, revision: str, *, base: bool, base_revision: str
+) -> ModelEntry:
+    """A FLUX.2 Klein entry, with mflux's defaults for it.
 
     The default steps are 50 for a base model and 4 for a distilled one; guidance defaults to 1.0, and the scheduler
     is mflux's fixed one. A base model calls the transformer twice per step above guidance 1.0 (the negative is
@@ -208,26 +213,37 @@ def _klein(name: str, label: str, steps: int, revision: str, *, base: bool) -> M
         cfg_two_calls=base,
         uses_negative_prompt=False,
         fixed_guidance=None if base else 1.0,
+        base_revision=base_revision,
     )
 
 
 MODELS: dict[str, ModelEntry] = {
     e.name: e
     for e in (
+        # FLUX.1 bases: the snapshots of the identity and MEASURED tier runs.
         _flux(
             "schnell",
             "FLUX.1-schnell",
             4,
             "DFloat11/FLUX.1-schnell-DF11",
             "black-forest-labs/FLUX.1-schnell",
+            base_revision="741f7c3ce8b383c54771c7003378a50191e9efe9",
         ),
-        _flux("dev", "FLUX.1-dev", 25, "DFloat11/FLUX.1-dev-DF11", "black-forest-labs/FLUX.1-dev"),
+        _flux(
+            "dev",
+            "FLUX.1-dev",
+            25,
+            "DFloat11/FLUX.1-dev-DF11",
+            "black-forest-labs/FLUX.1-dev",
+            base_revision="3de623fc3c33e44ffbe2bad470d0f45bccf2eb21",
+        ),
         _flux(
             "krea-dev",
             "FLUX.1-Krea-dev",
             25,
             "DFloat11/FLUX.1-Krea-dev-DF11",
             "black-forest-labs/FLUX.1-Krea-dev",
+            base_revision="8162a9c7b05a641be098422bf2fcf335615c2f28",
         ),
         ModelEntry(
             name="z-image",
@@ -241,6 +257,8 @@ MODELS: dict[str, ModelEntry] = {
             default_scheduler=None,
             cfg_two_calls=True,
             uses_negative_prompt=True,
+            # The snapshot the identity check and the MEASURED row ran on.
+            base_revision="04cc4abb7c5069926f75c9bfde9ef43d49423021",
         ),
         ModelEntry(
             name="z-image-turbo",
@@ -254,13 +272,18 @@ MODELS: dict[str, ModelEntry] = {
             default_scheduler=None,
             cfg_two_calls=False,
             uses_negative_prompt=False,
+            # The snapshot the sampled parity run compared against.
+            base_revision="f332072aa78be7aecdf3ee76d5c247082da564a6",
         ),
+        # FLUX.2 Klein bases: the identity and MEASURED tier snapshots (base models) and the sampled parity snapshots
+        # (distilled models).
         _klein(
             "flux2-klein-base-4b",
             "FLUX.2-klein-base-4B",
             50,
             "b887c73c5cbc3f4d50887a04c41509fb25a0a0f0",
             base=True,
+            base_revision="a3b4f4849157f664bdbc776fd7453c2783562f4d",
         ),
         _klein(
             "flux2-klein-4b",
@@ -268,6 +291,7 @@ MODELS: dict[str, ModelEntry] = {
             4,
             "d29a2c249ff0afeb678da101e707bd134596c96f",
             base=False,
+            base_revision="e7b7dc27f91deacad38e78976d1f2b499d76a294",
         ),
         _klein(
             "flux2-klein-base-9b",
@@ -275,6 +299,7 @@ MODELS: dict[str, ModelEntry] = {
             50,
             "50dc8e7cba7a41eeaf9e9c4fcec557d1a6888ded",
             base=True,
+            base_revision="32773329fbe7e81a90ef971740e8ba4b0364ecf3",
         ),
         _klein(
             "flux2-klein-9b",
@@ -282,8 +307,9 @@ MODELS: dict[str, ModelEntry] = {
             4,
             "45a202a0bd19ec01ce8db2d5236890586cbac6a6",
             base=False,
+            base_revision="92196c8e11f7b6cf2b7493e037d8c5345c559216",
         ),
-        # mflux 0.20.0: 40 steps (cli/defaults/defaults.py:52), guidance 1.0 (models/qwen21/cli/qwen21_generate.py:60),
+        # mflux's defaults, cited at 0.20.0: 40 steps (cli/defaults/defaults.py:52), guidance 1.0 (qwen21_generate.py:60),
         # scheduler "linear" (cli/parser/parsers.py:180). A second transformer call per step runs only above guidance
         # 1.0 with a non-empty negative prompt (models/qwen21/variants/txt2img/qwen_image_21.py:89).
         ModelEntry(

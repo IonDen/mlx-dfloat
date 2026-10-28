@@ -360,7 +360,7 @@ class DFloatErnieImage(ErnieImage):  # type: ignore[misc]  # mflux ships no type
     ) -> tuple[str, ...]:
         """The prompts a call encodes, in mflux's batch order: the prompt alone, or the negative then the prompt.
 
-        mflux 0.20's rule: guidance is read as ``Config`` stores it (None is 0.0); above 1.0 the call runs
+        mflux 0.23's rule: guidance is read as ``Config`` stores it (None is 0.0); above 1.0 the call runs
         classifier-free guidance with the negative prompt, a blank or missing one replaced by ``" "``.
         """
         g = 0.0 if guidance is None else float(guidance)

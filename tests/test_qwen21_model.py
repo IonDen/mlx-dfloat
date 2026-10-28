@@ -335,8 +335,10 @@ def test_the_generate_defaults_are_mfluxs(tmp_path, monkeypatch):
         for n, p in inspect.signature(DFloatQwenImage21.generate_image).parameters.items()
         if p.default is not inspect.Parameter.empty
     }
+    # mflux 0.23.0 qwen_image_21.py:52-66: the steps default is None (Qwen21TurboScheduler.default_steps resolves
+    # it), and step_cache_ratio / teacache_ratio are new (refused here: test_the_generate_call_refuses_step_reuse).
     assert defaults == {
-        "num_inference_steps": 40,
+        "num_inference_steps": None,
         "height": 1024,
         "width": 1024,
         "guidance": 1.0,
@@ -344,7 +346,17 @@ def test_the_generate_defaults_are_mfluxs(tmp_path, monkeypatch):
         "image_strength": None,
         "scheduler": "linear",
         "negative_prompt": None,
+        "step_cache_ratio": None,
+        "teacache_ratio": None,
     }
+    from mflux.models.qwen21.variants.txt2img.qwen_image_21 import QwenImage21
+
+    upstream = {
+        n: p.default
+        for n, p in inspect.signature(QwenImage21.generate_image).parameters.items()
+        if p.default is not inspect.Parameter.empty
+    }
+    assert defaults == upstream
 
 
 def test_a_missing_guidance_and_scheduler_become_mflux_defaults(tmp_path, monkeypatch):
@@ -387,8 +399,12 @@ def test_an_empty_prompt_and_a_negative_equal_to_the_prompt_run_from_the_cache(
     )
     assert (encodes, model._cfg_calls) == (["", "x"], 2)
     assert set(model.prompt_cache) == {"", "x"}
-    # 1 step x 1 call x 2 blocks, then 1 step x 2 calls x 2 blocks: the second call ran the negative branch.
-    assert model.report()["decode_launches"] == 2 + 4
+    # mflux 0.23 runs the text-prefix pass (each block's text_forward) once per prompt array per generation, then
+    # each block's image_forward per transformer call (qwen21_transformer.py:101-113); its text cache is keyed on
+    # the array's identity, and a negative equal to the prompt is the same cached array (qwen21_prompt_encoder.py:22).
+    # Call 1: 1 text pass x 2 blocks + 1 step x 1 call x 2 blocks. Call 2: 1 text pass x 2 blocks (one array for
+    # both branches) + 1 step x 2 calls x 2 blocks: the second call ran the negative branch.
+    assert model.report()["decode_launches"] == (2 + 2) + (2 + 4)
 
 
 def test_text_tokens_follow_the_longest_prompt_of_the_call(tmp_path, monkeypatch):
@@ -484,7 +500,7 @@ def test_plan_call_reads_the_familys_constants_sizes_and_groups(tmp_path, monkey
 def test_the_vae_guard_follows_the_plan_and_zeroes_the_cache_limit(tmp_path, monkeypatch):
     # Bug caught: the guard not reading this call's plan (the set kept through a decode the budget cannot hold, or
     # dropped on a roomy Mac: a reload per call), or a transformer-sized cache limit left for the VAE decode.
-    # Tight: VAE phase 12e9 + 11_119_436_651 + 459_445_098 = 23_578_881_749 > 16e9; denoise ~15.2e9 fits.
+    # Tight: VAE phase 12e9 + 11_162_395_523 + 459_445_098 = 23_621_840_621 > 16e9; denoise ~15.2e9 fits.
     from mlx_dfloat.mflux._phases import FamilySizes
 
     big = FamilySizes(compressed=12_000_000_000, extras=0, nonblock=0, encoders=0, vae=0)
@@ -768,7 +784,9 @@ def test_a_compiled_forward_is_refused_in_the_loop_and_the_report_says_compiled(
     # report() still printing "uncompiled" after mflux compiled the forward pass.
     model = fake_model(tmp_path, monkeypatch)
     assert model.report()["predict"] == "uncompiled"
-    model.transformer._step_fn = mx.compile(model.transformer._forward)
+    # mflux 0.23's default path compiles _image_step_fn, and inference_projections() clears it on entry, so the
+    # call must refuse it there, as report() says.
+    model.transformer._image_step_fn = mx.compile(model.transformer._image_forward)
     assert model.report()["predict"] == "compiled"
     with pytest.raises(DFloatIntegrationError, match="compiled"):
         model.generate_image(seed=1, prompt="a", num_inference_steps=1, height=64, width=64)
@@ -949,7 +967,8 @@ class _VaryingTextEncoder(nn.Module):
 
 def _stock_qwen(tokenizer, vae, matrices, extras):
     """Stock mflux ``QwenImage21`` over a plain tiny ``Qwen21Transformer`` holding the BF16 source of a tiny checkpoint
-    (``write_tiny_checkpoint``'s matrices and extras), uncompiled like our side."""
+    (``write_tiny_checkpoint``'s matrices and extras); the caller runs it under ``mflux_uncompiled()``."""
+    from mflux.models.common.compute_precision.compute_precision import ComputePrecision
     from mflux.models.common.config.model_config import ModelConfig
     from mflux.models.qwen21.model.qwen21_transformer.qwen21_transformer import Qwen21Transformer
     from mflux.models.qwen21.qwen21_initializer import Qwen21Initializer
@@ -974,17 +993,18 @@ def _stock_qwen(tokenizer, vae, matrices, extras):
     weights += [(name, mx.array(bits).view(mx.bfloat16)) for name, bits in extras.items()]
     assert all(tuple(shapes[name]) == bits.shape for name, bits in extras.items())
     transformer.update(tree_unflatten(weights))
-    transformer._step_fn = (
-        transformer._forward
-    )  # mflux compiles it otherwise; our side runs it plain
     stock = QwenImage21.__new__(QwenImage21)
     nn.Module.__init__(stock)
-    Qwen21Initializer._init_config(stock, ModelConfig.qwen_image_21())
+    Qwen21Initializer.init_config(stock, ModelConfig.qwen_image_21())
     stock.vae = vae
     stock.text_encoder = _VaryingTextEncoder()
     stock.tokenizers = {"qwen21": tokenizer}
     stock.transformer = transformer
     stock.bits = None
+    stock.lora_paths, stock.lora_scales = None, None  # read only for the image metadata
+    stock.compute_precision = ComputePrecision(
+        None
+    )  # mflux 0.23 sets it after the components (qwen21_initializer.py:44)
     return stock
 
 
@@ -999,7 +1019,7 @@ def test_a_tiny_generation_gives_stock_mfluxs_latents_bit_for_bit(
     # mask (the negative prompt is 12 ids here, the prompt 8, so a swap changes the latents or fails). The reference is
     # stock mflux over the same BF16 weights, uncompiled as ours; equality is bit for bit (an integer view of the
     # latents). The extras are random: constant ones make the forward pass blind to its inputs.
-    from tests._qwen21_tiny import TINY, StubTokenizer, stub_components
+    from tests._qwen21_tiny import TINY, StubTokenizer, mflux_uncompiled, stub_components
 
     from mlx_dfloat.format import open_checkpoint
     from mlx_dfloat.mflux.qwen21.transformer import build_transformer
@@ -1028,8 +1048,12 @@ def test_a_tiny_generation_gives_stock_mfluxs_latents_bit_for_bit(
         "guidance": guidance,
         "negative_prompt": negative,
     }
-    model.generate_image(**kwargs)
-    stock.generate_image(**kwargs, scheduler="linear")
+    # Both sides run plain: mflux 0.23 compiles both step functions inside its window, and MLX's own activations are
+    # compiled too (nn.silu), whose bits can differ from the plain graph's for some weights.
+    with mflux_uncompiled():
+        model.generate_image(**kwargs)
+    with mflux_uncompiled():
+        stock.generate_image(**kwargs, scheduler="linear")
     (ours,), (theirs,) = ours_vae.seen, stock_vae.seen
     assert model.report()["cfg_calls_per_step"] == (2 if negative else 1)
     assert bool(mx.all(mx.isfinite(theirs)))

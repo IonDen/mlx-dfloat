@@ -49,6 +49,8 @@ def test_every_attribute_upstreams_generate_image_reads_exists_on_the_model(tmp_
     assert [n for n in sorted(names) if not hasattr(model, n)] == []
     assert isinstance(model, Flux2Klein)
     assert (model.bits, model.lora_paths, model.lora_scales) == (None, [], [])
+    # mflux 0.23 records the compute precision in the image metadata; ours is mflux's default (none).
+    assert model.compute_precision.dtype is None
 
 
 @pytest.mark.parametrize(
@@ -58,6 +60,7 @@ def test_every_attribute_upstreams_generate_image_reads_exists_on_the_model(tmp_
         ({"lora_paths": ["a"]}, "lora_paths"),
         ({"lora_scales": [1.0]}, "lora_scales"),
         ({"bake_lora": False}, "bake_lora"),
+        ({"compute_precision": mx.float16}, "compute_precision"),
         ({"eval_policy": "none"}, "none"),
         ({"model": "flux2-klein-9b-kv"}, "KV"),
     ],
@@ -118,6 +121,47 @@ def test_the_default_checkpoints_resolve_at_their_pins_and_a_user_checkpoint_unp
         ("mingyi456/FLUX.2-klein-base-9B-DF11", "50dc8e7cba7a41eeaf9e9c4fcec557d1a6888ded"),
         ("mingyi456/FLUX.2-klein-9B-DF11", "45a202a0bd19ec01ce8db2d5236890586cbac6a6"),
         ("me/fork", None),
+    ]
+
+
+def test_the_default_bases_resolve_at_their_pins_and_a_user_base_unpinned(tmp_path, monkeypatch):
+    # Bug caught: the base pin not reaching the resolver (the Qwen3 encoder, VAE and tokenizer following whatever lands
+    # on main instead of the snapshot the recorded runs used), a pin taken from another model's entry, or a pin applied
+    # to a user's own --base.
+    from mlx_dfloat import _metal_decode
+    from mlx_dfloat.mflux._hub import ResolvedRepo
+    from mlx_dfloat.mflux.flux2 import model as model_module
+    from mlx_dfloat.mflux.flux2.model import DFloatFlux2Klein
+
+    class StopError(Exception):
+        pass
+
+    base_calls = []
+
+    def stop_at_base(spec, *, patterns, revision=None):
+        if patterns == finit.DF11_PATTERNS:
+            return ResolvedRepo(root=tmp_path, repo_id=spec, revision=revision)
+        base_calls.append((spec, revision))
+        raise StopError
+
+    monkeypatch.setattr(_metal_decode, "ensure_canary", lambda **kwargs: None)
+    monkeypatch.setattr(model_module, "open_checkpoint", lambda root: None)
+    monkeypatch.setattr(finit, "resolve", stop_at_base)
+    for kwargs in (
+        {"model": "flux2-klein-base-4b"},
+        {"model": "flux2-klein-4b"},
+        {"model": "flux2-klein-base-9b"},
+        {"model": "flux2-klein-9b"},
+        {"model": "flux2-klein-9b", "base_path": "me/base"},
+    ):
+        with pytest.raises(StopError):
+            DFloatFlux2Klein(**kwargs)
+    assert base_calls == [
+        ("black-forest-labs/FLUX.2-klein-base-4B", "a3b4f4849157f664bdbc776fd7453c2783562f4d"),
+        ("black-forest-labs/FLUX.2-klein-4B", "e7b7dc27f91deacad38e78976d1f2b499d76a294"),
+        ("black-forest-labs/FLUX.2-klein-base-9B", "32773329fbe7e81a90ef971740e8ba4b0364ecf3"),
+        ("black-forest-labs/FLUX.2-klein-9B", "92196c8e11f7b6cf2b7493e037d8c5345c559216"),
+        ("me/base", None),
     ]
 
 

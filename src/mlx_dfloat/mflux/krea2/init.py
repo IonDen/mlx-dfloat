@@ -35,7 +35,7 @@ TOKENIZER_PATTERNS: tuple[str, ...] = (
 BASE_PATTERNS: tuple[str, ...] = ENCODER_PATTERNS + VAE_PATTERNS + TOKENIZER_PATTERNS
 
 _WHAT = "Krea 2 base"
-# Parameters no checkpoint holds: built at construction, so a base never replaces them. mflux 0.20.0: the text
+# Parameters no checkpoint holds: built at construction, so a base never replaces them. mflux 0.23.0: the text
 # encoder's ``rotary_emb.inv_freq`` is computed in ``Qwen3TextRotaryEmbedding.__init__`` (the base file holds only
 # ``language_model.*`` and ``visual.*`` tensors). The VAE has none: every one of its parameters is a target of mflux's
 # VAE mapping (Qwen-Image 1's).

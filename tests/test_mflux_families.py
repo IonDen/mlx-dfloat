@@ -240,21 +240,94 @@ def test_the_qwen_entry_names_its_published_repos_and_pinned_checkpoint():
     )
 
 
-def test_pinned_bases_are_the_snapshots_the_recorded_runs_used_and_no_other_base_is():
-    # Bug caught: a base (text encoder, VAE, tokenizer) following whatever lands on main instead of the snapshot its
-    # recorded runs used (Qwen-Image 2.1: d26bb61, bench/results/tiers/qwen-image-2.1-1024.json; ERNIE-Image and
-    # ERNIE-Image-Turbo: the snapshots their parity and calibration runs read, 2026-10-08), or a pin set on a family whose
-    # base no recorded run names.
-    assert {
-        n: e.base_revision for n, e in families.MODELS.items() if e.base_revision is not None
-    } == {
-        "qwen-image-2.1": "d26bb61231c349cf6b7896fa83353113880e1ba3",
-        "ernie-image": "5346b31d68c9c23758ba56ef8be5e9dc174c7f99",
-        "ernie-image-turbo": "bc68c81e2a1730a394d5fc9fae70713dee940140",
+@pytest.mark.parametrize(
+    ("family", "pins"),
+    [
+        # FLUX.1: the base snapshots of the identity and MEASURED tier records (bench/results/identity/
+        # flux1-schnell-1024, bench/results/tiers/{schnell,dev,krea-dev}-1024.json).
+        (
+            "flux1",
+            {
+                "schnell": (
+                    "black-forest-labs/FLUX.1-schnell",
+                    "741f7c3ce8b383c54771c7003378a50191e9efe9",
+                ),
+                "dev": ("black-forest-labs/FLUX.1-dev", "3de623fc3c33e44ffbe2bad470d0f45bccf2eb21"),
+                "krea-dev": (
+                    "black-forest-labs/FLUX.1-Krea-dev",
+                    "8162a9c7b05a641be098422bf2fcf335615c2f28",
+                ),
+            },
+        ),
+        # Z-Image: the identity and tier records (bench/results/identity/z-image-1024, tiers/z-image-1024.json);
+        # Z-Image-Turbo: the sampled parity record (bench/results/parity/z-image-turbo), the one record of that base.
+        (
+            "zimage",
+            {
+                "z-image": ("Tongyi-MAI/Z-Image", "04cc4abb7c5069926f75c9bfde9ef43d49423021"),
+                "z-image-turbo": (
+                    "Tongyi-MAI/Z-Image-Turbo",
+                    "f332072aa78be7aecdf3ee76d5c247082da564a6",
+                ),
+            },
+        ),
+        # FLUX.2 Klein: the base models' identity and tier records (tiers/flux2-klein-base-{4b,9b}-1024.json); the
+        # distilled models' sampled parity records (bench/results/parity/flux2-klein-{4b,9b}).
+        (
+            "flux2",
+            {
+                "flux2-klein-base-4b": (
+                    "black-forest-labs/FLUX.2-klein-base-4B",
+                    "a3b4f4849157f664bdbc776fd7453c2783562f4d",
+                ),
+                "flux2-klein-4b": (
+                    "black-forest-labs/FLUX.2-klein-4B",
+                    "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+                ),
+                "flux2-klein-base-9b": (
+                    "black-forest-labs/FLUX.2-klein-base-9B",
+                    "32773329fbe7e81a90ef971740e8ba4b0364ecf3",
+                ),
+                "flux2-klein-9b": (
+                    "black-forest-labs/FLUX.2-klein-9B",
+                    "92196c8e11f7b6cf2b7493e037d8c5345c559216",
+                ),
+            },
+        ),
+        # Qwen-Image 2.1: d26bb61, bench/results/tiers/qwen-image-2.1-1024.json.
+        (
+            "qwen21",
+            {"qwen-image-2.1": ("Qwen/Qwen-Image-2.1", "d26bb61231c349cf6b7896fa83353113880e1ba3")},
+        ),
+        # ERNIE-Image and ERNIE-Image-Turbo: the snapshots their parity and calibration runs read, 2026-10-08.
+        (
+            "ernie",
+            {
+                "ernie-image": ("baidu/ERNIE-Image", "5346b31d68c9c23758ba56ef8be5e9dc174c7f99"),
+                "ernie-image-turbo": (
+                    "baidu/ERNIE-Image-Turbo",
+                    "bc68c81e2a1730a394d5fc9fae70713dee940140",
+                ),
+            },
+        ),
         # Krea 2: the gated base snapshots the range-read parity reads and every Krea run uses (2026-10-08).
-        "krea-2": "98e0fe118d17c9e3547fbb2e25acdbae2cadf7c7",
-        "krea-2-raw": "6b0ece7fffb640c5e3bcbe0a7f10f66b8e60a603",
-    }
+        (
+            "krea2",
+            {
+                "krea-2": ("krea/Krea-2-Turbo", "98e0fe118d17c9e3547fbb2e25acdbae2cadf7c7"),
+                "krea-2-raw": ("krea/Krea-2-Raw", "6b0ece7fffb640c5e3bcbe0a7f10f66b8e60a603"),
+            },
+        ),
+    ],
+)
+def test_each_familys_default_bases_are_pinned_to_the_snapshots_the_recorded_runs_used(
+    family, pins
+):
+    # Bug caught: a base (text encoders, VAE, tokenizer) following whatever lands on main instead of the snapshot its
+    # recorded runs used, so a re-upload changes encoder bytes with no error; or a model left unpinned.
+    assert {
+        n: (e.base_repo, e.base_revision) for n, e in families.MODELS.items() if e.family == family
+    } == pins
 
 
 def test_family_of_returns_the_spec_of_the_models_family():

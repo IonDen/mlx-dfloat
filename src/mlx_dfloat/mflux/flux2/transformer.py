@@ -28,7 +28,7 @@ from mlx_dfloat.mflux.flux2.names import (
     klein_name_map,
 )
 
-# mflux 0.20.0 ``Flux2Transformer.__init__`` defaults (the 4B depth), used when the overrides leave them out.
+# mflux 0.23.0 ``Flux2Transformer.__init__`` defaults (the 4B depth), used when the overrides leave them out.
 DEFAULT_DOUBLE, DEFAULT_SINGLE = 5, 20
 # ``ModelConfig.transformer_overrides["num_attention_heads"]`` per Klein size (24 heads x 128 = 3072 wide; 32 = 4096).
 KLEIN_SIZES: dict[int, str] = {24: "4b", 32: "9b"}

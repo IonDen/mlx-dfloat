@@ -1,5 +1,6 @@
 import json
 import sys
+from contextlib import contextmanager
 
 import mlx.core as mx
 import pytest
@@ -750,6 +751,103 @@ def test_qwen_embeds_hold_the_positive_pair_and_the_negative_one_when_cfg_ran():
     assert two["negative_prompt_embeds"] is neg[0]
     assert two["negative_prompt_mask"] is neg[1]
     assert two["prompt_embeds"] is pos[0]
+
+
+class _QwenScheduler:
+    """mflux's scheduler surface for the loop body: the scale is the identity, a step adds the noise."""
+
+    def scale_model_input(self, latents, t):
+        return latents
+
+    def step(self, *, noise, timestep, latents):
+        return latents + noise
+
+
+class _QwenConfig:
+    def __init__(self, steps, guidance=1.0):
+        self.time_steps = list(range(steps))
+        self.scheduler = _QwenScheduler()
+        self.guidance = guidance
+
+
+class _UnpackedQwenTransformer:
+    """A transformer without mflux 0.23's packing window (mflux 0.20, or any family without it).
+
+    Its noise is the prompt embedding plus 1, so the positive and negative calls give different noise.
+    """
+
+    def __call__(
+        self, *, t, config, hidden_states, encoder_hidden_states, encoder_hidden_states_mask
+    ):
+        return mx.zeros_like(hidden_states) + encoder_hidden_states + self.offset()
+
+    def offset(self):
+        return 1.0
+
+
+class _PackingQwenTransformer(_UnpackedQwenTransformer):
+    """mflux 0.23's surface: ``inference_projections()`` switches the packed projections on for its window.
+
+    Inside the window the noise is 10 higher, so a loop run outside it gives other latents.
+    """
+
+    def __init__(self):
+        self.packed = False
+        self.windows = 0
+
+    def offset(self):
+        return 11.0 if self.packed else 1.0
+
+    @contextmanager
+    def inference_projections(self):
+        self.windows += 1
+        self.packed = True
+        try:
+            yield
+        finally:
+            self.packed = False
+
+
+def _qwen_denoise(transformer, config, *, negative=None):
+    latents = mx.zeros((1, 2, 3))
+    prompt = (mx.zeros((1, 1, 3)), mx.ones((1, 1), dtype=mx.int32))
+    neg = (None, None) if negative is None else (mx.full((1, 1, 3), negative), prompt[1])
+    return vi.qwen21_denoise(
+        transformer,
+        config,
+        latents,
+        prompt_embeds=prompt[0],
+        prompt_mask=prompt[1],
+        negative_prompt_embeds=neg[0],
+        negative_prompt_mask=neg[1],
+    )
+
+
+def test_the_qwen_bf16_loop_runs_inside_the_transformers_packing_window():
+    # Bug caught: the bf16 side's loop body run without `with transformer.inference_projections():`. On mflux 0.23
+    # its blocks would then run unpacked while the df11 side (mflux's own generate_image) runs packed, and the
+    # identity check would compare two different computations. Two steps of noise 11 (packed) give 22; outside the
+    # window they give 2.
+    transformer = _PackingQwenTransformer()
+    latents = _qwen_denoise(transformer, _QwenConfig(2))
+    assert latents.tolist() == [[[22.0, 22.0, 22.0], [22.0, 22.0, 22.0]]]
+    assert transformer.windows == 1
+    assert transformer.packed is False  # the window is closed before the VAE decode
+
+
+def test_the_qwen_bf16_loop_runs_a_transformer_without_a_packing_window_unchanged():
+    # Bug caught: the window required (an AttributeError on mflux 0.20's transformer), or entered on some other
+    # object. Two steps of noise 1 give 2.
+    latents = _qwen_denoise(_UnpackedQwenTransformer(), _QwenConfig(2))
+    assert latents.tolist() == [[[2.0, 2.0, 2.0], [2.0, 2.0, 2.0]]]
+
+
+def test_the_qwen_bf16_loop_combines_the_negative_call_with_mfluxs_guidance():
+    # Bug caught: CFG lost or its combine flipped in the loop body. mflux qwen_image_21.py: neg + g * (pos - neg).
+    # Positive noise 11 (prompt 0, packed), negative 15 (prompt 4, packed), guidance 3: 15 + 3 * (11 - 15) = 3 per
+    # step, 6 after two steps.
+    latents = _qwen_denoise(_PackingQwenTransformer(), _QwenConfig(2, guidance=3.0), negative=4.0)
+    assert latents.tolist() == [[[6.0, 6.0, 6.0], [6.0, 6.0, 6.0]]]
 
 
 # --- ERNIE-Image ----------------------------------------------------------------------------------------------

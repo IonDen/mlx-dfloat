@@ -18,7 +18,7 @@ from tests._flux_fakes import (
 from mlx_dfloat.errors import DFloatFormatError
 from mlx_dfloat.format import open_checkpoint
 from mlx_dfloat.integrate.placeholders import install_placeholders
-from mlx_dfloat.mflux.flux1.names import DROPPED_EXTRAS, check_flux_groups
+from mlx_dfloat.mflux.flux1.names import check_flux_groups
 
 
 def _group(name: str) -> SimpleNamespace:
@@ -91,10 +91,20 @@ def test_flux_groups_refuses_a_group_with_the_wrong_matrix_count():
         check_flux_groups(bad)
 
 
-def test_dropped_extras_is_the_one_bias_mflux_has_no_parameter_for():
-    # Bug caught: DROPPED_EXTRAS growing to include a bias mflux actually loads, silently dropping
-    # a real parameter from the build.
-    assert frozenset({"norm_out.linear.bias"}) == DROPPED_EXTRAS
+@pytest.mark.mflux
+def test_mflux_builds_the_output_norm_bias_the_checkpoint_carries():
+    # Bug caught: an mflux release that builds FLUX.1's norm_out.linear without a bias again (as 0.16 to 0.21
+    # did): the checkpoint's bias would then have no parameter and every build would refuse it. mflux 0.23.0:
+    # AdaLayerNormContinuous(..., bias=True) at models/flux/model/flux_transformer/ada_layer_norm_continuous.py:8.
+    from mflux.models.common.config.model_config import ModelConfig
+    from mflux.models.flux.model.flux_transformer.transformer import Transformer
+    from mlx.utils import tree_flatten
+
+    tf = Transformer(
+        ModelConfig.schnell(), num_transformer_blocks=0, num_single_transformer_blocks=0
+    )
+    params = dict(tree_flatten(tf.parameters()))
+    assert tuple(params["norm_out.linear.bias"].shape) == (2 * 3072,)
 
 
 @pytest.mark.parametrize("pattern", [r"transformer_blocks.\d+", r"transformer_blocks\.\d+"])
@@ -127,7 +137,7 @@ def test_flux_name_map_derived_from_mflux_equals_the_measured_table():
 
     # Bug caught: the lane silently running a different mflux than the one the table was measured on
     # (mflux has no __version__; the distribution metadata is the source).
-    assert importlib.metadata.version("mflux").startswith("0.20.")
+    assert importlib.metadata.version("mflux").startswith("0.23.")
     derived = flux_name_map()
     assert derived.kinds == FLUX_TABLE.kinds
     for kind in FLUX_TABLE.kinds:

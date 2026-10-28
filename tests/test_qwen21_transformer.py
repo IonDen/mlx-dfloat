@@ -85,14 +85,18 @@ def _counting_provider(shapes, calls):
 
 @pytest.mark.mflux
 def test_the_stock_transformer_compiles_its_forward_on_the_first_call():
-    # Bug caught (the control): mflux no longer compiling _forward in __call__ (qwen21_transformer.py:69-72), which
+    # Bug caught (the control): mflux 0.23 no longer compiling its default (text-cache) image step in __call__
+    # (qwen21_transformer.py:111-113), which
     # would leave the guard and its note unjustified. mflux compiles there on every chip, no chip check.
     from mflux.models.qwen21.model.qwen21_transformer.qwen21_transformer import Qwen21Transformer
 
     tf = Qwen21Transformer(**TINY)
     assert tf._step_fn is None
     mx.eval(tf(**tiny_inputs()))
-    assert type(tf._step_fn) is COMPILED
+    assert type(tf._image_step_fn) is COMPILED
+    assert (
+        tf._step_fn is None
+    )  # the joint pass runs only for padded prompts or with the text cache off
 
 
 @pytest.mark.mflux
@@ -105,9 +109,9 @@ def test_the_seamed_transformer_runs_the_plain_forward():
     tf, shapes = tiny_seamed()
     tf.attach(ResidentProvider(_constant_weights(shapes)), shapes)
     mx.eval(tf(**tiny_inputs()))
-    assert type(tf._step_fn) is types.MethodType
-    assert tf._step_fn.__func__ is Qwen21Transformer._forward
-    assert tf._step_fn.__self__ is tf
+    assert type(tf._image_step_fn) is types.MethodType
+    assert tf._image_step_fn.__func__ is Qwen21Transformer._image_forward
+    assert tf._image_step_fn.__self__ is tf
     assert is_eager(tf)
 
 
@@ -163,35 +167,44 @@ def test_the_compiled_forward_cannot_run_the_seam():
 @pytest.mark.mflux
 def test_the_swap_keeps_parameter_paths_and_the_computed_tables():
     # Bug caught: the class swap breaking on Qwen21TransformerBlock, parameters moving under another path
-    # (placeholders, load_weights and coverage would miss them), or a computed table renamed upstream (the extras
-    # coverage exemption would go stale silently).
+    # (placeholders, load_weights and coverage would miss them), a computed table renamed or moved upstream
+    # (computed_tables raises), a computed table turned back into a parameter (the extras coverage would then refuse
+    # every checkpoint: none stores it), or the swap replacing a table mflux built.
     from mflux.models.qwen21.model.qwen21_transformer.qwen21_transformer_block import (
         Qwen21TransformerBlock,
     )
 
-    from mlx_dfloat.integrate.blockseam import seam_blocks
-    from mlx_dfloat.mflux.qwen21.transformer import COMPUTED_PARAMS
+    from mlx_dfloat.mflux.qwen21.transformer import (
+        computed_tables,
+        mflux_packer,
+        seam_qwen21_blocks,
+    )
 
     tf = seam_transformer_class()(**TINY)
     before = sorted(k for k, _v in tree_flatten(tf.parameters()))
-    assert seam_blocks(block_lists(tf), tf.seam_cell) == (
+    tables = computed_tables(tf)
+    assert seam_qwen21_blocks(
+        block_lists(tf), tf.seam_cell, tf.pack_switch, pack=mflux_packer()
+    ) == (
         "transformer_blocks.0",
         "transformer_blocks.1",
     )
     after = sorted(k for k, _v in tree_flatten(tf.parameters()))
     assert after == before
     assert isinstance(tf.transformer_blocks[1], Qwen21TransformerBlock)
-    # The seven names mflux 0.20.0 computes at construction (qwen21_rope.py:21-26, qwen21_time_text_embed.py:16).
-    assert set(COMPUTED_PARAMS) == {
-        "pos_embed.cos_tables.0",
-        "pos_embed.cos_tables.1",
-        "pos_embed.cos_tables.2",
-        "pos_embed.sin_tables.0",
-        "pos_embed.sin_tables.1",
-        "pos_embed.sin_tables.2",
-        "time_text_embed.time_proj.freqs",
+    # The seven tables mflux 0.23.0 computes at construction, as private lists and a private array
+    # (qwen21_rope.py:21-26, qwen21_time_text_embed.py:16): MLX leaves underscore attributes out of the parameters.
+    assert set(tables) == {
+        "pos_embed._cos_tables.0",
+        "pos_embed._cos_tables.1",
+        "pos_embed._cos_tables.2",
+        "pos_embed._sin_tables.0",
+        "pos_embed._sin_tables.1",
+        "pos_embed._sin_tables.2",
+        "time_text_embed.time_proj._freqs",
     }
-    assert set(COMPUTED_PARAMS) <= set(after)
+    assert not [k for k in after if k.startswith("pos_embed.") or "time_proj" in k]
+    assert all(computed_tables(tf)[k] is v for k, v in tables.items())
 
 
 def _eager_reference(tf, shapes, weights):
@@ -210,6 +223,7 @@ def _eager_reference(tf, shapes, weights):
         idx = int(block.partition(".")[2])
         for attr, w in per.items():
             get_attr_path(plain.transformer_blocks[idx], attr).weight = w
+    plain.use_text_cache = False  # the joint pass, as the seamed side runs it here
     plain._step_fn = plain._forward
     return plain
 
@@ -221,6 +235,7 @@ def test_a_forward_runs_each_block_with_its_own_weights_and_ends_on_placeholders
     # stock mflux holding the same weights; a block output not evaluated at its boundary; or the placeholders not
     # restored afterwards.
     tf, shapes = tiny_seamed()
+    tf.use_text_cache = False  # the joint pass: one array per block (the text-cache path is in test_qwen21_mflux023.py)
     weights = _random_weights(shapes)
     evals = []
     real_eval = seam._eval
@@ -257,6 +272,7 @@ def test_depth2_drains_the_last_block(monkeypatch):
     # look-ahead evaluating in the wrong order. Expected (seam._seam_eval + end_step): async r0, async r1, eval r0,
     # eval r1.
     tf, shapes = tiny_seamed()
+    tf.use_text_cache = False  # the joint pass: one output per block
     events = []
     real_eval, real_async = seam._eval, seam._async_eval
 
@@ -285,7 +301,8 @@ def test_depth2_drains_the_last_block(monkeypatch):
 @pytest.mark.mflux
 def test_two_calls_per_step_decode_once_per_block_per_call():
     # Bug caught: the second (negative-prompt) call of a CFG step (qwen_image_21.py:104-118) refused for the first
-    # call's unchecked status words, or a block decoded twice in one call. 2 calls x 2 blocks = 4 decodes.
+    # call's unchecked status words, or a block decoded more than once per pass. mflux 0.23's default path runs a
+    # text pass (a new prompt's K/V cache) then the image pass in each call: 2 calls x 2 passes x 2 blocks = 8.
     tf, shapes = tiny_seamed()
     calls = []
     tf.attach(_counting_provider(shapes, calls), shapes, verify_in_call=True)
@@ -294,6 +311,6 @@ def test_two_calls_per_step_decode_once_per_block_per_call():
     pos = tf(**positive)
     neg = tf(**negative)
     mx.eval(pos, neg)
-    assert calls == BLOCKS * 2
+    assert calls == BLOCKS * 2 * 2
     assert pos.shape == neg.shape == (1, 16, 64)
     assert not mx.array_equal(pos, neg).item()

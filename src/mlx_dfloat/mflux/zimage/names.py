@@ -1,6 +1,6 @@
 """Z-Image naming: the block kinds in run order, the compressed sub-paths, the map derived from mflux, the group check.
 
-Block kinds and run order: mflux 0.20.0 ``ZImageTransformer.__call__``. Compressed
+Block kinds and run order: mflux 0.23.0 ``ZImageTransformer.__call__``. Compressed
 sub-paths: the ``pattern_dict`` of both mingyi456 DF11 checkpoints (Z-Image and Z-Image-Turbo, identical).
 """
 

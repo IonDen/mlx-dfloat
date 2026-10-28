@@ -20,7 +20,6 @@ from mlx_dfloat.integrate.providers import WeightProvider
 from mlx_dfloat.mflux import require_mflux
 from mlx_dfloat.mflux.flux1.names import (
     DOUBLE_PREFIX,
-    DROPPED_EXTRAS,
     SINGLE_PREFIX,
     check_flux_groups,
     flux_name_map,
@@ -217,7 +216,6 @@ def build_transformer(
         ckpt,
         names,
         counts={DOUBLE_PREFIX: n_double, SINGLE_PREFIX: n_single},
-        dropped=DROPPED_EXTRAS,
         extras=extras,
     )
     check_extras_cover(params, (name for name, _path, _info in plan), matrix_paths)

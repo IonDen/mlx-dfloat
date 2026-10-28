@@ -117,6 +117,8 @@ class DFloatZImage(ZImage):  # type: ignore[misc]  # mflux ships no type informa
         lora_paths: list[str] | None = None,
         lora_scales: list[float] | None = None,
         bake_lora: bool = True,
+        float32: bool = False,
+        compute_precision: Any = None,
     ) -> None:
         """Resolve the checkpoint and the base repository and build the model.
 
@@ -125,9 +127,9 @@ class DFloatZImage(ZImage):  # type: ignore[misc]  # mflux ships no type informa
         estimate and VAE decision.
 
         Raises:
-            DFloatUnsupportedError: ``quantize``, ``lora_paths``, ``lora_scales`` or ``bake_lora=False``
-                (accepted only to refuse), an eval policy other than ``"per-block"`` / ``"depth2"``, a
-                ControlNet model, or an unknown ``model``.
+            DFloatUnsupportedError: ``quantize``, ``lora_paths``, ``lora_scales``, ``bake_lora=False``,
+                ``float32=True`` or a ``compute_precision`` (accepted only to refuse), an eval policy other than
+                ``"per-block"`` / ``"depth2"``, a ControlNet model, or an unknown ``model``.
             DFloatBackendError: The GPU decoder fails its check on the two packaged self-check groups (raised before
                 anything is resolved or loaded), or Metal is unavailable.
             DFloatFormatError: The checkpoint is not a Z-Image DF11 checkpoint, or the base lacks a component.
@@ -147,6 +149,7 @@ class DFloatZImage(ZImage):  # type: ignore[misc]  # mflux ships no type informa
             _refuse("lora_scales", "LoRA of any kind")
         if not bake_lora:
             _refuse("bake_lora", "LoRA of any kind")
+        _pipeline.refuse_precision_args(float32=float32, compute_precision=compute_precision)
         _check_eval_policy(eval_policy)
         if "controlnet" in model:
             raise DFloatUnsupportedError(
@@ -167,7 +170,10 @@ class DFloatZImage(ZImage):  # type: ignore[misc]  # mflux ships no type informa
         df11 = zinit.resolve(df11_path or df11_default, patterns=zinit.DF11_PATTERNS, revision=pin)
         ckpt = open_checkpoint(df11.root)
         check_zimage_groups(ckpt)
-        base = zinit.resolve(base_path or base_default, patterns=zinit.BASE_PATTERNS)
+        base_pin = None if base_path else registry.MODELS[model].base_revision
+        base = zinit.resolve(
+            base_path or base_default, patterns=zinit.BASE_PATTERNS, revision=base_pin
+        )
         components = zinit.load_base(base.root)
         build = build_transformer(ckpt)
         self._assemble(
@@ -211,11 +217,16 @@ class DFloatZImage(ZImage):  # type: ignore[misc]  # mflux ships no type informa
         budget_bytes: int | None = None,
         decode: Callable[[MxGroup], DecodeResult] | None = None,
     ) -> None:
+        from mflux.models.common.compute_precision import ComputePrecision
         from mflux.models.z_image.z_image_initializer import ZImageInitializer
 
         _check_eval_policy(eval_policy)
         nn.Module.__init__(self)  # type: ignore[attr-defined]  # not ZImage.__init__: mflux's initializer runs over the whole base
         ZImageInitializer._init_config(self, model_config)  # model_config, callbacks, tiling_config
+        # mflux's defaults (ZImageInitializer.init sets them): the bfloat16 stream, no compute precision; generate_image
+        # records both. The transformer's own float32 flag starts False in ZImageTransformer.__init__.
+        self.float32 = False
+        self.compute_precision = ComputePrecision()
         self.vae = components.vae
         self.text_encoder = components.text_encoder
         self.tokenizers = components.tokenizers
@@ -437,7 +448,7 @@ class DFloatZImage(ZImage):  # type: ignore[misc]  # mflux ships no type informa
     ) -> tuple[str, ...]:
         """The prompts a call encodes: one, or the prompt and its negative when classifier-free guidance runs.
 
-        mflux 0.20's rules (``ZImage.generate_image`` and ``_encode_prompts``): a model without guidance support runs at guidance 0, guidance
+        mflux 0.23's rules (``ZImage.generate_image`` and ``_encode_prompts``): a model without guidance support runs at guidance 0, guidance
         at or below 1 encodes the prompt alone, and a blank negative prompt is a single space.
         """
         effective = (

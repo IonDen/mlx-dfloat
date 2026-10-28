@@ -105,7 +105,7 @@ def test_df11_patterns_fetch_the_one_comfyui_file():
 @pytest.mark.mflux
 def test_the_definitions_name_only_their_component_and_the_processor_tokenizer():
     # Bug caught: a subset keeping the transformer component (mflux's loader would read transformer/), or the
-    # tokenizer looked up anywhere but processor/ (mflux 0.20.0 qwen21_weight_definition.py:38-50).
+    # tokenizer looked up anywhere but processor/ (mflux 0.23.0 qwen21_weight_definition.py:38-50).
     from mlx_dfloat.mflux.qwen21.init import encoder_definition, vae_definition
 
     assert [c.name for c in encoder_definition().get_components()] == ["text_encoder"]
@@ -121,7 +121,7 @@ def test_the_definitions_name_only_their_component_and_the_processor_tokenizer()
 @pytest.mark.mflux
 def test_the_computed_exemptions_are_exactly_what_mfluxs_mapping_does_not_load():
     # Bug caught: a computed buffer missing from COMPUTED (every real base refused), or a mapped weight listed there
-    # (a missing tensor never noticed). mflux 0.20.0: the VAE maps every parameter (qwen21_weight_mapping.py:91 on),
+    # (a missing tensor never noticed). mflux 0.23.0: the VAE maps every parameter (qwen21_weight_mapping.py:91 on),
     # the text encoder all but rotary_emb.inv_freq (qwen3_vl_rope.py:21). A two-layer encoder: the mapping names 36.
     from mflux.models.qwen21.model.qwen21_text_encoder.qwen21_text_encoder import Qwen21TextEncoder
     from mflux.models.qwen21.model.qwen21_vae.qwen21_vae import Qwen21VAE
@@ -156,11 +156,13 @@ def test_a_base_with_another_encoder_width_is_refused_before_any_encode(monkeypa
         load_text_encoder(tmp_path)
 
 
-# A two-layer Qwen3-VL text stack (tiny widths; mflux 0.20.0 Qwen21TextEncoder's constructor arguments).
+# A 36-layer Qwen3-VL text stack at tiny widths (mflux 0.23.0 Qwen21TextEncoder's constructor arguments). Every
+# layer is there: mflux's mapping lists layers 0-35 as required (Qwen21WeightMapping.NUM_TEXT_LAYERS = 36), and
+# 0.23's loader refuses a checkpoint missing any of them before it applies a weight (weight_loader.py:193-203).
 TINY_ENCODER = {
     "vocab_size": 100,
     "hidden_size": 64,
-    "num_hidden_layers": 2,
+    "num_hidden_layers": 36,
     "num_attention_heads": 2,
     "num_key_value_heads": 1,
     "intermediate_size": 128,
@@ -232,7 +234,8 @@ def test_a_vae_tensor_missing_from_the_base_is_refused_by_name(monkeypatch, tmp_
     # keeps its random init and the decode returns noise.
     from mlx_dfloat.mflux.qwen21.init import load_vae
 
-    missing = "decoder.conv_out.conv.weight"
+    # mflux 0.23: decoder.conv_out is a plain nn.Conv2d, no wrapped .conv (vae.py:60).
+    missing = "decoder.conv_out.weight"
     monkeypatch.setattr(_hub, "load_into", _replace_all_but("vae", missing))
     with pytest.raises(DFloatFormatError, match=re.escape(missing) + ".*not in the base"):
         load_vae(tmp_path)
@@ -246,7 +249,7 @@ def test_a_complete_vae_loads(monkeypatch, tmp_path):
 
     monkeypatch.setattr(_hub, "load_into", _replace_all_but("vae", None))
     vae = load_vae(tmp_path)
-    assert vae.decoder.conv_out.conv.weight.dtype == mx.bfloat16
+    assert vae.decoder.conv_out.weight.dtype == mx.bfloat16
 
 
 @pytest.mark.mflux

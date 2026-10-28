@@ -1,6 +1,9 @@
 """Tiny Qwen-Image 2.1 transformer helpers for the mflux lane. Every mflux import happens inside a function."""
 
+import os
 import zlib
+from collections.abc import Iterator
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -15,10 +18,12 @@ __all__ = [
     "TINY",
     "TINY_ROW_SPLITS",
     "TINY_SEED",
+    "WIDE",
     "StubTextEncoder",
     "StubTokenizer",
     "StubVAE",
     "fake_model",
+    "mflux_uncompiled",
     "stub_components",
     "tiny_config",
     "tiny_groups",
@@ -26,6 +31,34 @@ __all__ = [
     "tiny_seamed",
     "write_tiny_checkpoint",
 ]
+
+
+# How many mflux_uncompiled blocks are open: MLX has no getter for its compile state, so an inner block must know an
+# outer one switched compile off.
+_UNCOMPILED_DEPTH = [0]
+
+
+@contextmanager
+def mflux_uncompiled() -> Iterator[None]:
+    """``mx.compile`` off for the block: stock mflux's own graph run uncompiled, the parity reference.
+
+    mflux 0.23 compiles ``_step_fn`` / ``_image_step_fn`` on every call path (qwen21_transformer.py:96-98, 111-113),
+    and the compiled bits differ from the same graph run plain; our seam runs the plain graph.
+
+    On exit the previous state comes back: compile stays off when it was off on entry. MLX exposes only
+    ``mx.enable_compile`` / ``mx.disable_compile``, no getter, so "off on entry" means an enclosing block of this
+    helper, or ``MLX_DISABLE_COMPILE`` set (MLX's documented switch).
+    """
+    was_off = _UNCOMPILED_DEPTH[0] > 0 or "MLX_DISABLE_COMPILE" in os.environ
+    mx.disable_compile()
+    _UNCOMPILED_DEPTH[0] += 1
+    try:
+        yield
+    finally:
+        _UNCOMPILED_DEPTH[0] -= 1
+        if not was_off:
+            mx.enable_compile()
+
 
 # Head dim 16 = the sum of the three RoPE axes (4 + 6 + 6, each even: mflux 0.20.0 qwen21_rope.py:23-26 builds one
 # table per axis at half its width); inner dim 2 x 16 = 32. in_channels stays the default 64: Qwen21LatentCreator
@@ -71,16 +104,21 @@ def tiny_inputs(seed=0):
     }
 
 
-def tiny_seamed(n_layers=2):
-    """A seamed mflux ``Qwen21Transformer`` at ``TINY`` size with placeholders installed; returns (tf, shapes)."""
-    from mlx_dfloat.integrate.blockseam import seam_blocks
+def tiny_seamed(n_layers=2, dims=None):
+    """A seamed mflux ``Qwen21Transformer`` at ``dims`` (``TINY`` by default) with placeholders; returns (tf, shapes)."""
+
     from mlx_dfloat.integrate.placeholders import install_placeholders
     from mlx_dfloat.mflux.qwen21.names import qwen21_name_map
-    from mlx_dfloat.mflux.qwen21.transformer import block_lists, seam_transformer_class
+    from mlx_dfloat.mflux.qwen21.transformer import (
+        block_lists,
+        mflux_packer,
+        seam_qwen21_blocks,
+        seam_transformer_class,
+    )
 
-    tf = seam_transformer_class()(**{**TINY, "num_layers": n_layers})
+    tf = seam_transformer_class()(**{**(TINY if dims is None else dims), "num_layers": n_layers})
     shapes = install_placeholders(block_lists(tf), qwen21_name_map())
-    seam_blocks(block_lists(tf), tf.seam_cell)
+    seam_qwen21_blocks(block_lists(tf), tf.seam_cell, tf.pack_switch, pack=mflux_packer())
     return tf, shapes
 
 
@@ -128,7 +166,7 @@ def write_tiny_checkpoint(
 
     from mlx_dfloat.integrate.placeholders import install_placeholders
     from mlx_dfloat.mflux.qwen21.names import qwen21_name_map
-    from mlx_dfloat.mflux.qwen21.transformer import COMPUTED_PARAMS, block_lists
+    from mlx_dfloat.mflux.qwen21.transformer import block_lists
 
     dims = {**TINY, "num_layers": n_layers}
     if inner_override is not None:
@@ -143,7 +181,9 @@ def write_tiny_checkpoint(
         gate_up = np.concatenate([mats["img_mlp.gate_layer"], mats["img_mlp.proj"]])
         stored = {**mats, "img_mlp.gate_up": gate_up}
         groups[block] = [stored[sub] for sub in STORED_SUBS]
-    taken = {f"{b}.{a}.weight" for b, per in shapes.items() for a in per} | set(COMPUTED_PARAMS)
+    # mflux 0.23 keeps its computed tables outside the parameters (``COMPUTED_TABLES``), so every parameter that is
+    # not a block matrix is an extra the checkpoint stores.
+    taken = {f"{b}.{a}.weight" for b, per in shapes.items() for a in per}
     patterns = {r"transformer_blocks\.\d+": STORED_SUBS}
     if modulation_as_group:
         matrices["modulation.1"] = {"weight": random_bf16(rng, modulation_shape)}
@@ -282,3 +322,17 @@ def fake_model(tmp_path, monkeypatch, *, tokenizer=None, **overrides):
     }
     parts.update(overrides)
     return model_module.DFloatQwenImage21._from_parts(**parts)
+
+
+# Wide enough for the two mflux 0.23 paths TINY cannot reach: head dim 64 turns the fused QK-norm/RoPE kernel on
+# (qwen21_fused_kernels.py:107-114: a multiple of 64, at most 512; the axes 16 + 24 + 24 = 64), and inner dim
+# 16 x 64 = 1024 with a few text tokens is a shape where the packed Q/K/V matmul's bits differ from the separate ones
+# (tests/test_qwen21_packing.py). mlp_ratio 1 keeps a block at 7 x 1024^2 weights.
+WIDE = {
+    "num_layers": 1,
+    "attention_head_dim": 64,
+    "num_attention_heads": 16,
+    "context_in_dim": 32,
+    "mlp_ratio": 1,
+    "axes_dims_rope": (16, 24, 24),
+}

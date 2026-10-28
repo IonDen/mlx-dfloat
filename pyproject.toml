@@ -40,7 +40,8 @@ mlx-dfloat = "mlx_dfloat.cli:main"
 
 [project.optional-dependencies]
 mflux = [
-  "mflux>=0.20,<0.21; sys_platform == 'darwin'",
+  "mflux>=0.23,<0.24; sys_platform == 'darwin'",
+  "pillow<13",
   "psutil>=6",
 ]
 
@@ -63,7 +64,8 @@ test = [
 typecheck = ["mypy>=1.13"]
 lint = ["ruff>=0.7"]
 bench = [
-  "mflux>=0.20,<0.21; sys_platform == 'darwin'",
+  "mflux>=0.23,<0.24; sys_platform == 'darwin'",
+  "pillow<13",
   "pyobjc-framework-Metal>=10; sys_platform == 'darwin'",
 ]
 dev = [

@@ -1,6 +1,6 @@
 """Krea 2 naming: the block kind, the decoded sub-paths, the map derived from mflux, the group and variant checks.
 
-The block kind and its run order: mflux 0.20.0 ``Krea2Transformer`` runs one list, ``blocks``, inline. The decoded
+The block kind and its run order: mflux 0.23.0 ``Krea2Transformer`` runs one list, ``blocks``, inline. The decoded
 sub-paths and the seven non-block groups (the four text-fusion blocks, ``tmlp``, ``tproj``, ``txtmlp``) are the
 ``pattern_dict`` of the two ComfyUI single-file DF11 exports (Krea 2 Raw and Krea 2 Turbo, identical); their stored
 order was checked against the originals' bytes. mflux's ``Krea2WeightMapping`` templates its block targets with
@@ -46,7 +46,7 @@ NONBLOCK_GROUPS: dict[str, tuple[str, ...]] = {
     "txtmlp": ("txtmlp.1.weight", "txtmlp.3.weight"),
     **{g: tuple(f"{g}.{s}.weight" for s in TEXT_SUBS) for g in TEXT_FUSION_GROUPS},
 }
-DEFAULT_LAYERS = 28  # mflux 0.20.0 ``Krea2Transformer.__init__(layers=28)``
+DEFAULT_LAYERS = 28  # mflux 0.23.0 ``Krea2Transformer.__init__(layers=28)``
 LAYOUT_FOR_MODEL: dict[str, str] = {
     "krea-2-raw": "krea-2-raw-comfyui",
     "krea-2": "krea-2-turbo-comfyui",

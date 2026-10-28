@@ -15,12 +15,14 @@ encode held 66_567_800 over the language model. The committed MEASURED record
 
 The denoise term is re-derived at the planner's limit (2026-10-08, the first one-step calibration run at that limit, in
 the cache-limit A/B; same model, prompt, size, seed and guidance): denoise footprint peak 13_939_106_072 at the
-2_731_761_634 limit. The VAE term covers the highest of eleven 1024² VAE-phase footprint peaks (21.76-22.79 GB; MLX's
-VAE peak was the same in every calibration run): 22_788_580_400, from the second one-step run of the A/B at the old limit.
+2_731_761_634 limit. The VAE term covers the highest of thirteen 1024² VAE-phase footprint peaks (21.76-22.83 GB): eleven
+on mflux 0.20 (MLX's VAE peak was the same in every calibration run) and two on mflux 0.23 (the 40-step MEASURED run and
+the identity check's df11 side, 2026-10-24); the highest is the 0.23 identity run's 22_831_539_272.
 
-The calibration runs' phase peaks are committed in ``bench/results/calibration/qwen-image-2.1-1024.json`` (each run's
-label, date, cache limit and footprint peaks; ``constants_from`` names the run each term was derived from), and the
-tests below read them from there.
+The calibration runs' phase peaks are committed in ``bench/results/calibration/qwen-image-2.1-1024.json`` (mflux 0.20)
+and ``qwen-image-2.1-1024-mflux023.json`` (mflux 0.23, copied from the records its ``source`` keys name): each run's
+label, date, cache limit and footprint peaks; ``constants_from`` names the run each term was derived from (the 0.23
+record's overrides the 0.20 record's for the VAE term). The tests below read them from there.
 """
 
 import json
@@ -59,13 +61,16 @@ CALIBRATION_CACHE_LIMIT = 1_859_346_402
 TEXT_TOKENS = 33  # the calibration prompt's (the negative " " is 9)
 REPO = Path(__file__).resolve().parents[1]
 CALIBRATION = json.loads((REPO / "bench/results/calibration/qwen-image-2.1-1024.json").read_text())
-CALIBRATION_RUNS = {run["label"]: run for run in CALIBRATION["runs"]}
+CALIBRATION_023 = json.loads(
+    (REPO / "bench/results/calibration/qwen-image-2.1-1024-mflux023.json").read_text()
+)
+CALIBRATION_RUNS = {run["label"]: run for run in CALIBRATION["runs"] + CALIBRATION_023["runs"]}
 # The phase peaks the constants were derived from: the denoise peak is the first one-step A/B run's at CACHE_LIMIT;
-# the VAE peak the highest of the eleven 1024² samples (the second A/B run at the old limit); the encode peak the first
+# the VAE peak the highest of the thirteen 1024² samples (the mflux 0.23 identity run); the encode peak the first
 # calibration run's.
 MEASURED = {
     phase: CALIBRATION_RUNS[label]["footprint_peaks"][phase]
-    for phase, label in CALIBRATION["constants_from"].items()
+    for phase, label in (CALIBRATION["constants_from"] | CALIBRATION_023["constants_from"]).items()
 }
 VAE_SAMPLES = {label: run["footprint_peaks"]["vae"] for label, run in CALIBRATION_RUNS.items()}
 # This Mac (M1 Max 32 GB): mx.device_info()["max_recommended_working_set_size"] and the RAM, from the calibration record.
@@ -250,23 +255,32 @@ def _plan(budget, *, fit_check=True, cache_limit_override=None):
 def test_the_calibration_record_holds_the_runs_the_constants_name():
     # Bug caught: the committed record and the constants drifting apart (a re-derived term whose run is not recorded,
     # or a record edit that moves a peak): the three source peaks are the literals the constants were derived from.
-    assert CALIBRATION["constants_from"] == {
-        "encode": "derisk-1",
-        "denoise": "ab-new-limit-1",
-        "vae": "ab-old-limit-2",
-    }
-    assert MEASURED == {"encode": 15_857_938_288, "denoise": 13_939_106_072, "vae": 22_788_580_400}
+    assert CALIBRATION_023["constants_from"] == {"vae": "identity-4-steps-cfg-mflux023"}
+    assert MEASURED == {"encode": 15_857_938_288, "denoise": 13_939_106_072, "vae": 22_831_539_272}
     assert CALIBRATION_RUNS["ab-new-limit-1"]["cache_limit"] == CACHE_LIMIT
 
 
+def test_the_mflux_023_samples_are_the_committed_records_peaks():
+    # Bug caught: the derived calibration record drifting from the run records it was copied from (a peak typed in by
+    # hand, or a record re-run without the calibration following it).
+    for run in CALIBRATION_023["runs"]:
+        source = json.loads((REPO / run["source"]["record"]).read_text())
+        assert run["footprint_peaks"]["vae"] == source[run["source"]["field"]]
+        assert source["exit_code"] == 0
+    assert {run["footprint_peaks"]["vae"] for run in CALIBRATION_023["runs"]} == {
+        21_877_154_888,
+        22_831_539_272,
+    }
+
+
 def test_the_vae_term_covers_every_1024_sample_and_equals_the_highest():
-    # Bug caught: the VAE transient derived from one run instead of the highest of the eleven samples (a fit check that
-    # under-predicts the runs it was calibrated on: the first calibration run alone puts the phase 648_937_376 B low), or a
-    # sample dropped from the record.
-    assert len(VAE_SAMPLES) == 11
+    # Bug caught: the VAE transient derived from one run instead of the highest of the thirteen samples (a fit check
+    # that under-predicts the runs it was calibrated on: the mflux 0.20 constant puts the VAE phase 42_958_872 B under
+    # the 0.23 identity run, the first calibration run alone 691_896_248 B), or a sample dropped from either record.
+    assert len(VAE_SAMPLES) == 13
     fit = _fit()
-    assert fit.phases["vae"] == max(VAE_SAMPLES.values())
     assert all(peak <= fit.phases["vae"] for peak in VAE_SAMPLES.values())
+    assert fit.phases["vae"] == max(VAE_SAMPLES.values()) == 22_831_539_272
 
 
 def test_the_estimate_at_1024_equals_the_calibration_run_phase_for_phase():
@@ -308,9 +322,9 @@ def test_a_32_gb_mac_keeps_the_set_through_the_vae_decode(monkeypatch):
     # The shared rule (_pipeline.plan_call_for) drops the set before the VAE decode iff the VAE phase with the set is
     # over the budget, with no margin beyond the budget's own: the recommended working set minus a 2 GiB reserve
     # (integrate.memory.budget_bytes), 26_800_603_136 - 2_147_483_648 = 24_653_119_488 B here. The measured VAE peak,
-    # 22_788_580_400 B (the estimate's by calibration), is 1_864_539_088 B (1.74 GiB) under it: the set stays resident,
+    # 22_831_539_272 B (the estimate's by calibration), is 1_821_580_216 B (1.70 GiB) under it: the set stays resident,
     # and a 32 GB Mac pays no set reload per call. Bug caught: the decision inverted, a margin added on top of the
-    # reserve that flips it (more than 1.74 GiB), or the budget read without the reserve.
+    # reserve that flips it (more than 1.70 GiB), or the budget read without the reserve.
     monkeypatch.setattr(
         imem.mx, "device_info", lambda: {"max_recommended_working_set_size": RECOMMENDED_32}
     )
@@ -328,9 +342,9 @@ def test_a_32_gb_mac_keeps_the_set_through_the_vae_decode(monkeypatch):
 @pytest.mark.parametrize("tier", [16, 24])
 def test_a_16_or_24_gb_tier_is_refused_in_the_encode_phase(tier):
     # The prediction for the CAPPED tiers at 1024² (the calibration prompt, 33 tokens): the VAE phase with the set
-    # (22_788_580_400 B) is over either tier's budget, so the set is dropped before the decode: the VAE phase is then
+    # (22_831_539_272 B) is over either tier's budget, so the set is dropped before the decode: the VAE phase is then
     # the extras (they stay on the transformer) + the VAE + its transient + overhead, 137_388_032 + 1_350_989_512 +
-    # 11_119_436_651 + 459_445_098 = 13_067_259_293 B; the encode phase (the language model 15_136_811_008 + the encode term 66_567_800 + overhead 459_445_098 =
+    # 11_162_395_523 + 459_445_098 = 13_110_218_165 B; the encode phase (the language model 15_136_811_008 + the encode term 66_567_800 + overhead 459_445_098 =
     # 15_662_823_906 B, 14.59 GiB) is then the peak and over both fit budgets. The fit budget is what a real Mac of
     # that size applies (generate passes limits.fit_budget_bytes): the tier's recommended working set (2/3 of its RAM)
     # minus the fit rule's 2 GiB reserve. 24 GB: 17_179_869_184 - 2_147_483_648 = 15_032_385_536 B (14.00 GiB), over by
@@ -348,7 +362,7 @@ def test_a_16_or_24_gb_tier_is_refused_in_the_encode_phase(tier):
     assert forced.drop_set_before_vae is True
     assert forced.estimate.peak_phase == "encode"
     assert forced.estimate.peak_bytes == 15_662_823_906
-    assert forced.estimate.phases["vae"] == 13_067_259_293
+    assert forced.estimate.phases["vae"] == 13_110_218_165
 
 
 # What the prompt encode may hold before the model warns (model._check_encode_peak): MLX's encode peak minus what was

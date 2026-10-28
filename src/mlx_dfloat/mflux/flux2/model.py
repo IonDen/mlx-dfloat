@@ -57,7 +57,7 @@ RETAINED_SLACK_BYTES = 2 * 1024**3
 # call's allowance, at least 500_000_000 B, + this slack) keeps those runs under it at every size, and an encode that
 # runs all 36 layers over it at 1024² (4B: 9 more layers of 201_861_632 B).
 ENCODE_SLACK_BYTES = 256 * 1024**2
-# mflux 0.20.0 ``Flux2Klein.generate_image``: the negative prompt it encodes, its guidance and scheduler defaults.
+# mflux 0.23.0 ``Flux2Klein.generate_image``: the negative prompt it encodes, its guidance and scheduler defaults.
 NEGATIVE_PROMPT = " "
 DEFAULT_GUIDANCE = 1.0
 DEFAULT_SCHEDULER = "flow_match_euler_discrete"
@@ -101,6 +101,7 @@ class DFloatFlux2Klein(Flux2Klein):  # type: ignore[misc]  # mflux ships no type
         lora_paths: list[str] | None = None,
         lora_scales: list[float] | None = None,
         bake_lora: bool = True,
+        compute_precision: Any = None,
     ) -> None:
         """Resolve the checkpoint and the base repository and build the model.
 
@@ -109,8 +110,8 @@ class DFloatFlux2Klein(Flux2Klein):  # type: ignore[misc]  # mflux ships no type
         estimate and VAE decision.
 
         Raises:
-            DFloatUnsupportedError: ``quantize``, ``lora_paths``, ``lora_scales`` or ``bake_lora=False``
-                (accepted only to refuse), an eval policy other than ``"per-block"`` / ``"depth2"``, the KV-cache
+            DFloatUnsupportedError: ``quantize``, ``lora_paths``, ``lora_scales``, ``bake_lora=False`` or a
+                ``compute_precision`` (accepted only to refuse), an eval policy other than ``"per-block"`` / ``"depth2"``, the KV-cache
                 model, or an unknown ``model``.
             DFloatBackendError: The GPU decoder fails its check on the two packaged self-check groups (raised before
                 anything is resolved or loaded), or Metal is unavailable.
@@ -124,6 +125,7 @@ class DFloatFlux2Klein(Flux2Klein):  # type: ignore[misc]  # mflux ships no type
         _pipeline.refuse_construction_args(
             quantize=quantize, lora_paths=lora_paths, lora_scales=lora_scales, bake_lora=bake_lora
         )
+        _pipeline.refuse_precision_args(float32=False, compute_precision=compute_precision)
         _pipeline.check_eval_policy(eval_policy, POLICIES)
         if "kv" in model.lower():
             raise DFloatUnsupportedError(
@@ -143,7 +145,10 @@ class DFloatFlux2Klein(Flux2Klein):  # type: ignore[misc]  # mflux ships no type
         pin = None if df11_path else registry.MODELS[model].df11_revision
         df11 = finit.resolve(df11_path or df11_default, patterns=finit.DF11_PATTERNS, revision=pin)
         ckpt = open_checkpoint(df11.root)
-        base = finit.resolve(base_path or base_default, patterns=finit.BASE_PATTERNS)
+        base_pin = None if base_path else registry.MODELS[model].base_revision
+        base = finit.resolve(
+            base_path or base_default, patterns=finit.BASE_PATTERNS, revision=base_pin
+        )
         build = build_transformer(ckpt, transformer_overrides=model_config.transformer_overrides)
         components = finit.load_base(base.root, model_config)
         self._assemble(
@@ -186,6 +191,7 @@ class DFloatFlux2Klein(Flux2Klein):  # type: ignore[misc]  # mflux ships no type
         budget_bytes: int | None = None,
         decode: Callable[[MxGroup], DecodeResult] | None = None,
     ) -> None:
+        from mflux.models.common.compute_precision import ComputePrecision
         from mflux.models.flux2.flux2_initializer import Flux2Initializer
 
         _pipeline.check_eval_policy(eval_policy, POLICIES)
@@ -193,6 +199,8 @@ class DFloatFlux2Klein(Flux2Klein):  # type: ignore[misc]  # mflux ships no type
         Flux2Initializer._init_config(
             self, model_config
         )  # prompt_cache, model_config, callbacks, tiling_config
+        # mflux's default (Flux2Initializer.init sets it): no compute precision; generate_image records it.
+        self.compute_precision = ComputePrecision()
         self.vae = components.vae
         self.text_encoder = components.text_encoder
         self.tokenizers = components.tokenizers
@@ -258,7 +266,7 @@ class DFloatFlux2Klein(Flux2Klein):  # type: ignore[misc]  # mflux ships no type
     def _encode(self, prompt: str) -> tuple[mx.array, ...]:
         """The prompt's embeddings and text ids, as ``Flux2Klein._encode_prompt_pair`` computes them.
 
-        mflux 0.20.0 hard-codes 512 tokens and hidden states (9, 18, 27) there; the model config's token count and
+        mflux 0.23.0 hard-codes 512 tokens and hidden states (9, 18, 27) there; the model config's token count and
         ``memory.TEXT_ENCODER_OUT_LAYERS`` carry the same values (a test pins them to mflux's source).
         """
         from mflux.models.flux2.model.flux2_text_encoder.prompt_encoder import Flux2PromptEncoder
@@ -372,7 +380,7 @@ class DFloatFlux2Klein(Flux2Klein):  # type: ignore[misc]  # mflux ships no type
     def cfg_prompts(self, prompt: str, *, guidance: float | None) -> tuple[str, ...]:
         """The prompts a call encodes: the prompt, and mflux's blank negative ``" "`` when guidance is above 1.
 
-        mflux 0.20's rule (``Flux2Klein.generate_image`` and ``_encode_prompt_pair``): the negative branch runs, and
+        mflux 0.23's rule (``Flux2Klein.generate_image`` and ``_encode_prompt_pair``): the negative branch runs, and
         the transformer is called twice per step, only for a guidance above 1.0.
         """
         if guidance is None or guidance <= 1.0:
