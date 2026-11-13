@@ -39,12 +39,79 @@ def _modulation(model):
     return model.transformer.modulation.layers[1].weight
 
 
+def _attributes_read_by(cls, method_name):
+    """Every ``self.<name>`` read by ``cls.<method_name>`` and by every method it reaches on ``self``, from the source.
+
+    The test follows upstream's prompt-encoding helper (and any other ``self.<method>(...)`` the entry point calls,
+    private or public) without naming it: every method of ``cls`` called on ``self`` is scanned the same way, and the
+    methods those call, until no new one turns up (a fixpoint, so depth and cycles do not matter). A call on an
+    attribute that is not a method of ``cls`` (``self.transformer(...)``, a component) is a read, not a hop. No helper
+    name is written down here.
+    """
+
+    def source(name):
+        return inspect.getsource(getattr(cls, name))
+
+    def self_calls(name):
+        found = set(re.findall(r"self\.(\w+)\s*\(", source(name)))
+        return {
+            n
+            for n in found
+            if inspect.isfunction(getattr(cls, n, None)) or inspect.ismethod(getattr(cls, n, None))
+        }
+
+    methods, frontier = {method_name}, {method_name}
+    while frontier:
+        frontier = set().union(*(self_calls(m) for m in frontier)) - methods
+        methods |= frontier
+    return set().union(*(set(re.findall(r"self\.(\w+)", source(m))) for m in methods))
+
+
+class _DeepPrivateUpstream:
+    """A fake upstream whose entry point reaches a new attribute three private helpers down (with a cycle)."""
+
+    def generate_image(self):
+        return self._encode(self.vae)
+
+    def _encode(self, x):
+        return self._tokenize(x)
+
+    def _tokenize(self, x):
+        return self._new_reader(x)
+
+    def _new_reader(self, x):
+        return self.brand_new_attribute, self._encode(x)
+
+
+class _PublicHopUpstream:
+    """A fake upstream whose entry point reaches a new attribute through a public helper on ``self``."""
+
+    def generate_image(self):
+        return self.encode_prompt(self.vae)
+
+    def encode_prompt(self, x):
+        return self._read(x)
+
+    def _read(self, x):
+        return self.brand_new_attribute, x
+
+
+@pytest.mark.parametrize("cls", [_DeepPrivateUpstream, _PublicHopUpstream])
+def test_the_scan_follows_self_calls_to_a_fixpoint_public_ones_included(cls):
+    # Bug caught: the scan stopping at a fixed depth (an mflux release moving a read three helpers down) or following
+    # only self._private( calls (a read behind a public self.helper( call). The attribute is a literal of the fake.
+    names = _attributes_read_by(cls, "generate_image")
+    assert {"vae", "brand_new_attribute"} <= names
+
+
 def test_every_attribute_upstreams_generate_image_reads_exists_on_the_model(tmp_path, monkeypatch):
-    # Bug caught: an mflux point release reading a new self.<name> in QwenImage21.generate_image our assembly never
-    # sets (mflux's own initializer is not run).
+    # Bug caught: an mflux point release reading a new self.<name> in QwenImage21.generate_image, or in the
+    # methods it reaches on self, private or public, at any depth (on 0.24 the prompt encoding moved into a helper),
+    # that our assembly never sets
+    # (mflux's own initializer is not run).
     from mflux.models.qwen21.variants.txt2img.qwen_image_21 import QwenImage21
 
-    names = set(re.findall(r"self\.(\w+)", inspect.getsource(QwenImage21.generate_image)))
+    names = _attributes_read_by(QwenImage21, "generate_image")
     assert names >= {"vae", "transformer", "text_encoder", "prompt_cache", "tokenizers", "bits"}
     model = fake_model(tmp_path, monkeypatch)
     assert [n for n in sorted(names) if not hasattr(model, n)] == []

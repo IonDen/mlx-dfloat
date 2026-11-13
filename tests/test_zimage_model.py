@@ -6,6 +6,7 @@ import re
 import types
 
 import mlx.core as mx
+import mlx.nn as nn
 import numpy as np
 import pytest
 from tests._zimage_tiny import TINY_SEED, StubTextEncoder, fake_model, write_tiny_checkpoint
@@ -697,6 +698,174 @@ def test_one_real_tiny_generation_decodes_once_per_block_per_call(
     assert set(report["peaks"]) >= {"encode", "set_load", "denoise", "vae"}
     assert report["lifecycle"]["set_loads"] == 1
     assert _cache_limit_in_force() == before
+
+
+class _RecordingVAE(nn.Module):
+    """A stub VAE that keeps the unpacked latents mflux hands its decoder (the denoised result) and returns zeros."""
+
+    def __init__(self):
+        super().__init__()
+        self.weight = mx.zeros((4,), dtype=mx.bfloat16)
+        self.seen = []
+
+    def decode(self, latents, *_args, **_kwargs):
+        self.seen.append(latents)
+        return mx.zeros((1, 3, 8 * latents.shape[-2], 8 * latents.shape[-1]))
+
+    decode_packed_latents = decode
+
+
+class _PromptTokenizer:
+    """Z-Image's tokenizer protocol with ids that depend on the prompt: one id per character, cycled to 8."""
+
+    max_length = 512
+
+    def tokenize(self, prompt, **_kwargs):
+        ids = [ord(c) % 97 + 1 for c in (prompt or " ")]
+        ids = (ids * 8)[:8]
+        return types.SimpleNamespace(
+            input_ids=mx.array([ids], dtype=mx.int32),
+            attention_mask=mx.ones((1, 8), dtype=mx.int32),
+        )
+
+
+class _VaryingTextEncoder(nn.Module):
+    """Features that differ in direction from token to token (the stub's are constant, the same for every prompt),
+    width 32 as ``TINY``'s ``cap_feat_dim``."""
+
+    def __init__(self):
+        super().__init__()
+        self.freq = mx.arange(1, 33, dtype=mx.float32) / 7
+
+    def __call__(self, input_ids, attention_mask):
+        return mx.sin(input_ids[..., None].astype(mx.float32) * self.freq).astype(mx.bfloat16)
+
+
+def _stock_zimage(model_name, tokenizer, vae, groups, extras, compute_precision):
+    """Stock mflux ``ZImage`` over a plain tiny ``ZImageTransformer`` holding the BF16 source of a tiny checkpoint."""
+    from mflux.models.common.config.model_config import ModelConfig
+    from mflux.models.z_image.model.z_image_transformer.transformer import ZImageTransformer
+    from mflux.models.z_image.variants.z_image import ZImage
+    from mflux.models.z_image.z_image_initializer import ZImageInitializer
+    from mlx.utils import tree_flatten, tree_unflatten
+    from tests._family_fakes import FULL_SUBS
+    from tests._zimage_tiny import TINY
+
+    transformer = ZImageTransformer(**TINY, n_layers=2, n_refiner_layers=1)
+    shapes = {name: tuple(p.shape) for name, p in tree_flatten(transformer.parameters())}
+    weights = []
+    for group, arrays in groups.items():
+        subs = ["1"] if group == "cap_embedder" else FULL_SUBS[group.partition(".")[0]]
+        weights += [
+            (f"{group}.{sub}.weight", mx.array(a).view(mx.bfloat16))
+            for sub, a in zip(subs, arrays, strict=True)
+        ]
+    weights += [(name, mx.array(bits).view(mx.bfloat16)) for name, bits in extras.items()]
+    assert sorted(name for name, _w in weights) == sorted(shapes)
+    assert all(shapes[name] == tuple(w.shape) for name, w in weights)
+    transformer.update(tree_unflatten(weights))
+    stock = ZImage.__new__(ZImage)
+    nn.Module.__init__(stock)
+    ZImageInitializer._init_config(
+        stock, ModelConfig.from_name(model_name=model_name, base_model=None)
+    )
+    stock.vae = vae
+    stock.text_encoder = _VaryingTextEncoder()
+    stock.tokenizers = {"z_image": tokenizer}
+    stock.transformer = transformer
+    stock.bits = None
+    stock.lora_paths, stock.lora_scales = [], []
+    stock.float32 = False
+    stock.compute_precision = compute_precision
+    return stock
+
+
+@pytest.mark.parametrize(
+    ("model_name", "guidance"),
+    [("z-image", 1.0), ("z-image", 4.0), ("z-image-turbo", 4.0)],
+    ids=["z-image-guidance-1", "z-image-cfg", "z-image-turbo"],
+)
+def test_a_tiny_generation_gives_stock_mfluxs_latents_bit_for_bit(
+    tmp_path, monkeypatch, model_name, guidance
+):
+    # Bug caught: anything between the checkpoint and mflux's loop changing the result: a decoded matrix on the wrong
+    # parameter, the cap_embedder non-block group mis-routed, an extra under the wrong rename, the CFG prompts swapped
+    # (the prompt "p" and the negative "n" give different token ids, so different features). The reference is stock
+    # mflux over the same BF16 weights, both sides uncompiled (mflux's predict is the plain closure when the chip
+    # check says M1/M2, and mx.compile is off); every random draw is keyed from `seed`. Equality is bit for bit (an
+    # integer view of the latents). The extras are random: constant ones make the forward pass blind to its inputs.
+    # The per-block recorder also catches a decoded matrix one bit off its source, which these latents can miss.
+    from functools import partial
+
+    from mflux.utils.apple_silicon import AppleSiliconUtil
+    from tests._decoded_bits import record_block_bits
+    from tests._family_fakes import FULL_SUBS
+    from tests._qwen21_tiny import mflux_uncompiled
+    from tests._zimage_tiny import TINY, stub_components
+
+    from mlx_dfloat.format import open_checkpoint
+    from mlx_dfloat.mflux.zimage.transformer import (
+        block_lists,
+        build_transformer,
+        seam_transformer_class,
+    )
+
+    monkeypatch.setattr(AppleSiliconUtil, "is_m1_or_m2", classmethod(lambda cls: True))
+    rng = np.random.default_rng(11)
+    groups, extras = write_tiny_checkpoint(tmp_path / "random", rng, random_extras=rng)
+    ckpt = open_checkpoint(tmp_path / "random")
+    tokenizer = _PromptTokenizer()
+    ours_vae, stock_vae = _RecordingVAE(), _RecordingVAE()
+    components = stub_components()
+    components.vae, components.text_encoder = ours_vae, _VaryingTextEncoder()
+    components.tokenizers = {"z_image": tokenizer}
+    model = fake_model(
+        tmp_path,
+        monkeypatch,
+        model=model_name,
+        ckpt=ckpt,
+        build=build_transformer(ckpt, transformer_class=partial(seam_transformer_class(), **TINY)),
+        components=components,
+    )
+    monkeypatch.setattr(zinit, "load_text_encoder", lambda root: _VaryingTextEncoder())
+    stock = _stock_zimage(model_name, tokenizer, stock_vae, groups, extras, model.compute_precision)
+    # The source matrices of every block, by mflux's own sub-path (the order write_tiny_checkpoint drew them in).
+    sources = {
+        group: dict(zip(FULL_SUBS[group.partition(".")[0]], arrays, strict=True))
+        for group, arrays in groups.items()
+        if group != "cap_embedder"
+    }
+    seen = record_block_bits(monkeypatch, block_lists(model.transformer), sources)
+    kwargs = {
+        "seed": 3,
+        "prompt": "p",
+        "num_inference_steps": 2,
+        "height": 32,
+        "width": 32,
+        "guidance": guidance,
+        "negative_prompt": "n",
+    }
+    with mflux_uncompiled():
+        model.generate_image(**kwargs)
+    with mflux_uncompiled():
+        stock.generate_image(**kwargs)
+    (ours,), (theirs,) = ours_vae.seen, stock_vae.seen
+    assert model.report()["cfg_calls_per_step"] == (
+        2 if (model_name, guidance) == ("z-image", 4.0) else 1
+    )
+    assert bool(mx.all(mx.isfinite(theirs)))
+    assert (ours.dtype, ours.shape) == (theirs.dtype, theirs.shape)
+    view = mx.uint32 if ours.dtype == mx.float32 else mx.uint16
+    assert np.array_equal(np.array(ours.view(view)), np.array(theirs.view(view)))
+    # Decoded bits, per block: the latents above are the whole-run check, but a tiny run's latents can stay equal
+    # under a small change in one matrix (one bit of one element). Every block call of our run (2 steps x the CFG
+    # calls x 4 blocks) held, in each matrix mflux's block code read, exactly the source bits.
+    assert len(seen) == 2 * model.report()["cfg_calls_per_step"] * len(sources)
+    assert {name for name, _bits in seen} == set(sources)
+    for name, bits in seen:
+        assert set(bits) == set(sources[name]), name
+        for sub, got in bits.items():
+            assert np.array_equal(got, sources[name][sub]), f"{name}.{sub}"
 
 
 def test_open_phase_names_the_phase_running_now_and_none_outside_a_call(tmp_path, monkeypatch):

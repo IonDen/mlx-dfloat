@@ -8,6 +8,7 @@ import re
 import types
 
 import mlx.core as mx
+import mlx.nn as nn
 import numpy as np
 import pytest
 from tests._flux2_tiny import TINY_SEED, StubTextEncoder, fake_model, write_tiny_checkpoint
@@ -934,3 +935,154 @@ def test_encode_runs_under_the_commands_caps_and_restores_mlxs_defaults(tmp_path
         after = current_limits()
     assert (seen[0]["wired"], seen[0]["memory"]) == (wired, memory)
     assert after == start
+
+
+class _RecordingVAE(nn.Module):
+    """A stub VAE that keeps the packed latents mflux hands its decoder (the denoised result) and returns zeros."""
+
+    def __init__(self):
+        super().__init__()
+        self.weight = mx.zeros((4,), dtype=mx.bfloat16)
+        self.seen = []
+
+    def decode_packed_latents(self, packed, tiling_config=None):
+        self.seen.append(packed)
+        return mx.zeros((1, 3, 16 * packed.shape[2], 16 * packed.shape[3]))
+
+
+class _PromptTokenizer:
+    """Qwen3's tokenizer protocol with ids that depend on the prompt: one id per character, cycled to 8."""
+
+    def tokenize(self, prompt, max_length=512, **_kwargs):
+        ids = [ord(c) % 97 + 1 for c in (prompt or " ")]
+        ids = (ids * 8)[:8]
+        return types.SimpleNamespace(
+            input_ids=mx.array([ids], dtype=mx.int32),
+            attention_mask=mx.ones((1, 8), dtype=mx.int32),
+        )
+
+
+class _VaryingTextEncoder(nn.Module):
+    """``get_prompt_embeds`` with features that follow the token ids (the stub's are the same for every prompt), width
+    32 as ``TINY``'s ``joint_attention_dim``."""
+
+    def __init__(self):
+        super().__init__()
+        self.freq = mx.arange(1, 33, dtype=mx.float32) / 7
+
+    def get_prompt_embeds(self, input_ids, attention_mask=None, hidden_state_layers=(9, 18, 27)):
+        return mx.sin(input_ids[..., None].astype(mx.float32) * self.freq).astype(mx.bfloat16)
+
+
+def _stock_flux2(model_name, tokenizer, vae, groups, extras, compute_precision):
+    """Stock mflux ``Flux2Klein`` over a plain tiny ``Flux2Transformer`` holding the BF16 source of a tiny checkpoint.
+
+    The class defaults ``small_text_encoder`` / ``small_decoder`` stay False, as our constructor leaves them.
+    """
+    from mflux.models.common.config.model_config import ModelConfig
+    from mflux.models.flux2.flux2_initializer import Flux2Initializer
+    from mflux.models.flux2.model.flux2_transformer.transformer import Flux2Transformer
+    from mflux.models.flux2.variants.txt2img.flux2_klein import Flux2Klein
+    from mlx.utils import tree_flatten, tree_unflatten
+    from tests._flux2_tiny import TINY
+
+    from mlx_dfloat.integrate.placeholders import install_placeholders
+    from mlx_dfloat.mflux.flux2.names import klein_name_map
+    from mlx_dfloat.mflux.flux2.transformer import block_lists
+
+    # The mflux attribute of each block matrix, in the checkpoint's MATRIX_SUBS order, read off a throwaway probe.
+    attrs = {
+        block: list(per)
+        for block, per in install_placeholders(
+            block_lists(Flux2Transformer(**TINY)), klein_name_map()
+        ).items()
+    }
+    transformer = Flux2Transformer(**TINY)
+    shapes = {name: tuple(p.shape) for name, p in tree_flatten(transformer.parameters())}
+    weights = []
+    for group, arrays in groups.items():
+        subs = attrs.get(group, [None])
+        weights += [
+            (f"{group}.{sub}.weight" if sub else f"{group}.weight", mx.array(a).view(mx.bfloat16))
+            for sub, a in zip(subs, arrays, strict=True)
+        ]
+    weights += [(name, mx.array(bits).view(mx.bfloat16)) for name, bits in extras.items()]
+    assert sorted(name for name, _w in weights) == sorted(shapes)
+    assert all(shapes[name] == tuple(w.shape) for name, w in weights)
+    transformer.update(tree_unflatten(weights))
+    stock = Flux2Klein.__new__(Flux2Klein)
+    nn.Module.__init__(stock)
+    Flux2Initializer._init_config(
+        stock, ModelConfig.from_name(model_name=model_name, base_model=None)
+    )
+    stock.vae = vae
+    stock.text_encoder = _VaryingTextEncoder()
+    stock.tokenizers = {"qwen3": tokenizer}
+    stock.transformer = transformer
+    stock.bits = None
+    stock.lora_paths, stock.lora_scales = [], []
+    stock.compute_precision = compute_precision
+    return stock
+
+
+@pytest.mark.parametrize(
+    ("model_name", "guidance"),
+    [("flux2-klein-4b", 1.0), ("flux2-klein-base-4b", 4.0)],
+    ids=["distilled-guidance-1", "base-cfg"],
+)
+def test_a_tiny_generation_gives_stock_mfluxs_latents_bit_for_bit(
+    tmp_path, monkeypatch, model_name, guidance
+):
+    # Bug caught: anything between the checkpoint and mflux's loop changing the result: the _encode_prompt_pair
+    # override's four-tuple in the wrong order (the prompt "p" and mflux's blank negative give different token ids, so
+    # different features), a block group decoded onto the wrong block, a non-block group or an extra lost or under the
+    # wrong rename. The reference is stock mflux over the same BF16 weights, both sides uncompiled (mflux's predict is
+    # the plain closure when the chip check says M1/M2, and mx.compile is off); every random draw is keyed from
+    # `seed`. Equality is bit for bit (an integer view of the latents). The extras are random: a constant x_embedder
+    # or proj_out makes every channel the same.
+    from mflux.utils.apple_silicon import AppleSiliconUtil
+    from tests._flux2_tiny import TINY_OVERRIDES
+    from tests._qwen21_tiny import mflux_uncompiled
+
+    from mlx_dfloat.format import open_checkpoint
+    from mlx_dfloat.mflux.flux2.init import Flux2Components
+    from mlx_dfloat.mflux.flux2.transformer import build_transformer
+
+    monkeypatch.setattr(AppleSiliconUtil, "is_m1_or_m2", classmethod(lambda cls: True))
+    rng = np.random.default_rng(11)
+    groups, extras = write_tiny_checkpoint(tmp_path / "random", rng, random_extras=rng)
+    ckpt = open_checkpoint(tmp_path / "random")
+    tokenizer = _PromptTokenizer()
+    ours_vae, stock_vae = _RecordingVAE(), _RecordingVAE()
+    model = fake_model(
+        tmp_path,
+        monkeypatch,
+        model=model_name,
+        ckpt=ckpt,
+        build=build_transformer(ckpt, transformer_overrides=TINY_OVERRIDES),
+        components=Flux2Components(
+            vae=ours_vae, text_encoder=_VaryingTextEncoder(), tokenizers={"qwen3": tokenizer}
+        ),
+    )
+    monkeypatch.setattr(
+        finit, "load_text_encoder", lambda root, model_config: _VaryingTextEncoder()
+    )
+    stock = _stock_flux2(model_name, tokenizer, stock_vae, groups, extras, model.compute_precision)
+    kwargs = {
+        "seed": 3,
+        "prompt": "p",
+        "num_inference_steps": 2,
+        "height": 64,
+        "width": 64,
+        "guidance": guidance,
+    }
+    with mflux_uncompiled():
+        model.generate_image(**kwargs)
+    with mflux_uncompiled():
+        stock.generate_image(**kwargs)
+    (ours,), (theirs,) = ours_vae.seen, stock_vae.seen
+    assert model.report()["cfg_calls_per_step"] == (2 if guidance > 1.0 else 1)
+    assert bool(mx.all(mx.isfinite(theirs)))
+    assert (ours.dtype, ours.shape) == (theirs.dtype, theirs.shape)
+    view = mx.uint32 if ours.dtype == mx.float32 else mx.uint16
+    assert np.array_equal(np.array(ours.view(view)), np.array(theirs.view(view)))

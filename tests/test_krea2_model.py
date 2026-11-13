@@ -1249,6 +1249,7 @@ def test_the_tiny_generation_matches_stock_krea2_latents(
     # and clears MLX's cache before block 0 of every call: the latents must not move.
     from mflux.utils.apple_silicon import AppleSiliconUtil
     from tests._krea2_tiny import TINY, StubVAE, stock_krea2, stub_components
+    from tests._qwen21_tiny import mflux_uncompiled
 
     from mlx_dfloat.format import open_checkpoint
     from mlx_dfloat.mflux.krea2.transformer import build_transformer, seam_transformer_class
@@ -1285,8 +1286,12 @@ def test_the_tiny_generation_matches_stock_krea2_latents(
         "negative_prompt": negative,
         "scheduler": "er_sde",
     }
-    model.generate_image(**kwargs)
-    stock.generate_image(**kwargs)
+    # Both sides run with mx.compile off (MLX's own activations are compiled functions); every random draw on either
+    # side (the initial noise, er_sde's noise stream) is keyed from `seed`, so no global mx.random state enters.
+    with mflux_uncompiled():
+        model.generate_image(**kwargs)
+    with mflux_uncompiled():
+        stock.generate_image(**kwargs)
     (ours,), (theirs,) = ours_vae.seen, stock_vae.seen
     assert model.report()["cfg_calls_per_step"] == (2 if negative else 1)
     assert model.report()["predict"] == "uncompiled"

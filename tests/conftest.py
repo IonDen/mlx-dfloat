@@ -1,10 +1,13 @@
 """Pytest gates and MLX memory-safety guard."""
 
 import atexit
+import importlib.metadata
 import importlib.util
 import os
 import platform
 import sys
+from collections.abc import Callable
+from importlib.machinery import ModuleSpec
 from typing import Literal
 
 import pytest
@@ -42,6 +45,21 @@ def _mflux_marker_action(available: bool) -> Literal["run", "skip"]:
     return "run" if available else "skip"
 
 
+def _mflux_is_installed(spec: ModuleSpec | None, version: Callable[[str], str]) -> bool:
+    """True only for a real mflux install: an importable module with an origin and its distribution metadata.
+
+    A leftover ``mflux/`` directory with no ``__init__.py`` and no dist-info is a namespace package: ``find_spec``
+    still returns a spec (with ``origin=None``), but nothing in it imports.
+    """
+    if spec is None or spec.origin is None:
+        return False
+    try:
+        version("mflux")
+    except importlib.metadata.PackageNotFoundError:
+        return False
+    return True
+
+
 def _hard_exit_code(recorded: int | None) -> int | None:
     """Code for the atexit hard exit, or None to let the interpreter exit normally.
 
@@ -74,7 +92,9 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             if "metal" in item.keywords:
                 item.add_marker(metal_skip)
 
-    mflux_available = importlib.util.find_spec("mflux") is not None
+    mflux_available = _mflux_is_installed(
+        importlib.util.find_spec("mflux"), importlib.metadata.version
+    )
     if _mflux_marker_action(available=mflux_available) == "skip":
         mflux_skip = pytest.mark.skip(reason="mflux: install the mlx-dfloat[mflux] extra")
         for item in items:
