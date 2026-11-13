@@ -14,6 +14,7 @@ from mlx_dfloat.mflux import require_mflux
 from mlx_dfloat.mflux._hub import ResolvedRepo as ResolvedRepo
 from mlx_dfloat.mflux._hub import load_into, subset_definition
 from mlx_dfloat.mflux._hub import resolve as resolve
+from mlx_dfloat.mflux._vae import pin_decode_mode
 
 DF11_PATTERNS: tuple[str, ...] = ("*.safetensors", "config.json")
 ENCODER_PATTERNS: tuple[str, ...] = ("text_encoder/*.safetensors", "text_encoder/*.json")
@@ -65,6 +66,7 @@ def load_vae(root: Path) -> Any:
     from mflux.models.z_image.model.z_image_vae.vae import VAE
 
     vae = VAE()
+    pin_decode_mode(vae)
     load_into(root, vae_definition(), {"vae": vae}, what="Z-Image base")
     return vae
 

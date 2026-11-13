@@ -13,7 +13,7 @@ from typing import Any
 from mlx_dfloat.errors import DFloatAccessError, DFloatFormatError, DFloatIntegrationError
 
 _SHA_LENGTH = 40
-# mflux 0.23's required-weights refusal (WeightLoader._describe_missing_weights, weight_loader.py:500-505): the
+# mflux 0.24's required-weights refusal (WeightLoader._describe_missing_weights, weight_loader.py:508-512): the
 # component, the total count and at most three of the missing checkpoint names.
 _MISSING_WEIGHTS = re.compile(
     r"The (?P<component>\S+) weights in .*? do not fit this model: (?P<count>\d+) required "

@@ -15,6 +15,7 @@ from mlx_dfloat.errors import DFloatFormatError
 from mlx_dfloat.mflux import _hub, require_mflux
 from mlx_dfloat.mflux._hub import ResolvedRepo as ResolvedRepo
 from mlx_dfloat.mflux._hub import resolve as resolve
+from mlx_dfloat.mflux._vae import pin_decode_mode
 
 DF11_PATTERNS: tuple[str, ...] = ("*.safetensors", "config.json")
 ENCODER_PATTERNS: tuple[str, ...] = ("text_encoder/*.safetensors", "text_encoder/*.json")
@@ -126,6 +127,7 @@ def load_vae(root: Path) -> Any:
     from mflux.models.flux2.model.flux2_vae.vae import Flux2VAE
 
     vae = Flux2VAE()
+    pin_decode_mode(vae)
     before: dict[str, Any] = dict(tree_flatten(vae.parameters()))
     _hub.load_into(root, vae_definition(), {"vae": vae}, what=_WHAT)
     _require_replaced(root, "vae", before, vae)

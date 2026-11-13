@@ -39,6 +39,10 @@ REFUSED: dict[str, str] = {
     "--pid-decode": "mflux's alternative image decoder (PiD) loads an 8 GB caption encoder next to the compressed set",
     "--controlnet-image-path": "ControlNet is another model class, not provided on the DFloat11 path",
     "--controlnet-strength": "ControlNet is another model class, not provided on the DFloat11 path",
+    "--vae-full-precision": "mlx-dfloat decodes images on the path its memory numbers were measured on",
+    "--no-vae-full-precision": "mlx-dfloat decodes images on the path its memory numbers were measured on",
+    "--small-decoder": "mflux's small image decoder is not the decoder mlx-dfloat's memory numbers were measured with",
+    "--small-text-encoder": "mflux's small text encoder is not the encoder mlx-dfloat's memory numbers were measured with",
 }
 _REFUSED_ALIASES = {"--quantize": ["-q"]}
 
