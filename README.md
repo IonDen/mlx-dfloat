@@ -60,7 +60,7 @@ FLUX.1-schnell (mflux 0.23.0) and at about 20 GiB for FLUX.1-dev and FLUX.1-Krea
 
 ## Status
 
-Alpha: version 0.2.1 is on PyPI. It requires mflux 0.23; the `mflux` extra's pin excludes 0.20.
+Alpha: version 0.2.2 is on PyPI. It requires mflux 0.24 or newer.
 
 Released in 0.1.0:
 
@@ -163,6 +163,28 @@ Released in 0.2.1:
 - Each model's BF16 base repository is pinned to a fixed revision, and a base checkpoint that lacks required weights is
   refused with an error that names the missing tensors.
 
+Released in 0.2.2:
+
+- `mlx-dfloat[mflux]` now installs next to current mflux and the other mlx-* libraries. The extra asks for `mflux>=0.24`
+  and `pillow>=13`, with no upper bound. If you must stay on mflux 0.23, keep mlx-dfloat 0.2.1.
+- When the installed mflux is newer than the newest release this version was tested on (0.24.0), mlx-dfloat warns once
+  with `DFloatUntestedMfluxWarning`, which `mlx_dfloat` exports. Generation still runs. The message asks you to open an
+  issue with both versions. A scheduled job tests the newest mflux release every week.
+- `mlx-dfloat generate` refuses four flags mflux 0.24 added: `--vae-full-precision`, `--no-vae-full-precision`,
+  `--small-decoder` and `--small-text-encoder`. mlx-dfloat decodes images on the path its memory numbers were measured
+  on.
+- With an mflux older than 0.24 installed, the model classes raise a dependency error that names both versions.
+- Z-Image, FLUX.2 Klein and ERNIE-Image decode images on the same code path as 0.2.1, so the picture should match;
+  this was not re-run on real weights. See the note under the tier table for how they relate to stock mflux 0.24.
+- Not re-run on mflux 0.24: image identity on real weights, and the memory peaks and fit constants. Those come from the
+  mflux 0.23 or 0.20 runs, on the same code path, and the tier table keeps the mflux label of each row. What does run
+  on 0.24 is a set of small-model tests that compare the denoised latents, the input to the image decoder, bit for bit
+  with stock mflux. FLUX.1 on 0.24 rests on three things: mflux's FLUX.1 model code is byte-identical between 0.23 and
+  0.24, the 0.23 real-weights record on the same code, and those tests. Of the shared code FLUX.1 calls, the model
+  list, the weight loader and the image-decode helper changed. The tests run through the model list and the decode
+  helper. They do not load weights through the loader, whose only change is that it refuses a model path that is a
+  single file.
+
 Earlier step-time numbers, measured with a smaller MLX cache limit, are in the 0.1.0 entry of the changelog.
 
 ## Install
@@ -173,9 +195,11 @@ mlx-dfloat is for Macs with Apple Silicon and needs Python 3.11 or newer. Instal
 pip install "mlx-dfloat[mflux]"
 ```
 
-Without the extra you get the checkpoint reader and the decoder. The `mflux` extra installs mflux 0.23 (`>=0.23,<0.24`)
-and `pillow<13`, which the `mlx-dfloat generate` command needs for FLUX.1, Z-Image, FLUX.2 Klein, Qwen-Image-2.1,
-ERNIE-Image and Krea 2 generation. This version requires mflux 0.23, and the `mflux` extra's pin excludes 0.20.
+Without the extra you get the checkpoint reader and the decoder. The `mflux` extra installs mflux 0.24 or newer
+(`mflux>=0.24`) and Pillow 13 or newer (`pillow>=13`), with no upper bound. The `mlx-dfloat generate` command needs
+them for FLUX.1, Z-Image, FLUX.2 Klein, Qwen-Image-2.1, ERNIE-Image and Krea 2 generation. If you must stay on mflux
+0.23, keep mlx-dfloat 0.2.1. For Z-Image, FLUX.2 Klein and ERNIE-Image, see the note under the tier table on how their
+pictures relate to stock mflux 0.24.
 
 Each model's DFloat11 checkpoint is pinned to a fixed revision on the Hub. Each model's BF16 base repository (text
 encoders, VAE, tokenizer) is pinned to a fixed revision too, the snapshot the recorded runs used; a `--df11` or `--base`
@@ -279,8 +303,9 @@ image.save("lighthouse.png")
 FLUX.1-dev and FLUX.1-Krea-dev want more steps; the measured runs below used 20 steps and `guidance=3.5`.
 `base_path=` takes the `--base` value, and `fit_check=False` replaces `--no-fit-check` (see below). From Python, each
 `generate_image` call runs under the same memory caps as `mlx-dfloat generate` and puts MLX's limits back when it
-returns; a wired limit your process already set is left alone. Only the command adds a memory watchdog, so prefer it
-on a Mac near its memory limit.
+returns; a wired limit your process already set is left alone. Only the `mlx-dfloat generate` command stops a run that
+goes over the memory limit; the Python classes set memory caps but do not stop the process. Prefer the command on a Mac
+near its memory limit.
 
 Measured on an M1 Max at 1024², one image per model, with the commands under "Measured numbers": FLUX.1-schnell (4
 steps, macOS 27.0.1, mflux 0.23.0) peaked at 19.77 GiB, FLUX.1-dev (20 steps, guidance 3.5) at 19.96 GiB and
@@ -942,6 +967,11 @@ runs apart.
 | 24 GB | 14.50 GiB | Qwen-Image-2.1 | not recorded | at least 14.59 GiB (stopped after 4.8 s) | at least 14.59 GiB | at least 14.31 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/qwen-image-2.1-1024-tier24.json` | not recorded |
 | 16 GB | 9.17 GiB | Z-Image-Turbo | not recorded | at least 9.26 GiB (stopped after 4.7 s) | at least 9.26 GiB | at least 8.81 GiB | CAPPED | stopped by the watchdog | mlx-dfloat caps for the tier | `bench/results/tiers/aborts/z-image-turbo-1024-tier16.json` | not recorded |
 <!-- /bench:tier-table -->
+
+A note on Z-Image, FLUX.2 Klein and ERNIE-Image: they decode on the same code path as 0.2.1, so the picture should
+match; this was not re-run. They may differ slightly from stock mflux 0.24, which now decodes images with a new
+low-memory decoder by default. mlx-dfloat's image decode uses more memory than that new mode. A lighter decode is
+planned for a later release.
 
 The overhead block times one 1024² denoise step, five timed steps after two warm-up steps in each of three rounds, with
 every condition in its own process. `df11` decodes each transformer block's weights from the compressed set just before

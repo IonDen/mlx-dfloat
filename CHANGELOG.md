@@ -6,6 +6,41 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-13
+
+0.2.2 moves `mlx-dfloat[mflux]` to mflux 0.24 or newer, so it installs next to current mflux and the other mlx-* libraries. If
+you must stay on mflux 0.23, keep mlx-dfloat 0.2.1.
+
+### Changed
+
+- The `mflux` extra asks for `mflux>=0.24` and `pillow>=13`, with no upper bound. It replaces `mflux>=0.23,<0.24` and
+  `pillow<13`.
+- A one-time `DFloatUntestedMfluxWarning`, exported from `mlx_dfloat`, appears when the installed mflux is newer than
+  the newest release this version was tested on, 0.24.0. Generation still runs. The message asks for an issue report
+  with both versions. A scheduled job tests the newest mflux release every week.
+- `mlx-dfloat generate` refuses four flags mflux 0.24 added: `--vae-full-precision`, `--no-vae-full-precision`,
+  `--small-decoder` and `--small-text-encoder`. mlx-dfloat decodes images on the path its memory numbers were measured
+  on.
+- With an mflux older than 0.24 installed, the model classes raise a dependency error that names both versions.
+- Z-Image, FLUX.2 Klein and ERNIE-Image decode images on the same code path as 0.2.1, so the picture should match; this
+  was not re-run on real weights. It may differ slightly from stock mflux 0.24, which now decodes images with a new
+  low-memory decoder by default. mlx-dfloat's image decode uses more memory than that new mode. A lighter decode is
+  planned for a later release.
+- Qwen-Image 2.1: the model class sets `processor = None`, because mflux 0.24's prompt encoder reads it on a branch this
+  package never takes. The attribute test now also scans the helpers `generate_image` calls.
+
+### Not re-run on mflux 0.24
+
+- Image identity on real weights was not re-run on mflux 0.24.
+- The memory peaks and fit constants come from the mflux 0.23 or 0.20 runs, on the same code path. The README's tier
+  table keeps the mflux label of each row.
+- The check that does run on 0.24 is a set of small-model tests that compare the denoised latents, the input to the
+  image decoder, bit for bit with stock mflux.
+- FLUX.1 on 0.24 rests on three things: mflux's FLUX.1 model code is byte-identical between 0.23 and 0.24, the 0.23
+  real-weights record on the same code, and those tests. Of the shared code FLUX.1 calls, the model list, the weight
+  loader and the image-decode helper changed. The tests run through the model list and the decode helper. They do not
+  load weights through the loader, whose only change is that it refuses a model path that is a single file.
+
 ## [0.2.1] - 2026-10-28
 
 0.2.1 runs on mflux 0.23 and requires it; the `mflux` extra's pin excludes 0.20. FLUX.1-schnell, Z-Image, distilled
@@ -389,7 +424,8 @@ The first release.
 - CI's mflux lane gets the Hub token for its test step only, so the three tokenizer tests against the gated FLUX.1
   bases run there instead of skipping.
 
-[Unreleased]: https://github.com/IonDen/mlx-dfloat/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/IonDen/mlx-dfloat/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/IonDen/mlx-dfloat/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/IonDen/mlx-dfloat/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/IonDen/mlx-dfloat/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/IonDen/mlx-dfloat/releases/tag/v0.1.0
