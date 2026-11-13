@@ -40,8 +40,8 @@ mlx-dfloat = "mlx_dfloat.cli:main"
 
 [project.optional-dependencies]
 mflux = [
-  "mflux>=0.23,<0.24; sys_platform == 'darwin'",
-  "pillow<13",
+  "mflux>=0.24; sys_platform == 'darwin'",
+  "pillow>=13",
   "psutil>=6",
 ]
 
@@ -64,8 +64,8 @@ test = [
 typecheck = ["mypy>=1.13"]
 lint = ["ruff>=0.7"]
 bench = [
-  "mflux>=0.23,<0.24; sys_platform == 'darwin'",
-  "pillow<13",
+  "mflux>=0.24; sys_platform == 'darwin'",
+  "pillow>=13",
   "pyobjc-framework-Metal>=10; sys_platform == 'darwin'",
 ]
 dev = [
@@ -142,6 +142,9 @@ xfail_strict = true
 filterwarnings = [
   "error",
   'ignore::DeprecationWarning:mlx\..*',
+  # The untested-mflux warning (DFloatUntestedMfluxWarning, a UserWarning), matched by its text: naming the package's
+  # class here would import mlx_dfloat while pytest reads this file, before coverage starts.
+  "ignore:mflux .* is newer than .*, the newest mflux this version of mlx-dfloat was tested with:UserWarning",
 ]
 markers = [
   "slow: real-weights decode (opt in with --run-slow)",
@@ -165,6 +168,8 @@ omit = [
   "scripts/regpressure.py",
   "scripts/ci_metal_probe.py",
   "scripts/flux_rig_smoke.py",
+  # run by hand on an installed mflux to add a fingerprint row, never by a test; its hasher (scripts/_mflux_fingerprint.py) is unit-tested.
+  "scripts/record_mflux_fingerprint.py",
   # mflux's loader and quantizer; its pure release-order logic is tested through a fake loader in
   # tests/test_q8_rig.py, the real build by the slow test.
   "scripts/_q8_rig.py",
