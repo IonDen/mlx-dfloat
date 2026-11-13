@@ -104,7 +104,14 @@ def tiny_inputs():
 
 
 def write_tiny_checkpoint(
-    root, rng, *, n_double=1, n_single=2, nonblock_as_groups=True, inner_override=None
+    root,
+    rng,
+    *,
+    n_double=1,
+    n_single=2,
+    nonblock_as_groups=True,
+    inner_override=None,
+    random_extras=None,
 ):
     """A DF11 checkpoint for mflux's ``Flux2Transformer`` at ``TINY`` size (or ``inner_override`` heads wide).
 
@@ -113,6 +120,9 @@ def write_tiny_checkpoint(
     parameter as a BF16 extra under its diffusers name (the inverse of ``KLEIN_RENAMES``), each filled with a
     distinct constant ``0x3F80 + i`` so a mis-routed extra shows. Returns ``(matrices per group, {mflux parameter:
     constant})``.
+
+    With ``random_extras`` (a NumPy generator) every extra is random BF16 bits instead and the second value maps each
+    mflux parameter to its bit array: a constant ``x_embedder`` or ``proj_out`` makes every channel the same.
     """
     from mflux.models.flux2.model.flux2_transformer.transformer import Flux2Transformer
 
@@ -148,6 +158,10 @@ def write_tiny_checkpoint(
     constants, extras = {}, {}
     for i, (param, array) in enumerate(sorted(tree_flatten(probe.parameters()))):
         if param in matrices:
+            continue
+        if random_extras is not None:
+            constants[param] = random_bf16(random_extras, tuple(array.shape))
+            extras[inverse.get(param, param)] = constants[param]
             continue
         constants[param] = 0x3F80 + i
         extras[inverse.get(param, param)] = np.full(array.shape, 0x3F80 + i, dtype=np.uint16)

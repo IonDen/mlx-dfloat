@@ -795,12 +795,15 @@ def test_a_tiny_generation_gives_stock_mfluxs_latents_bit_for_bit(tmp_path, monk
     # CFG batch or the batch built in the other order (the negative prompt is 12 ids here, the prompt 8, so the text
     # lengths differ too). The reference is stock mflux over the same BF16 weights, its step uncompiled as ours;
     # equality is bit for bit (an integer view of the latents). The extras are random: constant ones make the forward
-    # pass blind to its inputs.
+    # pass blind to its inputs. The per-block recorder also catches a decoded matrix one bit off its source, which
+    # these latents can miss.
     from mflux.utils.apple_silicon import AppleSiliconUtil
+    from tests._decoded_bits import record_block_bits
     from tests._ernie_tiny import TINY, StubTokenizer, stub_components
+    from tests._qwen21_tiny import mflux_uncompiled
 
     from mlx_dfloat.format import open_checkpoint
-    from mlx_dfloat.mflux.ernie.transformer import build_transformer
+    from mlx_dfloat.mflux.ernie.transformer import block_lists, build_transformer
 
     rng = np.random.default_rng(11)
     matrices, extras, _conv = write_tiny_checkpoint(tmp_path / "random", rng, random_extras=rng)
@@ -818,6 +821,9 @@ def test_a_tiny_generation_gives_stock_mfluxs_latents_bit_for_bit(tmp_path, monk
         components=components,
     )
     stock = _stock_ernie(tokenizer, stock_vae, matrices, extras)
+    # The source matrices of every block (the block groups key them by mflux's own sub-path).
+    sources = {group: subs for group, subs in matrices.items() if group.startswith("layers.")}
+    seen = record_block_bits(monkeypatch, block_lists(model.transformer), sources)
     kwargs = {
         "seed": 3,
         "prompt": "p",
@@ -828,16 +834,28 @@ def test_a_tiny_generation_gives_stock_mfluxs_latents_bit_for_bit(tmp_path, monk
         "negative_prompt": "n",
         "scheduler": "linear",
     }
-    model.generate_image(**kwargs)
     # Stock mflux runs its step uncompiled only on a base or Pro M1/M2: answer that, so both sides run the same graph.
+    # Both sides also run with mx.compile off (MLX's own activations are compiled functions), and every random draw on
+    # either side is keyed from `seed` (mflux's latent creator), so no global mx.random state enters.
     monkeypatch.setattr(AppleSiliconUtil, "is_m1_or_m2", classmethod(lambda cls: True))
-    stock.generate_image(**kwargs)
+    with mflux_uncompiled():
+        model.generate_image(**kwargs)
+    with mflux_uncompiled():
+        stock.generate_image(**kwargs)
     (ours,), (theirs,) = ours_vae.seen, stock_vae.seen
     assert model.report()["cfg_batch"] == (2 if guidance > 1.0 else 1)
     assert bool(mx.all(mx.isfinite(theirs)))
     assert (ours.dtype, ours.shape) == (theirs.dtype, theirs.shape)
     view = mx.uint32 if ours.dtype == mx.float32 else mx.uint16
     assert np.array_equal(np.array(ours.view(view)), np.array(theirs.view(view)))
+    # Decoded bits, per block: every block call of our run (2 steps x 2 blocks; CFG is one batched call) held, in
+    # each matrix mflux's block code read, exactly the source bits.
+    assert len(seen) == 2 * len(sources)
+    assert {name for name, _bits in seen} == set(sources)
+    for name, bits in seen:
+        assert set(bits) == set(sources[name]), name
+        for sub, got in bits.items():
+            assert np.array_equal(got, sources[name][sub]), f"{name}.{sub}"
 
 
 def test_encode_then_generate_on_the_base_reuses_the_batch(tmp_path, monkeypatch):

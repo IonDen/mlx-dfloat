@@ -93,12 +93,15 @@ def stub_components():
     )
 
 
-def write_tiny_checkpoint(root, rng, *, n_layers=2, n_refiner_layers=1):
+def write_tiny_checkpoint(root, rng, *, n_layers=2, n_refiner_layers=1, random_extras=None):
     """A DF11 checkpoint for mflux's ``ZImageTransformer`` at ``TINY`` size.
 
     One DF11 group per block (``MATRIX_SUBS`` order), the ``cap_embedder`` group, and every other parameter as a BF16
     extra under its diffusers name (the inverse of the six renames), each filled with a distinct constant
     ``0x3F80 + i`` so a mis-routed extra shows. Returns ``(matrices per group, {mflux parameter: constant})``.
+
+    With ``random_extras`` (a NumPy generator) every extra is random BF16 bits instead and the second value maps each
+    mflux parameter to its bit array: constant norms and biases leave a forward pass blind to its inputs.
     """
     from mflux.models.z_image.model.z_image_transformer.transformer import ZImageTransformer
 
@@ -120,6 +123,10 @@ def write_tiny_checkpoint(root, rng, *, n_layers=2, n_refiner_layers=1):
     constants, extras = {}, {}
     for i, (param, array) in enumerate(sorted(tree_flatten(probe.parameters()))):
         if param in matrices:
+            continue
+        if random_extras is not None:
+            constants[param] = random_bf16(random_extras, tuple(array.shape))
+            extras[inverse.get(param, param)] = constants[param]
             continue
         constants[param] = 0x3F80 + i
         extras[inverse.get(param, param)] = mx.full(

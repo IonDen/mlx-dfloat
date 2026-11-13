@@ -93,6 +93,9 @@ class DFloatQwenImage21(QwenImage21):  # type: ignore[misc]  # mflux ships no ty
     set, reloads the encoder, encodes and reloads the set.
     """
 
+    # mflux 0.24 qwen_image_21.py `_encode_prompt` reads it (small-text-encoder branch only).
+    processor = None
+
     def __init__(
         self,
         model: str = "qwen-image-2.1",
