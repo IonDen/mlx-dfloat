@@ -78,7 +78,7 @@ def test_the_mflux_lane_installs_the_locked_extra_and_proves_it_ran_tests():
     # job dies before a single test), dropping `-m mflux` / `--run-network`, or a lane that goes
     # green having collected zero mflux tests, or a `uv run` step that could drop the extra.
     job = _integration_job()
-    assert job["strategy"]["matrix"]["mflux"] == ["0.23.0"]
+    assert job["strategy"]["matrix"]["mflux"] == ["0.24.0"]
     runs = [step.get("run", "") for step in job["steps"]]
     assert "uv sync --locked --group dev --extra mflux" in runs
     assert not any("uv pip install" in run or "--no-sync" in run for run in runs)
@@ -353,3 +353,137 @@ def test_the_mflux_only_modules_are_omitted_from_the_required_gate_and_gated_in_
         "ernie/memory",
     ):
         assert f"src/mlx_dfloat/mflux/{kept}.py" not in omit, kept
+
+
+def test_the_newest_tested_release_is_the_ci_lane_row():
+    # Bug caught: NEWEST_TESTED_MFLUX bumped without the lane's row, or the reverse, so the untested-mflux warning
+    # names a release CI never ran (the row's name is also the required check, `integration (<row>)`).
+    from mlx_dfloat.mflux._versions import NEWEST_TESTED_MFLUX
+
+    assert _integration_job()["strategy"]["matrix"]["mflux"] == [NEWEST_TESTED_MFLUX]
+
+
+LATEST = CI.parent / "mflux-latest.yml"
+
+
+def _latest() -> dict:
+    return yaml.safe_load(LATEST.read_text())
+
+
+def _latest_triggers() -> dict:
+    config = _latest()
+    # PyYAML reads the bare key `on` as the boolean True (YAML 1.1).
+    return config.get("on", config.get(True))
+
+
+def _latest_steps() -> list[dict]:
+    return _latest()["jobs"]["test-mflux-latest"]["steps"]
+
+
+def _latest_runs() -> list[str]:
+    return [str(step.get("run", "")) for step in _latest_steps()]
+
+
+def _latest_pytest_steps() -> list[dict]:
+    return [step for step in _latest_steps() if "pytest" in str(step.get("run", ""))]
+
+
+def test_the_scheduled_job_runs_only_on_its_schedule_or_by_hand():
+    # Bug caught: a pull_request, pull_request_target or push trigger added, so code from a fork runs in this job, or
+    # the job becomes a check on every pull request (a new mflux release would then block unrelated merges).
+    triggers = _latest_triggers()
+    assert set(triggers) == {"schedule", "workflow_dispatch"}
+    assert len(triggers["schedule"]) == 1
+    assert set(triggers["schedule"][0]) == {"cron"}
+
+
+def test_the_scheduled_job_token_is_read_only_and_has_no_environment():
+    # Bug caught: a write scope on the job's token, a job-level permissions block widening the workflow's, or an
+    # environment (which would hand the job that environment's secrets).
+    config = _latest()
+    assert config["permissions"] == {"contents": "read"}
+    for job in config["jobs"].values():
+        assert "permissions" not in job
+        assert "environment" not in job
+
+
+def test_the_scheduled_job_reads_no_secret_and_no_hub_token():
+    # Bug caught: a `${{ secrets.* }}` expression or an HF_TOKEN anywhere in the workflow (env, step, comment turned
+    # into code), giving a job that installs an unreviewed mflux release a credential to leak.
+    text = LATEST.read_text()
+    assert "secrets." not in text
+    assert "HF_TOKEN" not in text
+
+
+def test_the_scheduled_job_tests_offline():
+    # Bug caught: a test step without HF_HUB_OFFLINE (a test could then dial the Hub), the value written so YAML
+    # reads it as a number, or `--run-network` turning the live tests on.
+    pytest_steps = _latest_pytest_steps()
+    assert len(pytest_steps) == 2
+    for step in pytest_steps:
+        assert step.get("env", {}).get("HF_HUB_OFFLINE") == "1"
+    assert "--run-network" not in LATEST.read_text()
+
+
+def test_the_scheduled_job_keeps_no_cache_and_no_credentials():
+    # Bug caught: a cache shared between runs carrying one run's environment into the next (or another workflow's
+    # into this one), or the checkout leaving the repository token in .git/config for every later step to read.
+    steps = _latest_steps()
+    assert not any(str(step.get("uses", "")).startswith("actions/cache") for step in steps)
+    setup_uv = [
+        step for step in steps if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")
+    ]
+    assert len(setup_uv) == 1
+    assert setup_uv[0]["with"]["enable-cache"] is False
+    checkout = [step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@")]
+    assert len(checkout) == 1
+    assert checkout[0]["with"]["persist-credentials"] is False
+
+
+def test_every_uv_run_in_the_scheduled_job_skips_the_sync():
+    # Bug caught: a plain `uv run`, which re-syncs to the lock and silently puts the locked mflux back, so the job
+    # tests the old release under the new one's name.
+    uv_runs = [run for run in _latest_runs() if "uv run" in run]
+    assert len(uv_runs) == 3  # the version print and the two pytest steps
+    for run in uv_runs:
+        assert run.count("uv run") == run.count("uv run --no-sync "), run
+
+
+def test_the_scheduled_job_has_a_timeout_and_cannot_pass_on_a_failure():
+    # Bug caught: no timeout (a hung run holds a macOS runner for six hours), or continue-on-error letting a red
+    # step finish green.
+    job = _latest()["jobs"]["test-mflux-latest"]
+    assert isinstance(job.get("timeout-minutes"), int)
+    assert job["timeout-minutes"] > 0
+    assert "continue-on-error" not in yaml.safe_dump(job)
+
+
+def test_the_scheduled_job_upgrades_only_mflux_and_prints_the_versions():
+    # Bug caught: the job testing the locked mflux (no upgrade, or an upgrade before the sync that the sync undoes),
+    # a bare --upgrade that moves mlx, torch and the rest too (a red run could then not be read as mflux's), no
+    # record of which mflux, mlx and Pillow ran, or the mflux tests dropped from the job.
+    runs = _latest_runs()
+    sync = runs.index("uv sync --locked --group dev --extra mflux")
+    upgrade = [i for i, run in enumerate(runs) if run.startswith("uv pip install")]
+    assert len(upgrade) == 1
+    args = shlex.split(runs[upgrade[0]])
+    assert args[:3] == ["uv", "pip", "install"]
+    assert args[3:] == ["--upgrade-package", "mflux", "mflux>=0.24"]
+    assert sync < upgrade[0]
+    prints = [i for i, run in enumerate(runs) if "importlib.metadata" in run]
+    assert len(prints) == 1
+    assert all(f'"{name}"' in runs[prints[0]] for name in ("mflux", "mlx", "pillow"))
+    assert upgrade[0] < prints[0]
+    pytest_runs = [shlex.split(str(step["run"])) for step in _latest_pytest_steps()]
+    marked, default = pytest_runs
+    assert marked[marked.index("-m") + 1] == "mflux"
+    assert "-m" not in default
+    assert prints[0] < runs.index(str(_latest_pytest_steps()[0]["run"]))
+
+
+def test_the_scheduled_jobs_whole_suite_runs_after_a_red_mflux_step():
+    # Bug caught: the whole-suite step skipped once the mflux step (the fingerprint among it) is red, so a run that
+    # flags a changed module hides whether anything else broke. `!cancelled()` still stops on a manual cancel.
+    marked, whole = _latest_pytest_steps()
+    assert "-m" in shlex.split(str(marked["run"]))
+    assert whole.get("if") == "${{ !cancelled() }}"

@@ -43,12 +43,12 @@ jobs:
     runs-on: macos-15
     strategy:
       matrix:
-        # The lock pins mflux 0.23.0; the sanity step below fails when the lock installs any other
+        # The lock pins mflux 0.24.0; the sanity step below fails when the lock installs any other
         # release, so the row's name (the required check on main) cannot outlive the pin. A second
         # row (another mflux release) would need the unlocked form instead of `uv sync --extra
         # mflux`: `uv pip install "mflux==<version>"` after the sync, then `uv run --no-sync` for the
         # steps below.
-        mflux: ["0.23.0"]
+        mflux: ["0.24.0"]
     steps:
       - uses: actions/checkout@v4
         with:
