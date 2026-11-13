@@ -159,6 +159,21 @@ def test_refused_mflux_flags_exit_2_naming_the_flag_before_anything_loads(flag, 
     assert flag[0] in capsys.readouterr().err
 
 
+def test_vae_full_precision_is_refused_by_the_command(capsys, tmp_path):
+    # Bug caught: mflux 0.24's --vae-full-precision reaching mflux's decode options (off the decode path the memory
+    # numbers were measured on), or dying as an unknown argparse flag with no reason given.
+    log = []
+    code, watchdogs = _run(
+        ["--prompt", "p", "--output", str(tmp_path / "o.png"), "--vae-full-precision"],
+        log,
+        tmp_path,
+        factory=lambda **kw: pytest.fail("built"),
+    )
+    assert code == 2
+    assert (watchdogs, log) == ([], [])
+    assert "--vae-full-precision" in capsys.readouterr().err
+
+
 def test_generate_builds_the_model_from_the_flags_writes_the_image_and_the_report(tmp_path):
     # Bug caught: a flag not forwarded (e.g. --cache-limit dropped), the image saved elsewhere,
     # the watchdog not stopped, or the report missing the exit code and the model's report.
@@ -1587,3 +1602,23 @@ _HOST_VERSIONS = {
     "versions": {"mlx": mx.__version__, "mflux": _installed_mflux()},
     "macos": platform.mac_ver()[0],
 }
+
+
+@pytest.mark.parametrize(
+    "flag", ["--small-decoder", "--small-text-encoder", "--no-vae-full-precision"]
+)
+def test_mflux_024_decode_and_encoder_flags_are_refused_with_a_reason(flag, capsys, tmp_path):
+    # Bug caught: a flag new in mflux 0.24 dying as argparse's "unrecognized arguments" (no reason given), or reaching
+    # the model so the small decoder or encoder runs off the path the memory numbers were measured on.
+    log = []
+    code, watchdogs = _run(
+        ["--prompt", "p", "--output", str(tmp_path / "o.png"), flag],
+        log,
+        tmp_path,
+        factory=lambda **kw: pytest.fail("built"),
+    )
+    assert code == 2
+    assert (watchdogs, log) == ([], [])
+    err = capsys.readouterr().err
+    assert f"{flag}: " in err
+    assert "unrecognized arguments" not in err
