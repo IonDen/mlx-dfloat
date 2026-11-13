@@ -10,6 +10,7 @@ from mlx_dfloat.errors import (
     DFloatIntegrationError,
     DFloatResourceError,
     DFloatUnsupportedError,
+    DFloatUntestedMfluxWarning,
 )
 
 __all__ = [
@@ -21,5 +22,6 @@ __all__ = [
     "DFloatIntegrationError",
     "DFloatResourceError",
     "DFloatUnsupportedError",
+    "DFloatUntestedMfluxWarning",
     "__version__",
 ]

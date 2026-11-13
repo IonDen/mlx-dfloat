@@ -33,6 +33,10 @@ class DFloatAccessError(DFloatError, PermissionError):
     """A model repository on the Hub that this account may not read (a gated licence not accepted, or no token)."""
 
 
+class DFloatUntestedMfluxWarning(UserWarning):
+    """The installed mflux is newer than the newest release mlx-dfloat was tested with."""
+
+
 __all__ = [
     "DFloatAccessError",
     "DFloatBackendError",
@@ -42,4 +46,5 @@ __all__ = [
     "DFloatIntegrationError",
     "DFloatResourceError",
     "DFloatUnsupportedError",
+    "DFloatUntestedMfluxWarning",
 ]
