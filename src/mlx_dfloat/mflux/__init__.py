@@ -10,12 +10,22 @@ def require_mflux() -> None:
     """Raise a package-rooted error when the optional ``mflux`` extra is missing.
 
     Raises:
-        DFloatDependencyError: ``mflux`` cannot be imported.
+        DFloatDependencyError: ``mflux`` cannot be imported, or the installed release is older than ``MIN_MFLUX``.
+            A leftover directory with no installed distribution has no version and is not checked against the floor.
     """
     if importlib.util.find_spec("mflux") is None:
         raise DFloatDependencyError(
             "the mflux adapters need the optional extra: install mlx-dfloat[mflux]"
         )
+    from mlx_dfloat.mflux import _versions
+
+    installed = _versions.installed_mflux_version()
+    if installed is not None and _versions.is_below_floor(installed):
+        raise DFloatDependencyError(
+            f"mflux {installed} is installed; the mflux adapters need mflux {_versions.MIN_MFLUX} or newer: "
+            "upgrade with pip install -U 'mlx-dfloat[mflux]'"
+        )
+    _versions.warn_if_untested_mflux()
 
 
 def __getattr__(name: str) -> Any:

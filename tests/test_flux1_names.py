@@ -133,11 +133,12 @@ def test_flux_name_map_derived_from_mflux_equals_the_measured_table():
     from tests._flux_fakes import EXPECTED_PATHS
 
     from mlx_dfloat.integrate.names import Placement
+    from mlx_dfloat.mflux._versions import NEWEST_TESTED_MFLUX, release_tuple
     from mlx_dfloat.mflux.flux1.names import flux_name_map
 
-    # Bug caught: the lane silently running a different mflux than the one the table was measured on
-    # (mflux has no __version__; the distribution metadata is the source).
-    assert importlib.metadata.version("mflux").startswith("0.23.")
+    # Bug caught: the lane silently running an older mflux than the table was checked on (measured on 0.20, re-read on
+    # each tested release; mflux has no __version__, the distribution metadata is the source).
+    assert release_tuple(importlib.metadata.version("mflux")) >= release_tuple(NEWEST_TESTED_MFLUX)
     derived = flux_name_map()
     assert derived.kinds == FLUX_TABLE.kinds
     for kind in FLUX_TABLE.kinds:

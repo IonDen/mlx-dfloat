@@ -20,6 +20,12 @@ def test_errors_are_exported():
     assert "DFloatIntegrationError" in mlx_dfloat.__all__
 
 
+def test_untested_mflux_warning_is_exported():
+    # Bug caught: callers cannot filter the warning by the name the docs give it.
+    assert "DFloatUntestedMfluxWarning" in mlx_dfloat.__all__
+    assert issubclass(mlx_dfloat.DFloatUntestedMfluxWarning, UserWarning)
+
+
 def test_format_error_is_caught_by_package_root():
     # Bug this catches: a format error that does not derive from DFloatError escapes a
     # caller's `except DFloatError`.
