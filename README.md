@@ -303,9 +303,40 @@ image.save("lighthouse.png")
 FLUX.1-dev and FLUX.1-Krea-dev want more steps; the measured runs below used 20 steps and `guidance=3.5`.
 `base_path=` takes the `--base` value, and `fit_check=False` replaces `--no-fit-check` (see below). From Python, each
 `generate_image` call runs under the same memory caps as `mlx-dfloat generate` and puts MLX's limits back when it
-returns; a wired limit your process already set is left alone. Only the `mlx-dfloat generate` command stops a run that
-goes over the memory limit; the Python classes set memory caps but do not stop the process. Prefer the command on a Mac
-near its memory limit.
+returns; a wired limit your process already set is left alone.
+
+From 0.2.3, each call also runs under a memory watchdog. It has a hard line (the ceiling: physical memory minus 4 GiB
+unless you lower it) and a stop line 1 GiB below the hard line (physical memory minus 5 GiB by default). Once the
+process passes the stop line, the call raises `DFloatWatchdogError` at its next checkpoint. A checkpoint is a place where
+the call can stop cleanly, such as between transformer blocks. The call frees what it loaded before it raises. The error
+carries the path of the record when one was written, and your process keeps running.
+
+`mlx-dfloat generate` has no stop line. It ends at the hard line (exit code 70) or at its time limit (exit code 71). The
+model classes use a watchdog built like the command's that also raises at the stop line.
+
+A memory trip has no grace period. The process ends only if memory reaches the hard line, with exit code 70 as the
+command does. Memory the process already holds before the call counts toward both lines. A call that starts at or above
+the stop line raises at once, before it does any work.
+
+Two stretches have no checkpoint: loading the text encoder together with the first prompt encoding (for ERNIE-Image with guidance, the prompt and the negative prompt are encoded together), and decoding the image.
+If memory jumps past both lines inside one of them, the process ends at the hard line. If the call crossed the stop line
+during the decode, the finished image is discarded and the call raises instead of returning it.
+
+There is no time limit unless you set `wall_budget=` in `WatchdogConfig`. If you do and the limit passes, the call raises
+at its next checkpoint. If none comes within `grace` seconds (10 by default), the process ends with exit code 71. The
+same grace applies when the watchdog cannot read memory: the process ends with exit code 70 rather than run unwatched.
+
+These exits are immediate. Open files are not flushed and no cleanup handlers run.
+
+To turn the watchdog off, pass `watchdog=None` to the model class. To move the lines, pass
+`watchdog=WatchdogConfig(ceiling=..., stop_margin=...)`, with `WatchdogConfig` imported from `mlx_dfloat.mflux`. The
+`watchdog=` keyword takes a `WatchdogConfig` or `None`, and the model class refuses anything else when you build it.
+Values are in bytes. `ceiling` can only be lower than physical memory minus 4 GiB; a higher one is refused when the call
+starts. `stop_margin` must be above 0 and below `ceiling`. `artifact_dir` takes a string or a path.
+
+The record is a JSON file written with mode 0600. By default it goes in a private `mlx-dfloat` folder under the temp
+directory, which is set to owner-only access; with `artifact_dir=` it goes in the folder you name. The watchdog needs
+`psutil`, which the `[mflux]` extra installs.
 
 Measured on an M1 Max at 1024², one image per model, with the commands under "Measured numbers": FLUX.1-schnell (4
 steps, macOS 27.0.1, mflux 0.23.0) peaked at 19.77 GiB, FLUX.1-dev (20 steps, guidance 3.5) at 19.96 GiB and
