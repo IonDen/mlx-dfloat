@@ -202,6 +202,11 @@ omit = [
 ]
 
 [tool.coverage.report]
-exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "@overload", "raise NotImplementedError"]
+exclude_lines = [
+  "pragma: no cover", "if TYPE_CHECKING:", "@overload", "raise NotImplementedError",
+  # scripts/prove_api_watchdog.py: the one function that builds a FLUX.2 Klein model on the GPU, never
+  # run by a test; the orchestrator around it is tested through a fake unit runner.
+  "^def run_unit\\(",
+]
 show_missing = true
 fail_under = 85
