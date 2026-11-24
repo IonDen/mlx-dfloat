@@ -6,13 +6,17 @@ import importlib.util
 import os
 import platform
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from importlib.machinery import ModuleSpec
-from typing import Literal
+from typing import Any, Literal
 
 import pytest
 
 from mlx_dfloat._memory_caps import install_memory_caps
+
+# pytester runs the autouse fixture's teardown check end to end in a child pytest (tests/test_markers.py).
+pytest_plugins = ["pytester"]
 
 GATED_MARKERS: tuple[tuple[str, str, str], ...] = (
     ("slow", "--run-slow", "real-weights decode"),
@@ -66,6 +70,77 @@ def _hard_exit_code(recorded: int | None) -> int | None:
     None means no session finished, so no Metal work ran and there is no destructor to skip.
     """
     return recorded
+
+
+class _ExitRecorder:
+    """Stands in for the process exit of an armed model call: records each code instead of ending pytest."""
+
+    def __init__(self) -> None:
+        self.codes: list[int] = []
+
+    def __call__(self, code: int) -> None:
+        self.codes.append(code)
+
+    def take(self) -> list[int]:
+        """Hand the recorded codes to a test that expected an escalation; the teardown then sees none."""
+        taken, self.codes = self.codes, []
+        return taken
+
+
+def _host_ceiling_32gib() -> int:
+    # A 32 GiB Mac's ceiling (32 - 4 GiB) as a literal, so no expected number depends on this runner's RAM.
+    return 30_064_771_072
+
+
+def _api_watchdog_patches() -> list[tuple[str, object]]:
+    """The ``mlx_dfloat.mflux._pipeline`` attributes every test replaces, with fresh fakes.
+
+    The counter reader becomes a ``FakeCounters`` at zero, the host's default ceiling the 32 GiB literal, and the
+    process exit a recorder, so a decorated model call is armed in every test, never trips on the runner's real
+    memory, and can never end pytest.
+    """
+    from tests._fake_counters import FakeCounters
+
+    return [
+        ("_counters", FakeCounters()),
+        ("_default_ceiling", _host_ceiling_32gib),
+        ("_exit_process", _ExitRecorder()),
+    ]
+
+
+def _untaken_exits(codes: list[int]) -> str | None:
+    """The teardown's failure message for exit codes left in the recorder, or None when there are none."""
+    if not codes:
+        return None
+    return (
+        f"an armed model call escalated to process exit {codes} and the test did not take the code"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ApiWatchdogFakes:
+    """What ``_api_watchdog_fakes`` yields: the fake allocator the watchdog reads and the exit recorder."""
+
+    counters: Any
+    exits: _ExitRecorder
+
+
+@pytest.fixture(autouse=True)
+def _api_watchdog_fakes(monkeypatch: pytest.MonkeyPatch) -> Iterator[ApiWatchdogFakes]:
+    from mlx_dfloat import _watchdog
+    from mlx_dfloat.mflux import _pipeline
+
+    patches = dict(_api_watchdog_patches())
+    for name, value in patches.items():
+        monkeypatch.setattr(_pipeline, name, value)
+    exits = patches["_exit_process"]
+    assert isinstance(exits, _ExitRecorder)
+    # A watchdog built without ``exit_process`` falls back to the module's ``_exit``: record it the same way.
+    monkeypatch.setattr(_watchdog, "_exit", exits)
+    yield ApiWatchdogFakes(counters=patches["_counters"], exits=exits)
+    message = _untaken_exits(exits.codes)
+    if message is not None:
+        pytest.fail(message)
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

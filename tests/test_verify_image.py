@@ -1214,3 +1214,43 @@ def test_the_krea2_bf16_side_gives_stock_mfluxs_latents_on_a_tiny_checkpoint(
     assert np.array_equal(np.array(ours.view(mx.uint32)), np.array(theirs.view(mx.uint32)))
     (decoded,) = ours_vae.seen  # the VAE decodes the side's own final latents
     assert np.array_equal(np.array(decoded.view(mx.uint32)), np.array(ours.view(mx.uint32)))
+
+
+DF11_SIDES = [
+    pytest.param("run_df11", "mlx_dfloat.mflux.flux1.model", "DFloatFlux1", id="flux1"),
+    pytest.param("run_df11_zimage", "mlx_dfloat.mflux.zimage.model", "DFloatZImage", id="zimage"),
+    pytest.param("run_df11_flux2", "mlx_dfloat.mflux.flux2.model", "DFloatFlux2Klein", id="flux2"),
+    pytest.param(
+        "run_df11_qwen21", "mlx_dfloat.mflux.qwen21.model", "DFloatQwenImage21", id="qwen21"
+    ),
+    pytest.param("run_df11_ernie", "mlx_dfloat.mflux.ernie.model", "DFloatErnieImage", id="ernie"),
+    pytest.param("run_df11_krea2", "mlx_dfloat.mflux.krea2.model", "DFloatKrea2", id="krea2"),
+]
+
+
+class _BuiltError(Exception):
+    """Raised by the fake model factory once it has recorded the constructor's arguments."""
+
+
+@pytest.mark.mflux  # the runners import mflux's latent creators
+@pytest.mark.parametrize(("runner", "module", "name"), DF11_SIDES)
+def test_every_df11_side_builds_its_model_unwatched(runner, module, name, tmp_path, monkeypatch):
+    # Bug caught: a df11 runner that drops watchdog=None, so the model's own default watchdog (a stop line at RAM
+    # minus 5 GiB) runs inside the side's footprint watchdog and raises where the side should run to its own limit.
+    import argparse
+    import importlib
+
+    seen = {}
+
+    def factory(*args, **kwargs):
+        seen.update(kwargs)
+        raise _BuiltError
+
+    monkeypatch.setattr(importlib.import_module(module), name, factory)
+    args = argparse.Namespace(out=tmp_path, model="m", df11="d", base="b", eval_policy="per-block")
+
+    with pytest.raises(_BuiltError):
+        getattr(vi, runner)(args, object())
+
+    assert "watchdog" in seen
+    assert seen["watchdog"] is None

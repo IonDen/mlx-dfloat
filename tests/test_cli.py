@@ -265,6 +265,27 @@ def test_generate_builds_the_model_from_the_flags_writes_the_image_and_the_repor
     )
 
 
+def test_the_command_builds_its_model_with_the_watchdog_off(tmp_path):
+    # Bug caught: the command building its model with the model's own default watchdog on, so a call is watched twice
+    # (the command's exit-mode watchdog and the model's raise-mode one) and an abort exits 2 instead of 70; or the
+    # keyword leaking into the report's model_kwargs, which record the user's flags only.
+    built = []
+
+    def factory(**kw):
+        built.append(kw)
+        return _Model([], **kw)
+
+    report_path = tmp_path / "r.json"
+    argv = ["--prompt", "p", "--output", str(tmp_path / "o.png"), "--report", str(report_path)]
+    code, _ = _run(argv, [], tmp_path, factory=factory)
+    assert code == 0
+    assert len(built) == 1
+    assert "watchdog" in built[0]
+    assert built[0]["watchdog"] is None
+    report = json.loads(report_path.read_text())
+    assert "watchdog" not in report["model_kwargs"]
+
+
 def test_the_watchdog_context_carries_the_models_default_steps(tmp_path):
     # Bug caught: the context recording the --steps flag (None) instead of the steps that ran.
     _, watchdogs = _run(["--prompt", "p", "--output", str(tmp_path / "o.png")], [], tmp_path)

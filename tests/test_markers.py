@@ -198,3 +198,87 @@ def test_mflux_marker_tests_skip_with_the_install_hint_where_mflux_is_missing():
     assert "skipped" in summary
     assert "passed" not in summary
     assert "failed" not in summary
+
+
+def test_api_watchdog_patches_name_the_three_seams():
+    # Bug caught: a seam left out of the list (the real allocator or this runner's RAM reaching a test, or an
+    # escalation ending pytest with code 70 and no summary), or a host ceiling other than a 32 GiB Mac's minus 4 GiB.
+    patches = dict(conftest._api_watchdog_patches())
+    assert set(patches) == {"_counters", "_default_ceiling", "_exit_process"}
+    assert patches["_default_ceiling"]() == 30_064_771_072
+    assert tuple(patches["_counters"]()) == (0, 0, 0, 0)
+    patches["_exit_process"](70)
+    assert patches["_exit_process"].codes == [70]
+
+
+def test_an_exit_code_the_test_did_not_take_fails_the_teardown():
+    # Bug caught: the teardown ignoring a recorded escalation, so a call that would have ended the process reads green;
+    # or a test that took its expected code out still failing.
+    recorder = dict(conftest._api_watchdog_patches())["_exit_process"]
+    assert conftest._untaken_exits(recorder.codes) is None
+    recorder(71)
+    assert "71" in conftest._untaken_exits(recorder.codes)
+    assert recorder.take() == [71]
+    assert conftest._untaken_exits(recorder.codes) is None
+
+
+def test_the_autouse_fixture_puts_the_fakes_in_front_of_the_pipeline(request):
+    # Bug caught: the fixture yielding objects other than the ones it patched in, so a test raising the fake raises
+    # nothing the watchdog reads.
+    from mlx_dfloat.mflux import _pipeline
+
+    _api_watchdog_fakes = request.getfixturevalue("_api_watchdog_fakes")
+    assert _pipeline._counters is _api_watchdog_fakes.counters
+    assert _pipeline._exit_process is _api_watchdog_fakes.exits
+    assert _pipeline._default_ceiling() == 30_064_771_072
+
+
+_UNTAKEN_EXITS_MODULE = """
+from mlx_dfloat import _watchdog
+from mlx_dfloat.mflux import _pipeline
+
+
+def test_leaves_a_pipeline_exit_code():
+    _pipeline._exit_process(70)
+
+
+def test_leaves_a_watchdog_exit_code():
+    _watchdog._exit(71)
+
+
+def test_takes_its_exit_code(_api_watchdog_fakes):
+    _watchdog._exit(70)
+    assert _api_watchdog_fakes.exits.take() == [70]
+
+
+def test_makes_no_exit():
+    pass
+"""
+
+
+def test_the_fixture_fails_a_test_that_leaves_an_exit_code_untaken(pytester, monkeypatch):
+    # Bug caught: the autouse fixture's teardown check not wired to the recorder it patched in (a recorded escalation
+    # reads green), a test that took its code still failing, or `_watchdog._exit` left as the real `os._exit` (a
+    # raise-mode watchdog built without `exit_process` would end the run: the child exits 71 with no summary).
+    pytester.makeconftest((REPO / "tests" / "conftest.py").read_text())
+    pytester.makepyfile(test_untaken=_UNTAKEN_EXITS_MODULE)
+    monkeypatch.setenv("PYTHONPATH", str(REPO))
+    result = pytester.runpytest_subprocess(
+        "-ra",
+        f"--rootdir={pytester.path}",
+        f"--confcutdir={pytester.path}",
+        "-p",
+        "no:cacheprovider",
+    )
+    assert result.ret == pytest.ExitCode.TESTS_FAILED, result.stdout.str()[-2000:]
+    result.assert_outcomes(passed=4, errors=2)
+    result.stdout.fnmatch_lines(
+        [
+            "*ERROR at teardown of test_leaves_a_pipeline_exit_code*",
+            "E * process exit [[]70[]] and the test did not take the code",
+            "*ERROR at teardown of test_leaves_a_watchdog_exit_code*",
+            "E * process exit [[]71[]] and the test did not take the code",
+            "ERROR test_untaken.py::test_leaves_a_pipeline_exit_code*",
+            "ERROR test_untaken.py::test_leaves_a_watchdog_exit_code*",
+        ]
+    )

@@ -4,7 +4,7 @@ The class subclasses mflux's ``Flux1`` so its loop, scheduler, callbacks, VAE de
 metadata run unchanged; only construction and the prelude of ``generate_image`` differ. The text
 encoders and the compressed transformer are never resident together (see ``lifecycle``). Each
 ``generate_image`` call runs under the memory caps the ``mlx-dfloat`` command installs (unless a wired
-limit is already in force) and restores MLX's limits afterwards; only the command adds a watchdog.
+limit is already in force) and restores MLX's limits afterwards.
 """
 
 import logging
@@ -31,6 +31,7 @@ from mlx_dfloat.integrate.names import NameMap, Shapes
 from mlx_dfloat.integrate.providers import DF11Provider
 from mlx_dfloat.mflux import _pipeline, require_mflux
 from mlx_dfloat.mflux import families as registry
+from mlx_dfloat.mflux._watchconfig import DEFAULT_WATCHDOG, WatchdogConfig, check_watchdog_arg
 from mlx_dfloat.mflux.flux1 import init as base_init
 from mlx_dfloat.mflux.flux1.init import BaseComponents, ResolvedRepo
 from mlx_dfloat.mflux.flux1.lifecycle import Lifecycle
@@ -122,6 +123,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
         cache_limit: int | None = None,
         fit_check: bool = True,
         budget_bytes: int | None = None,
+        watchdog: WatchdogConfig | None = DEFAULT_WATCHDOG,
         quantize: int | None = None,
         lora_paths: list[str] | None = None,
         lora_scales: list[float] | None = None,
@@ -134,10 +136,15 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
         device's budget (its recommended working set minus 2 GiB) in every call's fit estimate and
         VAE decision, e.g. with a smaller Mac's watchdog ceiling when running under its limits.
 
+        ``watchdog`` is the memory and wall-time watchdog each ``generate_image`` and ``encode``
+        call runs under, kept as ``model.watchdog`` and reassignable between calls; None runs
+        the calls with no watchdog. The ``mlx-dfloat`` command has its own watchdog, which this
+        setting does not change.
+
         Raises:
             DFloatUnsupportedError: ``quantize``, ``lora_paths``, ``lora_scales`` or ``bake_lora=False``
                 (accepted only to refuse), an eval policy other than ``"per-block"`` / ``"depth2"``,
-                or an unknown ``model``.
+                an unknown ``model``, or a ``watchdog`` that is neither a ``WatchdogConfig`` nor None.
             DFloatBackendError: The GPU decoder fails its check on the two packaged self-check groups (raised before
                 anything is resolved or loaded), or Metal is unavailable.
             DFloatFormatError: The checkpoint is not a FLUX.1 DF11 checkpoint, or the base lacks the
@@ -147,6 +154,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
             DFloatIntegrationError: mflux's own weight definition or mapping does not shape the
                 way this adapter expects (a name map ambiguity, an uncovered extra).
         """
+        check_watchdog_arg(watchdog)
         if quantize is not None:
             _refuse(
                 "quantize",
@@ -193,6 +201,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
             cache_limit=cache_limit,
             fit_check=fit_check,
             budget_bytes=budget_bytes,
+            watchdog=watchdog,
         )
 
     @classmethod
@@ -219,6 +228,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
         cache_limit: int | None = None,
         fit_check: bool = True,
         budget_bytes: int | None = None,
+        watchdog: WatchdogConfig | None = DEFAULT_WATCHDOG,
     ) -> None:
         from mflux.models.flux.flux_initializer import FluxInitializer
 
@@ -251,6 +261,7 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
             fit_check,
         )
         self._budget_override = budget_bytes
+        self.watchdog = watchdog
         self._provider: DF11Provider | None = None
         self._plan: CallPlan | None = None
         self._peaks: dict[str, dict[str, int]] = {}
@@ -465,11 +476,15 @@ class DFloatFlux1(Flux1):  # type: ignore[misc]  # mflux ships no type informati
             )
         plan = self.plan_call(height=height, width=width)
         self._phase_begin("encode")
-        self._lifecycle.ensure_embeddings(prompt)
-        self._phase_end("encode")
+        try:
+            self._lifecycle.ensure_embeddings(prompt)
+        finally:  # a failed encode closes its phase: the watchdog's context must not name it afterwards
+            self._phase_end("encode")
         self._phase_begin("set_load")
-        self._lifecycle.ensure_set()
-        self._phase_end("set_load")
+        try:
+            self._lifecycle.ensure_set()
+        finally:
+            self._phase_end("set_load")
         self._phase_begin("denoise")  # before set_cache_limit: a raise here must change nothing
         previous = mx.set_cache_limit(plan.cache_limit)
         try:

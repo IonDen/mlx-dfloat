@@ -5,24 +5,44 @@ DFloat11 path cannot honour, plan the call's memory, track the phases, and empty
 decode. The family supplies its measured numbers (``PhaseConstants``) and sizes; nothing here imports mflux.
 """
 
+import contextlib
+import datetime
 import functools
+import gc
+import inspect
 import logging
 import math
+import os
+import platform
+import stat
+import sys
+import tempfile
+import traceback
 import warnings
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from importlib import metadata
+from pathlib import Path
 from typing import Any, NoReturn, ParamSpec, TypeVar
 
 import mlx.core as mx
 
+from mlx_dfloat import _guard
 from mlx_dfloat._memory_caps import (
     caps_for_recommended_bytes,
     known_wired_limit,
     remember_wired_limit,
 )
-from mlx_dfloat._watchdog import phys_footprint
-from mlx_dfloat.errors import DFloatResourceError, DFloatUnsupportedError
+from mlx_dfloat._watchdog import (
+    Counters,
+    Watchdog,
+    default_ceiling,
+    phys_footprint,
+    read_counters,
+)
+from mlx_dfloat.errors import DFloatResourceError, DFloatUnsupportedError, DFloatWatchdogError
 from mlx_dfloat.integrate.memory import CallPlan
+from mlx_dfloat.mflux import _drain
 from mlx_dfloat.mflux._phases import (
     FamilySizes,
     PhaseConstants,
@@ -30,6 +50,7 @@ from mlx_dfloat.mflux._phases import (
     cache_limit_for,
     fit_for,
 )
+from mlx_dfloat.mflux._watchconfig import check_watchdog_arg
 
 
 def refuse(name: str, reason: str) -> NoReturn:
@@ -94,6 +115,183 @@ def refuse_precision_args(*, float32: bool, compute_precision: Any) -> None:
         refuse("float32", "the float32 transformer stream")
 
 
+# What an armed call's watchdog reads, looked up at call time so tests can put fakes in front of them: the counter
+# reader, the host's default ceiling in bytes, and the process exit (None: the watchdog module's own ``_exit``).
+_counters: Callable[[], Counters] = read_counters
+_default_ceiling: Callable[[], int] = default_ceiling
+_exit_process: Callable[[int], object] | None = None
+
+
+def _artifact_root() -> Path:
+    """The folder an armed call writes its abort record to when its config names none."""
+    return Path(tempfile.gettempdir()) / "mlx-dfloat"
+
+
+def _artifact_name() -> str:
+    """A record name unique per abort: ``abort-<UTC to the microsecond>Z-<pid>.json``."""
+    stamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%S%f")
+    return f"abort-{stamp}Z-{os.getpid()}.json"
+
+
+def clear_call_frames(exc: BaseException, *, outer: BaseException | None) -> None:
+    """Release the locals of the frames ``exc`` and every exception in its chain (causes and contexts) passed through.
+
+    ``outer`` is the exception the caller was already handling when the call began (``sys.exc_info()`` at entry): the
+    walk stops there, so the caller's own frames keep their locals. A seen-set ends a chain that loops back.
+    """
+    seen: set[int] = set() if outer is None else {id(outer)}
+    pending: list[BaseException] = [exc]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if current.__traceback__ is not None:
+            traceback.clear_frames(current.__traceback__)
+        pending.extend(e for e in (current.__cause__, current.__context__) if e is not None)
+
+
+def _versions() -> dict[str, str | None]:
+    """The mlx and mflux versions (mflux None when it is not installed)."""
+    try:
+        mflux: str | None = metadata.version("mflux")
+    except metadata.PackageNotFoundError:
+        mflux = None
+    return {"mlx": mx.__version__, "mflux": mflux}  # type: ignore[attr-defined]
+
+
+_CALL_FIELDS = ("seed", "height", "width", "num_inference_steps", "guidance")
+
+
+def _call_context(
+    model: Any, method: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> dict[str, Any]:
+    """What the abort record says about the call: model, class, method, the size and seed arguments, versions."""
+    context: dict[str, Any] = {
+        "model": getattr(model, "_model", None),
+        "class": type(model).__name__,
+        "method": method.__name__,
+    }
+    try:
+        bound = inspect.signature(method).bind(*args, **kwargs)
+        bound.apply_defaults()
+    except TypeError:  # the method itself will refuse these arguments
+        arguments: dict[str, Any] = {}
+    else:
+        arguments = bound.arguments
+    for name in _CALL_FIELDS:
+        if name in arguments:
+            value = arguments[name]
+            context[name] = (
+                value if value is None or isinstance(value, int | float) else repr(value)
+            )
+    context["versions"] = _versions()
+    context["macos"] = platform.mac_ver()[0]
+    return context
+
+
+def _private_root_refusal(root: Path) -> str | None:
+    """Make the default record folder private (0o700); why it cannot be trusted, or None when it can.
+
+    The default folder sits under the shared temp dir, where another user could have placed it first: a symlink, or a
+    folder that user owns, is refused.
+    """
+    with contextlib.suppress(FileExistsError):
+        root.mkdir(mode=0o700)
+    info = os.lstat(root)
+    if stat.S_ISLNK(info.st_mode):
+        return f"the record folder {root} is a symlink; nothing was written"
+    if not stat.S_ISDIR(info.st_mode):
+        return f"the record folder {root} is not a folder; nothing was written"
+    if info.st_uid != os.getuid():
+        return f"the record folder {root} is owned by uid {info.st_uid}, not this user; nothing was written"
+    # An own folder made earlier with a looser mode is made private too.
+    root.chmod(0o700)
+    return None
+
+
+class _DefaultFolderWatchdog(Watchdog):
+    """The watchdog of a call whose config names no folder: it writes only into a private folder this user owns."""
+
+    def _write(self, record: dict[str, Any]) -> Path | None:
+        try:
+            refusal = _private_root_refusal(self.out_dir)
+        # This runs on the sampler thread: a failed check costs the record, never the trip.
+        except Exception as exc:
+            refusal = f"{type(exc).__name__}: {exc}"
+        if refusal is not None:
+            record["artifact_error"] = refusal
+            return None
+        return super()._write(record)
+
+
+def _trip_at_arm(watchdog: Watchdog) -> None:
+    """One reading before the sampler starts: at or above the stop line, drain, read again, and trip if still there.
+
+    Memory the process already holds counts, so a call that starts over the line stops at ``call_start`` before any
+    work. Pages an earlier call freed leave the footprint only after the next GPU submission, so a first reading at or
+    above the line is followed by the drain (``_drain.drain``) and a second reading, and only that second one decides.
+    A call below the line makes one reading and no drain. A reading that fails leaves the call to the sampler. Uses
+    the watchdog's own sample and trip, so the record is the one a sampled trip writes.
+
+    Raises:
+        DFloatWatchdogError: The reading after the drain is at or above the stop line.
+    """
+
+    def over_the_line() -> dict[str, float | str | None] | None:
+        _reason, sample = watchdog._sample()
+        memory = sample["verdict_memory"]
+        if not isinstance(memory, int | float) or memory < watchdog.ceiling - watchdog.stop_margin:
+            return None
+        return sample
+
+    if over_the_line() is None:
+        return
+    _drain.drain(lambda: _counters().footprint)
+    sample = over_the_line()
+    if sample is None:
+        return
+    watchdog._trip("memory", sample)
+    with _guard.scope(watchdog):
+        _guard.checkpoint("call_start")
+
+
+def _after_abort(model: Any, exc: BaseException, *, outer: BaseException | None) -> None:
+    """Free what the stopped call held: its frames' locals, MLX's buffer pool, then the compressed set if resident.
+
+    The pool is emptied in every case, also when the stop came during the set load (the groups loaded so far are
+    freed into it), after waiting for the GPU so no free is still pending. It ends with the drain (``_drain.drain``):
+    one tiny evaluation, then a poll of the footprint while it falls, for 0.25 s at most, and a last clear. Each step
+    runs on its own: a step that fails is attached to ``exc`` as a note and the next step still runs, so ``exc`` is
+    never replaced.
+    """
+
+    def drop_set() -> None:
+        lifecycle = getattr(model, "_lifecycle", None)
+        if lifecycle is not None and lifecycle.set_resident:
+            try:
+                lifecycle.drop_set()
+            except DFloatResourceError as reclaim:
+                exc.add_note(
+                    "dropping the compressed set after the abort failed: "
+                    f"{type(reclaim).__name__}: {reclaim}"
+                )
+
+    steps: list[tuple[str, Callable[[], object]]] = [
+        ("clearing the call's frames", lambda: clear_call_frames(exc, outer=outer)),
+        ("waiting for the GPU", mx.synchronize),
+        ("collecting garbage", gc.collect),
+        ("emptying the buffer pool", mx.clear_cache),
+        ("dropping the compressed set", drop_set),
+        ("draining the footprint", lambda: _drain.drain(lambda: _counters().footprint)),
+    ]
+    for what, step in steps:
+        try:
+            step()
+        except Exception as failure:
+            exc.add_note(f"{what} after the abort failed: {type(failure).__name__}: {failure}")
+
+
 _wired_refusal_warned = False
 
 
@@ -156,12 +354,110 @@ _R = TypeVar("_R")
 
 
 def with_call_caps(method: Callable[_P, _R]) -> Callable[_P, _R]:
-    """Wrap a model's ``generate_image`` or ``encode`` in ``call_caps``: the whole call runs capped."""
+    """Wrap a model's ``generate_image`` or ``encode`` in ``call_caps`` and the model's memory watchdog.
+
+    The outermost decorated call arms a raise-mode watchdog from ``model.watchdog`` (a ``WatchdogConfig``; None runs
+    unwatched) and makes it the active guard; a nested decorated call (an ``encode`` inside ``generate_image``, or
+    another model's call) arms none and only lowers the active ceiling for its own duration when its config's is
+    lower. Before the sampler starts, one reading of memory (what the process already holds counts): at or above the
+    stop line the call raises at ``call_start`` before the method runs, after the abort cleanup below (which drops a
+    set an earlier call left resident). After the method returns, one more checkpoint
+    (``call_end``) catches a trip in a phase with none; the watchdog then stops, and a trip that landed between that
+    checkpoint and the stop raises too, so no abort record is ever left behind a normal return. On
+    ``DFloatWatchdogError`` the call's frames are cleared, MLX's buffer pool is emptied and a resident compressed set
+    is dropped before the error leaves; another error that leaves a tripped call gets the same cleanup and a note
+    naming the trip and its record. The watchdog stops in every case.
+
+    Raises:
+        DFloatWatchdogError: Memory crossed the stop line, at the arm-time reading or by a checkpoint.
+        DFloatUnsupportedError: The config's ceiling is above the host's default ceiling (RAM minus 4 GiB), or its
+            stop margin is not below the ceiling in force (the host's when the config names none); refused before
+            anything runs.
+    """
 
     @functools.wraps(method)
     def capped(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        model = args[0]
+        # Checked again here: ``model.watchdog`` is reassignable after the constructor's check.
+        config = check_watchdog_arg(getattr(model, "watchdog", None))
+        if config is not None:
+            host = _default_ceiling()
+            if config.ceiling is not None and config.ceiling > host:
+                raise DFloatUnsupportedError(
+                    f"watchdog ceiling {config.ceiling} bytes is above this Mac's ceiling of {host} bytes "
+                    "(its memory minus 4 GiB)"
+                )
+            ceiling = host if config.ceiling is None else config.ceiling
+            if config.stop_margin >= ceiling:
+                raise DFloatUnsupportedError(
+                    f"watchdog stop margin {config.stop_margin} bytes is not below the ceiling of {ceiling} "
+                    "bytes"
+                )
+        if _guard.active() is not None:
+            with call_caps(), _guard.tightened(None if config is None else config.ceiling):
+                return method(*args, **kwargs)
+        if config is None:
+            with call_caps():
+                return method(*args, **kwargs)
+        outer = sys.exc_info()[1]
+        # A folder the caller names is used as given; the default one, under the shared temp dir, is checked.
+        watchdog_class = Watchdog if config.artifact_dir else _DefaultFolderWatchdog
+        watchdog = watchdog_class(
+            config.artifact_dir or _artifact_root(),
+            ceiling=_default_ceiling() if config.ceiling is None else config.ceiling,
+            budget=config.wall_budget,
+            mode="raise",
+            stop_margin=config.stop_margin,
+            grace=config.grace,
+            counters=_counters,
+            exit_process=_exit_process,
+            artifact_name=_artifact_name(),
+            context=_call_context(model, method, args, kwargs),
+            live_context={"phase": lambda: getattr(model, "open_phase", None)},
+        )
+        try:
+            # Before the sampler, the caps and the method: nothing has run yet.
+            _trip_at_arm(watchdog)
+        except DFloatWatchdogError as exc:
+            # The same cleanup as any abort: a set left resident by an earlier call would keep every later call over
+            # the line.
+            _after_abort(model, exc, outer=outer)
+            raise
         with call_caps():
-            return method(*args, **kwargs)
+            try:
+                watchdog.start()  # inside the try: an interrupt right after the start still stops it
+                with _guard.scope(watchdog):
+                    try:
+                        result = method(*args, **kwargs)
+                        _guard.checkpoint("call_end")
+                        watchdog.stop()
+                        # A trip after the checkpoint, before the stop: raise it, never a record behind a return.
+                        if watchdog.tripped.is_set():
+                            del result
+                            _guard.checkpoint("call_end")
+                    except DFloatWatchdogError as exc:
+                        _after_abort(model, exc, outer=outer)
+                        raise
+                    except Exception as exc:
+                        # Stopped first, as on the return path: no trip lands after the check below.
+                        watchdog.stop()
+                        if watchdog.tripped.is_set():
+                            trip = watchdog.trip or {}
+                            phase = (trip.get("context") or {}).get("phase")
+                            where = (
+                                "record not written"
+                                if watchdog.artifact is None
+                                else f"record: {watchdog.artifact}"
+                            )
+                            exc.add_note(
+                                "the memory watchdog had tripped before this error "
+                                f"({trip.get('reason')}, phase {phase}); {where}"
+                            )
+                            _after_abort(model, exc, outer=outer)
+                        raise
+            finally:
+                watchdog.stop()
+        return result
 
     return capped
 

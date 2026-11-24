@@ -1,12 +1,14 @@
 """Coverage bookkeeping: the resident set, the extras plan, coverage checks, full-block decode."""
 
 import dataclasses
+from types import SimpleNamespace
 
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 import pytest
 from tests._df11_fixtures import random_bf16, write_checkpoint
+from tests._fake_counters import FakeCounters
 from tests._flux_fakes import (
     FF,
     FLUX_TABLE,
@@ -19,10 +21,12 @@ from tests._flux_fakes import (
     write_flux_checkpoint,
 )
 
+from mlx_dfloat import _guard
+from mlx_dfloat._watchdog import Watchdog
 from mlx_dfloat.decode import STATUS_INVALID_CODE, decode_group
-from mlx_dfloat.errors import DFloatFormatError, DFloatIntegrationError
+from mlx_dfloat.errors import DFloatFormatError, DFloatIntegrationError, DFloatWatchdogError
 from mlx_dfloat.format import MxGroup, open_checkpoint
-from mlx_dfloat.integrate import seam
+from mlx_dfloat.integrate import coverage, seam
 from mlx_dfloat.integrate.coverage import (
     _block_of,
     check_extras_cover,
@@ -286,3 +290,69 @@ def test_load_extras_without_the_transform_refuses_the_stored_shape(tmp_path):
     _src, module, plan, name_map = _load_extras_fixture(tmp_path, None)
     with pytest.raises(DFloatFormatError, match="shape"):
         load_extras(module, plan, name_map)
+
+
+@pytest.fixture
+def raise_mode(tmp_path):
+    """A started raise-mode watchdog (stop line 9_000) over FakeCounters, and a call that trips it.
+
+    Stopped at teardown; no test may see it end the "process".
+    """
+    fake, exits = FakeCounters(), []
+    watchdog = Watchdog(
+        tmp_path,
+        ceiling=10_000,
+        budget=None,
+        interval=0.01,
+        counters=fake,
+        exit_process=exits.append,
+        mode="raise",
+        stop_margin=1_000,
+    ).start()
+
+    def trip():
+        fake.raise_to(9_500)
+        assert watchdog.tripped.wait(timeout=5)
+
+    yield watchdog, trip
+    watchdog.stop()
+    assert exits == []
+
+
+def _counting_group_reader(monkeypatch, *, trip_on=None, trip=None):
+    """Replace the group read with a fake that logs each group and can trip on the n-th read."""
+    read = []
+
+    def load_group_mx(group):
+        read.append(group)
+        if trip_on is not None and len(read) == trip_on:
+            trip()
+        return f"loaded {group}"
+
+    monkeypatch.setattr(coverage, "load_group_mx", load_group_mx)
+    return read
+
+
+_FOUR_GROUPS = SimpleNamespace(groups={f"transformer_blocks.{i}": f"g{i}" for i in range(4)})
+
+
+def test_a_trip_mid_set_load_raises_before_the_next_group(raise_mode, monkeypatch):
+    # Bug caught: no checkpoint in the loop, so a set load that crosses the stop line reads every
+    # remaining group (about 0.5 s and one group of memory each) before anything stops it.
+    watchdog, trip = raise_mode
+    read = _counting_group_reader(monkeypatch, trip_on=2, trip=trip)
+    with _guard.scope(watchdog), pytest.raises(DFloatWatchdogError) as caught:
+        load_resident_set(_FOUR_GROUPS)
+    assert caught.value.site == "set_group"
+    assert read == ["g0", "g1"]
+
+
+def test_a_tripped_call_reads_no_group(raise_mode, monkeypatch):
+    # Bug caught: the checkpoint after each group's read instead of before it, so a load that
+    # starts tripped still reads one group.
+    watchdog, trip = raise_mode
+    read = _counting_group_reader(monkeypatch)
+    trip()
+    with _guard.scope(watchdog), pytest.raises(DFloatWatchdogError):
+        load_resident_set(_FOUR_GROUPS)
+    assert read == []
