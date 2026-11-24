@@ -11,6 +11,7 @@ from mlx_dfloat.errors import (
     DFloatResourceError,
     DFloatUnsupportedError,
     DFloatUntestedMfluxWarning,
+    DFloatWatchdogError,
 )
 
 __all__ = [
@@ -23,5 +24,6 @@ __all__ = [
     "DFloatResourceError",
     "DFloatUnsupportedError",
     "DFloatUntestedMfluxWarning",
+    "DFloatWatchdogError",
     "__version__",
 ]
