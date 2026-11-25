@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 import mlx.core as mx
 
+from mlx_dfloat import _guard
 from mlx_dfloat.errors import DFloatIntegrationError
 from mlx_dfloat.integrate.names import Shapes
 from mlx_dfloat.integrate.placeholders import PLACEHOLDER, get_attr_path
@@ -185,6 +186,7 @@ def run_block(
             shape does not match the block.
     """
     shapes = state.shapes[block_name]
+    _guard.checkpoint("block_start")  # nothing assigned yet: the placeholders are in place
     before: BeforeBlock | None = getattr(state.provider, "before_block", None)
     if before is not None:
         args, kwargs = ((), {}) if inputs is None else inputs
@@ -208,6 +210,7 @@ def run_block(
         out = run()
         t_encode_end = time.perf_counter()
         _seam_eval(state, out)
+        _guard.checkpoint("block_end")  # inside the try: the finally restores the placeholders
         if state.tracer is not None:
             state.tracer.record(
                 block_name,

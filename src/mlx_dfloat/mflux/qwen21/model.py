@@ -5,7 +5,7 @@ unchanged; only construction and the prelude of ``generate_image`` differ. The t
 transformer are never resident together (see ``mlx_dfloat.mflux.lifecycle``): prompts are encoded first into
 mflux's own prompt cache, which its loop reads without touching the encoder. Each ``generate_image`` call runs under
 the memory caps the ``mlx-dfloat`` command installs (unless a wired limit is already in force) and restores MLX's
-limits afterwards; only the command adds a watchdog.
+limits afterwards.
 """
 
 import logging
@@ -33,6 +33,7 @@ from mlx_dfloat.integrate.resident import clear_nonblock, decode_nonblock, insta
 from mlx_dfloat.mflux import _pipeline, require_mflux
 from mlx_dfloat.mflux import families as registry
 from mlx_dfloat.mflux._phases import FamilySizes
+from mlx_dfloat.mflux._watchconfig import DEFAULT_WATCHDOG, WatchdogConfig, check_watchdog_arg
 from mlx_dfloat.mflux.lifecycle import Lifecycle
 from mlx_dfloat.mflux.qwen21 import init as qinit
 from mlx_dfloat.mflux.qwen21 import memory as qmem
@@ -106,6 +107,7 @@ class DFloatQwenImage21(QwenImage21):  # type: ignore[misc]  # mflux ships no ty
         cache_limit: int | None = None,
         fit_check: bool = True,
         budget_bytes: int | None = None,
+        watchdog: WatchdogConfig | None = DEFAULT_WATCHDOG,
         quantize: int | None = None,
         lora_paths: list[str] | None = None,
         lora_scales: list[float] | None = None,
@@ -118,10 +120,15 @@ class DFloatQwenImage21(QwenImage21):  # type: ignore[misc]  # mflux ships no ty
         compressed weights stay lazy until used. ``budget_bytes`` replaces the device's budget in every call's fit
         estimate and VAE decision.
 
+        ``watchdog`` is the memory and wall-time watchdog each ``generate_image`` and ``encode``
+        call runs under, kept as ``model.watchdog`` and reassignable between calls; None runs
+        the calls with no watchdog. The ``mlx-dfloat`` command has its own watchdog, which this
+        setting does not change.
+
         Raises:
             DFloatUnsupportedError: ``quantize``, ``lora_paths``, ``lora_scales``, ``bake_lora=False`` or a ``compute_precision``
-                (accepted only to refuse), an eval policy other than ``"per-block"`` / ``"depth2"``, or an unknown
-                ``model``.
+                (accepted only to refuse), an eval policy other than ``"per-block"`` / ``"depth2"``, an unknown
+                ``model``, or a ``watchdog`` that is neither a ``WatchdogConfig`` nor None.
             DFloatBackendError: The GPU decoder fails its check on the two packaged self-check groups (raised before
                 anything is resolved or loaded), or Metal is unavailable.
             DFloatFormatError: The checkpoint is not a Qwen-Image 2.1 DF11 checkpoint (a config-less file of
@@ -132,6 +139,7 @@ class DFloatQwenImage21(QwenImage21):  # type: ignore[misc]  # mflux ships no ty
             DFloatIntegrationError: mflux's own weight definition or mapping does not shape the way this
                 adapter expects (a name map ambiguity, an uncovered extra).
         """
+        check_watchdog_arg(watchdog)
         _pipeline.refuse_construction_args(
             quantize=quantize, lora_paths=lora_paths, lora_scales=lora_scales, bake_lora=bake_lora
         )
@@ -172,6 +180,7 @@ class DFloatQwenImage21(QwenImage21):  # type: ignore[misc]  # mflux ships no ty
             cache_limit=cache_limit,
             fit_check=fit_check,
             budget_bytes=budget_bytes,
+            watchdog=watchdog,
         )
 
     @classmethod
@@ -197,6 +206,7 @@ class DFloatQwenImage21(QwenImage21):  # type: ignore[misc]  # mflux ships no ty
         cache_limit: int | None = None,
         fit_check: bool = True,
         budget_bytes: int | None = None,
+        watchdog: WatchdogConfig | None = DEFAULT_WATCHDOG,
         decode: Callable[[MxGroup], DecodeResult] | None = None,
     ) -> None:
         from mflux.models.common.compute_precision import ComputePrecision
@@ -231,6 +241,7 @@ class DFloatQwenImage21(QwenImage21):  # type: ignore[misc]  # mflux ships no ty
             fit_check,
         )
         self._budget_override = budget_bytes
+        self.watchdog = watchdog
         self._provider: DF11Provider | None = None
         self._plan: CallPlan | None = None
         self._tracker = _pipeline.PhaseTracker()

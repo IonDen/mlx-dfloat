@@ -485,7 +485,11 @@ def run_df11(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, Any]:
     out_dir = args.out / "df11"
     out_dir.mkdir(parents=True, exist_ok=True)
     model = DFloatFlux1(
-        args.model, df11_path=args.df11, base_path=args.base, eval_policy=args.eval_policy
+        args.model,
+        df11_path=args.df11,
+        base_path=args.base,
+        eval_policy=args.eval_policy,
+        watchdog=None,
     )
     capture = _LatentCapture()
     model.callbacks.register(capture)
@@ -624,7 +628,11 @@ def run_df11_zimage(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, A
     out_dir = args.out / "df11"
     out_dir.mkdir(parents=True, exist_ok=True)
     model = DFloatZImage(
-        args.model, df11_path=args.df11, base_path=args.base, eval_policy=args.eval_policy
+        args.model,
+        df11_path=args.df11,
+        base_path=args.base,
+        eval_policy=args.eval_policy,
+        watchdog=None,
     )
     capture = _LatentCapture()
     model.callbacks.register(capture)
@@ -781,7 +789,11 @@ def run_df11_flux2(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, An
     out_dir = args.out / "df11"
     out_dir.mkdir(parents=True, exist_ok=True)
     model = DFloatFlux2Klein(
-        args.model, df11_path=args.df11, base_path=args.base, eval_policy=args.eval_policy
+        args.model,
+        df11_path=args.df11,
+        base_path=args.base,
+        eval_policy=args.eval_policy,
+        watchdog=None,
     )
     capture = _LatentCapture()
     model.callbacks.register(capture)
@@ -957,7 +969,11 @@ def run_df11_qwen21(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, A
     out_dir = args.out / "df11"
     out_dir.mkdir(parents=True, exist_ok=True)
     model = DFloatQwenImage21(
-        args.model, df11_path=args.df11, base_path=args.base, eval_policy=args.eval_policy
+        args.model,
+        df11_path=args.df11,
+        base_path=args.base,
+        eval_policy=args.eval_policy,
+        watchdog=None,
     )
     capture = _LatentCapture()
     model.callbacks.register(capture)
@@ -1153,7 +1169,11 @@ def run_df11_ernie(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, An
     out_dir = args.out / "df11"
     out_dir.mkdir(parents=True, exist_ok=True)
     model = DFloatErnieImage(
-        args.model, df11_path=args.df11, base_path=args.base, eval_policy=args.eval_policy
+        args.model,
+        df11_path=args.df11,
+        base_path=args.base,
+        eval_policy=args.eval_policy,
+        watchdog=None,
     )
     capture = _LatentCapture()
     model.callbacks.register(capture)
@@ -1305,7 +1325,11 @@ def run_df11_krea2(args: argparse.Namespace, watchdog: Watchdog) -> dict[str, An
     out_dir = args.out / "df11"
     out_dir.mkdir(parents=True, exist_ok=True)
     model = DFloatKrea2(
-        args.model, df11_path=args.df11, base_path=args.base, eval_policy=args.eval_policy
+        args.model,
+        df11_path=args.df11,
+        base_path=args.base,
+        eval_policy=args.eval_policy,
+        watchdog=None,
     )
     capture = _LatentCapture()
     model.callbacks.register(capture)

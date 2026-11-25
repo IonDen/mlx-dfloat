@@ -16,10 +16,15 @@ from dataclasses import asdict, dataclass
 
 import mlx.core as mx
 
+from mlx_dfloat import _guard
+from mlx_dfloat._watchdog import phys_footprint
 from mlx_dfloat.errors import DFloatResourceError
+from mlx_dfloat.mflux import _drain
 
 log = logging.getLogger("mlx_dfloat.mflux")
 _eval = mx.eval  # looked up on the module, so a test can record the evaluation
+# What an armed drop's drain polls; looked up at call time, so a test can script it.
+_read_footprint: Callable[[], int] = phys_footprint
 
 
 @dataclass(slots=True)
@@ -93,9 +98,15 @@ class Lifecycle:
             self.counters.encoder_seconds += time.perf_counter() - start
         pair: tuple[mx.array, ...] | None = None
         try:
+            # Inside the try, so a stop here drops the encoders just loaded. The encoder load is lazy: its weights
+            # land in the first prompt's evaluation, so the load and the first encode are one stretch with no
+            # checkpoint between them.
+            _guard.checkpoint("encoder_loaded")
             for prompt in missing:
                 pair = self._encode(prompt)
                 _eval(*pair)
+                # Before the store: a stopped prompt's pair is not cached.
+                _guard.checkpoint("prompt_encoded")
                 self._cache[prompt] = pair
         except BaseException as exc:
             # The traceback keeps the failing frames alive, and with them a lazy pair whose graph
@@ -129,6 +140,7 @@ class Lifecycle:
                 f"a previous set is still resident: {active / 1024**3:.2f} GiB of MLX memory is active "
                 f"before the load (bound {bound / 1024**3:.2f} GiB)"
             )
+        _guard.checkpoint("set_load_start")
         start = time.perf_counter()
         self._load_set()
         self.set_resident = True
@@ -148,6 +160,7 @@ class Lifecycle:
         self._reclaim("text encoders")
 
     def _reclaim(self, what: str) -> None:
+        mx.synchronize()  # a buffer the GPU used is freed when its command completes: wait first
         gc.collect()
         mx.clear_cache()
         active = int(mx.get_active_memory())
@@ -157,3 +170,7 @@ class Lifecycle:
                 f"after dropping the {what}, {active / 1024**3:.2f} GiB of MLX memory is still active "
                 f"(bound {bound / 1024**3:.2f} GiB): something else holds it"
             )
+        if _guard.active() is not None:
+            # Inside an armed call only: the freed pages leave the footprint the watchdog samples after the next GPU
+            # submission, so drain them before the call goes on. An unarmed drop stays as it was.
+            _drain.drain(_read_footprint)

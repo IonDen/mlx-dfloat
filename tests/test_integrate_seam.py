@@ -12,6 +12,7 @@ from functools import partial
 import mlx.core as mx
 import numpy as np
 import pytest
+from tests._fake_counters import FakeCounters
 from tests._flux_fakes import (
     FLUX_TABLE,
     D,
@@ -26,8 +27,10 @@ from tests._flux_fakes import (
     resident_dicts,
 )
 
+from mlx_dfloat import _guard
+from mlx_dfloat._watchdog import Watchdog
 from mlx_dfloat.decode import STATUS_INVALID_CODE, decode_group
-from mlx_dfloat.errors import DFloatFormatError, DFloatIntegrationError
+from mlx_dfloat.errors import DFloatFormatError, DFloatIntegrationError, DFloatWatchdogError
 from mlx_dfloat.integrate import seam
 from mlx_dfloat.integrate.placeholders import install_placeholders
 from mlx_dfloat.integrate.providers import (
@@ -504,3 +507,78 @@ def test_a_seam_that_passes_no_inputs_hands_each_hook_call_its_own_empty_argumen
     mx.eval(tf(*inputs()))
     mx.eval(tf(*inputs()))
     assert [(args, kwargs) for _name, args, kwargs in seen] == [((), {})] * 6
+
+
+@pytest.fixture
+def raise_mode(tmp_path):
+    """A started raise-mode watchdog (stop line 9_000) over FakeCounters, and a call that trips it.
+
+    Stopped at teardown; no test may see it end the "process".
+    """
+    fake, exits = FakeCounters(), []
+    watchdog = Watchdog(
+        tmp_path,
+        ceiling=10_000,
+        budget=None,
+        interval=0.01,
+        counters=fake,
+        exit_process=exits.append,
+        mode="raise",
+        stop_margin=1_000,
+    ).start()
+
+    def trip():
+        fake.raise_to(9_500)
+        assert watchdog.tripped.wait(timeout=5)
+
+    yield watchdog, trip
+    watchdog.stop()
+    assert exits == []
+
+
+def test_a_trip_raises_at_the_next_block_and_restores_placeholders(raise_mode, monkeypatch):
+    # Bug caught: no checkpoint after the block's evaluation, or one placed before it (the
+    # evaluation is the long call that crosses the line, so the step runs on past the trip), or
+    # one placed in the finally, so the raising block keeps its decoded weights.
+    watchdog, trip = raise_mode
+    real_eval, evals = seam._eval, []
+
+    def eval_crossing_on_block_1(out):
+        evals.append(out)
+        real_eval(out)
+        if len(evals) == 2:
+            trip()
+
+    monkeypatch.setattr(seam, "_eval", eval_crossing_on_block_1)
+    rec = Recorder()
+    tf = FakeSeamTransformer(rec, n_double=2, n_single=0)
+    shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
+    tf.attach(ResidentProvider(resident_dicts(shapes)), shapes, eval_policy="per-block")
+    with _guard.scope(watchdog), pytest.raises(DFloatWatchdogError) as caught:
+        tf(*inputs())
+    assert caught.value.site == "block_end"
+    assert len(rec.seen) == 2
+    assert rec.seen[1].size > 0  # the block ran on its decoded weight
+    assert all(w.size == 0 for w in all_block_weights(tf))
+
+
+def test_a_tripped_step_raises_before_the_first_block_decodes(raise_mode):
+    # Bug caught: no checkpoint at the block's start, so a step that begins tripped still runs
+    # the provider's hook and decodes a block before stopping.
+    watchdog, trip = raise_mode
+    hooked = []
+
+    class Hooked(ResidentProvider):
+        def before_block(self, block_name, args, kwargs):
+            hooked.append(block_name)
+
+    rec = Recorder()
+    tf = FakeSeamTransformer(rec, n_double=2, n_single=0)
+    shapes = install_placeholders(block_lists(tf), FLUX_TABLE)
+    tf.attach(Hooked(resident_dicts(shapes)), shapes, eval_policy="per-block")
+    trip()
+    with _guard.scope(watchdog), pytest.raises(DFloatWatchdogError) as caught:
+        tf(*inputs())
+    assert caught.value.site == "block_start"
+    assert (hooked, rec.seen) == ([], [])
+    assert all(w.size == 0 for w in all_block_weights(tf))

@@ -6,6 +6,48 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-11-24
+
+0.2.3 makes the Python model classes stop a run that goes over the memory limit, as `mlx-dfloat generate` already did.
+
+### Added
+
+- Every `generate_image` and `encode` call runs under a memory watchdog by default. It has a hard line (the ceiling:
+  physical memory minus 4 GiB unless you lower it) and a stop line 1 GiB below the hard line (physical memory minus
+  5 GiB by default). Once the process passes the stop line, the call frees what it loaded and raises
+  `DFloatWatchdogError` at its next checkpoint, a place where the call can stop cleanly, such as between transformer
+  blocks. The error is exported from `mlx_dfloat`, is a `MemoryError` and carries the path of the record when one was
+  written. Your process keeps running.
+- `mlx-dfloat generate` has no stop line and is unchanged: it ends at the hard line (exit 70) or at its time limit
+  (exit 71).
+- `WatchdogConfig`, exported from `mlx_dfloat.mflux`, sets the lines (`ceiling`, `stop_margin`), an optional time limit
+  (`wall_budget`), the `grace` period and the folder for the record (`artifact_dir`, a string or a path). Values are in
+  bytes. `ceiling` can only be lower than physical memory minus 4 GiB; a higher one is refused when the call starts.
+  `stop_margin` must be above 0 and below `ceiling`.
+- A `watchdog=` keyword on every model class. It takes a `WatchdogConfig` or `None`, and `None` turns the watchdog off.
+  Anything else is refused when the model is built.
+- The record is a JSON file written with mode 0600. By default it goes in a private `mlx-dfloat` folder under the temp
+  directory, which is set to owner-only access; with `artifact_dir=` it goes in the folder you name.
+- The watchdog needs `psutil`, which the `[mflux]` extra installs.
+
+### Behaviour of a trip
+
+- A memory trip has no grace period. The process ends only if memory reaches the hard line (exit 70), as the command
+  does.
+- Memory the process already holds before the call counts toward both lines. A call that starts at or above the stop
+  line raises at once, before it does any work.
+- Two stretches have no checkpoint: loading the text encoder together with the first prompt encoding (for ERNIE-Image with guidance, the prompt and the negative prompt are encoded together), and decoding the image.
+  A memory jump past both lines inside one of them ends the process at the hard line. If the call crossed the stop line
+  during the decode, the finished image is discarded and the call raises instead of returning it.
+- There is no time limit by default. Set `wall_budget` in `WatchdogConfig` to add one. When it passes, the call raises at
+  the next checkpoint, and if none comes within `grace` seconds (10 by default) the process ends with exit 71. The same
+  grace applies if the watchdog cannot read memory: the process ends with exit 70 rather than run unwatched.
+- These exits are immediate. Open files are not flushed and no cleanup handlers run.
+
+### Not yet checked
+
+- The abort has not yet been run on real weights on a Mac. The tests use small models and fake memory readings.
+
 ## [0.2.2] - 2026-11-13
 
 0.2.2 moves `mlx-dfloat[mflux]` to mflux 0.24 or newer, so it installs next to current mflux and the other mlx-* libraries. If
@@ -424,7 +466,8 @@ The first release.
 - CI's mflux lane gets the Hub token for its test step only, so the three tokenizer tests against the gated FLUX.1
   bases run there instead of skipping.
 
-[Unreleased]: https://github.com/IonDen/mlx-dfloat/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/IonDen/mlx-dfloat/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/IonDen/mlx-dfloat/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/IonDen/mlx-dfloat/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/IonDen/mlx-dfloat/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/IonDen/mlx-dfloat/compare/v0.1.0...v0.2.0

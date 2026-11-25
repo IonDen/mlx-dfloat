@@ -1,10 +1,12 @@
 import builtins
 import json
+import stat
 import sys
 import threading
 
 import psutil
 import pytest
+from tests._fake_counters import FakeCounters
 
 import mlx_dfloat._watchdog as wd
 from mlx_dfloat._watchdog import Watchdog, verdict, watched_memory
@@ -440,6 +442,121 @@ def test_reset_peak_takes_the_lock(tmp_path):
     assert watchdog.peak_footprint == 0
 
 
+class _ExitRecorder:
+    """Stands in for the process exit: records each code and lets a test wait for the first."""
+
+    def __init__(self):
+        self.codes: list[int] = []
+        self.fired = threading.Event()
+
+    def __call__(self, code):
+        self.codes.append(code)
+        self.fired.set()
+
+
+def test_injected_counters_decide_the_abort(tmp_path):
+    # Bug caught: _sample still reading the real counters (the verdict would carry this
+    # process's real footprint, not 5), or the injected exit not being the one called.
+    record = _ExitRecorder()
+    fake = FakeCounters(footprint=5, mlx_active=1, mlx_cache=1)
+    watchdog = Watchdog(
+        tmp_path, ceiling=4, budget=1e9, interval=0.01, counters=fake, exit_process=record
+    ).start()
+    try:
+        assert record.fired.wait(timeout=5)
+    finally:
+        watchdog.stop()
+    assert record.codes == [70]
+    artifact = json.loads((tmp_path / "abort.json").read_text())
+    assert artifact["verdict_counter"] == "footprint"
+    assert artifact["verdict_memory"] == 5
+
+
+def test_exit_mode_artifact_keys_are_unchanged(tmp_path):
+    # Bug caught: a raise-mode key ("mode", "stop_line", "escalation", ...) leaking into the
+    # command's abort.json, or a key of today's artifact dropped.
+    record = _ExitRecorder()
+    watchdog = Watchdog(
+        tmp_path,
+        ceiling=4,
+        budget=1e9,
+        interval=0.01,
+        counters=FakeCounters(footprint=5),
+        exit_process=record,
+    ).start()
+    try:
+        assert record.fired.wait(timeout=5)
+    finally:
+        watchdog.stop()
+    assert set(json.loads((tmp_path / "abort.json").read_text())) == {
+        "reason",
+        "footprint",
+        "peak_footprint",
+        "ceiling",
+        "elapsed",
+        "budget",
+        "rss",
+        "mlx_active",
+        "mlx_cache",
+        "verdict_memory",
+        "verdict_counter",
+        "peak_watched",
+        "peak_mlx",
+    }
+
+
+def test_the_exit_alias_is_looked_up_at_fire_time(tmp_path, monkeypatch):
+    # Bug caught: the default exit bound when the watchdog is built (`exit_process or _exit` in
+    # __init__), so tests that patch `wd._exit` afterwards stop reaching it. The alias in place
+    # at construction is itself a recorder, so that bug lands there instead of in os._exit.
+    at_construction = _ExitRecorder()
+    at_fire = _ExitRecorder()
+    monkeypatch.setattr(wd, "_exit", at_construction)
+    watchdog = Watchdog(
+        tmp_path, ceiling=4, budget=1e9, interval=0.01, counters=FakeCounters(footprint=5)
+    )
+    monkeypatch.setattr(wd, "_exit", at_fire)
+    watchdog.start()
+    try:
+        assert at_fire.fired.wait(timeout=5)
+    finally:
+        watchdog.stop()
+    assert (at_fire.codes, at_construction.codes) == ([70], [])
+
+
+def test_artifact_name_is_honoured(tmp_path):
+    # Bug caught: the file name still hard-coded as abort.json.
+    record = _ExitRecorder()
+    watchdog = Watchdog(
+        tmp_path,
+        ceiling=4,
+        budget=1e9,
+        interval=0.01,
+        counters=FakeCounters(footprint=5),
+        exit_process=record,
+        artifact_name="x.json",
+    ).start()
+    try:
+        assert record.fired.wait(timeout=5)
+    finally:
+        watchdog.stop()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["x.json"]
+    assert json.loads((tmp_path / "x.json").read_text())["reason"] == "memory"
+
+
+def test_the_sampler_thread_is_named(tmp_path):
+    # Bug caught: an anonymous "Thread-N", which the API's "no watchdog thread left" check
+    # cannot find by name.
+    watchdog = Watchdog(
+        tmp_path, ceiling=10**15, budget=1e9, interval=3600, counters=FakeCounters()
+    ).start()
+    try:
+        names = {t.name for t in threading.enumerate()}
+    finally:
+        watchdog.stop()
+    assert "mlx-dfloat-watchdog" in names
+
+
 def test_the_sampler_updates_the_peaks_under_the_lock(tmp_path, monkeypatch):
     # Bug caught: _sample updating the peaks without the lock (the race reset_peak's lock guards).
     monkeypatch.setattr(wd, "phys_footprint", lambda: 7)
@@ -447,3 +564,30 @@ def test_the_sampler_updates_the_peaks_under_the_lock(tmp_path, monkeypatch):
     watchdog = Watchdog(tmp_path, ceiling=10**15, budget=1e9)
     assert _blocked_while_locked(watchdog, watchdog._sample) == (False, True)
     assert (watchdog.peak_footprint, watchdog.peak_mlx, watchdog.peak_watched) == (7, 5, 7)
+
+
+def test_exit_mode_replaces_a_symlink_at_the_record_name_and_writes_it_private(tmp_path):
+    # Bug caught: the record written through `path.write_text`, which follows a symlink planted at the record name
+    # and truncates its target, and leaves the record readable by every local user (0644).
+    target = tmp_path / "target.txt"
+    target.write_text("keep")
+    (tmp_path / "abort.json").symlink_to(target)
+    record = _ExitRecorder()
+    watchdog = Watchdog(
+        tmp_path,
+        ceiling=4,
+        budget=1e9,
+        interval=0.01,
+        counters=FakeCounters(footprint=5),
+        exit_process=record,
+    ).start()
+    try:
+        assert record.fired.wait(timeout=5)
+    finally:
+        watchdog.stop()
+    written = tmp_path / "abort.json"
+    assert not written.is_symlink()
+    assert json.loads(written.read_text())["reason"] == "memory"
+    assert target.read_text() == "keep"
+    assert stat.S_IMODE(written.stat().st_mode) == 0o600
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["abort.json", "target.txt"]

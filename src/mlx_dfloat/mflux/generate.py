@@ -580,7 +580,7 @@ def run(
     try:
         factory = model_factory if model_factory is not None else _model_class(args.model)
         resolve = resolve_output if resolve_output is not None else _output_resolver()
-        model = built["model"] = factory(**model_kwargs)
+        model = built["model"] = factory(**model_kwargs, watchdog=None)
         call: dict[str, Any] = {
             "seed": args.seed,
             "prompt": args.prompt,

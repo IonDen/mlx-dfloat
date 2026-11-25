@@ -77,7 +77,72 @@ def test_the_model_classes_stay_out_of_the_star_import():
     # Bug caught: a model class added to __all__ (`from mlx_dfloat.mflux import *` would then need mflux).
     import mlx_dfloat.mflux as adapters
 
-    assert sorted(adapters.__all__) == ["DFloatModel", "require_mflux"]
+    assert sorted(adapters.__all__) == ["DFloatModel", "WatchdogConfig", "require_mflux"]
+
+
+def test_the_mflux_package_exports_watchdog_config():
+    # Bug caught: WatchdogConfig left out of __all__, or listed there but not bound on the package (a star-import
+    # would then fall into __getattr__ and raise AttributeError).
+    import mlx_dfloat.mflux as adapters
+    from mlx_dfloat.mflux._watchconfig import WatchdogConfig
+
+    assert adapters.__all__ == ["DFloatModel", "WatchdogConfig", "require_mflux"]
+    assert adapters.WatchdogConfig is WatchdogConfig
+
+
+def test_watchdog_error_is_exported_and_a_memory_error():
+    # Bug caught: the watchdog error deriving from DFloatError alone, so a caller's `except MemoryError` or
+    # `except DFloatResourceError` misses a memory trip; or the name missing from either __all__.
+    import mlx_dfloat.errors
+    from mlx_dfloat import DFloatResourceError, DFloatWatchdogError
+
+    assert "DFloatWatchdogError" in mlx_dfloat.__all__
+    assert "DFloatWatchdogError" in mlx_dfloat.errors.__all__
+    assert issubclass(DFloatWatchdogError, DFloatResourceError)
+    assert issubclass(DFloatWatchdogError, MemoryError)
+    assert issubclass(DFloatWatchdogError, DFloatError)
+
+
+def test_watchdog_error_pickles_with_its_fields():
+    # Bug caught: default Exception pickling, which re-calls __init__ with the message alone and drops the
+    # keyword-only fields (TypeError on load), or a __reduce__ that loses one field.
+    import pickle
+    from pathlib import Path
+
+    from mlx_dfloat import DFloatWatchdogError
+
+    e = DFloatWatchdogError(
+        "stopped at the memory ceiling",
+        reason="memory",
+        phase="denoise",
+        site="block_end",
+        artifact=Path("/tmp/watchdog/run.json"),
+        record={"peak": 123, "samples": [1, 2]},
+    )
+    back = pickle.loads(pickle.dumps(e))
+    assert type(back) is DFloatWatchdogError
+    assert str(back) == "stopped at the memory ceiling"
+    assert back.reason == "memory"
+    assert back.phase == "denoise"
+    assert back.site == "block_end"
+    assert back.artifact == Path("/tmp/watchdog/run.json")
+    assert back.record == {"peak": 123, "samples": [1, 2]}
+
+
+def test_watchdog_error_pickles_with_no_phase_and_no_artifact():
+    # Bug caught: a __reduce__ that coerces None (str(None) == "None", Path(None) raises) for the optional fields.
+    import pickle
+
+    from mlx_dfloat import DFloatWatchdogError
+
+    e = DFloatWatchdogError(
+        "wall", reason="wall", phase=None, site="call_end", artifact=None, record={}
+    )
+    back = pickle.loads(pickle.dumps(e))
+    assert back.phase is None
+    assert back.artifact is None
+    assert back.site == "call_end"
+    assert back.record == {}
 
 
 @pytest.mark.mflux

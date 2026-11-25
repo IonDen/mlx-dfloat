@@ -14,6 +14,7 @@ SCRIPTS = [
     "scripts/bench_control_validation.py",
     "scripts/encode_prompt.py",
     "scripts/verify_image.py",  # its --help must work without mflux (mflux loads inside the sides)
+    "scripts/prove_api_watchdog.py",  # its --help must work without MLX or mflux (they load in run_unit)
 ]
 
 

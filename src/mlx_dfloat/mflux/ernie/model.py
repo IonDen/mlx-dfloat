@@ -33,6 +33,7 @@ from mlx_dfloat.mflux import _pipeline, require_mflux
 from mlx_dfloat.mflux import families as registry
 from mlx_dfloat.mflux._compile import uncompiled
 from mlx_dfloat.mflux._phases import FamilySizes
+from mlx_dfloat.mflux._watchconfig import DEFAULT_WATCHDOG, WatchdogConfig, check_watchdog_arg
 from mlx_dfloat.mflux.ernie import init as einit
 from mlx_dfloat.mflux.ernie import memory as emem
 from mlx_dfloat.mflux.ernie.init import ErnieComponents, ResolvedRepo
@@ -117,6 +118,7 @@ class DFloatErnieImage(ErnieImage):  # type: ignore[misc]  # mflux ships no type
         cache_limit: int | None = None,
         fit_check: bool = True,
         budget_bytes: int | None = None,
+        watchdog: WatchdogConfig | None = DEFAULT_WATCHDOG,
         quantize: int | None = None,
         lora_paths: list[str] | None = None,
         lora_scales: list[float] | None = None,
@@ -129,9 +131,15 @@ class DFloatErnieImage(ErnieImage):  # type: ignore[misc]  # mflux ships no type
         package was checked against; a user's own paths are taken as given. ``budget_bytes`` replaces the device's
         budget in every call's fit estimate and VAE decision.
 
+        ``watchdog`` is the memory and wall-time watchdog each ``generate_image`` and ``encode``
+        call runs under, kept as ``model.watchdog`` and reassignable between calls; None runs
+        the calls with no watchdog. The ``mlx-dfloat`` command has its own watchdog, which this
+        setting does not change.
+
         Raises:
             DFloatUnsupportedError: ``quantize``, ``lora_paths``, ``lora_scales`` or ``bake_lora=False`` (accepted only
-                to refuse), an eval policy other than ``"per-block"`` / ``"depth2"``, or an unknown ``model``.
+                to refuse), an eval policy other than ``"per-block"`` / ``"depth2"``, an unknown ``model``, or a
+                ``watchdog`` that is neither a ``WatchdogConfig`` nor None.
             DFloatBackendError: The GPU decoder fails its check on the two packaged self-check groups (raised before
                 anything is resolved or loaded), or Metal is unavailable.
             DFloatFormatError: The checkpoint is not an ERNIE-Image DF11 checkpoint, its block count differs from the
@@ -141,6 +149,7 @@ class DFloatErnieImage(ErnieImage):  # type: ignore[misc]  # mflux ships no type
             DFloatIntegrationError: mflux's own weight definition or mapping does not shape the way this adapter
                 expects.
         """
+        check_watchdog_arg(watchdog)
         _pipeline.refuse_construction_args(
             quantize=quantize, lora_paths=lora_paths, lora_scales=lora_scales, bake_lora=bake_lora
         )
@@ -178,6 +187,7 @@ class DFloatErnieImage(ErnieImage):  # type: ignore[misc]  # mflux ships no type
             cache_limit=cache_limit,
             fit_check=fit_check,
             budget_bytes=budget_bytes,
+            watchdog=watchdog,
         )
 
     @classmethod
@@ -203,6 +213,7 @@ class DFloatErnieImage(ErnieImage):  # type: ignore[misc]  # mflux ships no type
         cache_limit: int | None = None,
         fit_check: bool = True,
         budget_bytes: int | None = None,
+        watchdog: WatchdogConfig | None = DEFAULT_WATCHDOG,
         decode: Callable[[MxGroup], DecodeResult] | None = None,
     ) -> None:
         from mflux.models.ernie_image.ernie_image_initializer import ErnieImageInitializer
@@ -234,6 +245,7 @@ class DFloatErnieImage(ErnieImage):  # type: ignore[misc]  # mflux ships no type
             fit_check,
         )
         self._budget_override = budget_bytes
+        self.watchdog = watchdog
         self._provider: DF11Provider | None = None
         self._plan: CallPlan | None = None
         self._tracker = _pipeline.PhaseTracker()

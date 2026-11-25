@@ -4,6 +4,7 @@ import importlib.util
 from typing import Any
 
 from mlx_dfloat.errors import DFloatDependencyError
+from mlx_dfloat.mflux._watchconfig import WatchdogConfig
 
 
 def require_mflux() -> None:
@@ -68,4 +69,4 @@ def __getattr__(name: str) -> Any:
 # The model classes stay out of __all__: a star-import must not need mflux; `mlx_dfloat.mflux.DFloatFlux1`,
 # `mlx_dfloat.mflux.DFloatZImage`, `mlx_dfloat.mflux.DFloatFlux2Klein`, `mlx_dfloat.mflux.DFloatQwenImage21`,
 # `mlx_dfloat.mflux.DFloatErnieImage` and `mlx_dfloat.mflux.DFloatKrea2` still work.
-__all__ = ["DFloatModel", "require_mflux"]
+__all__ = ["DFloatModel", "WatchdogConfig", "require_mflux"]

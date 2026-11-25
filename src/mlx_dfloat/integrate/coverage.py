@@ -7,6 +7,7 @@ from typing import Any
 import mlx.core as mx
 from mlx.utils import tree_flatten
 
+from mlx_dfloat import _guard
 from mlx_dfloat._safetensors import TensorInfo
 from mlx_dfloat.errors import DFloatFormatError, DFloatIntegrationError
 from mlx_dfloat.format import DF11Checkpoint, MxGroup, load_group_mx
@@ -27,7 +28,11 @@ def load_resident_set(
     missing = [n for n in wanted if n not in ckpt.groups]
     if missing:
         raise DFloatIntegrationError(f"not groups of the checkpoint: {missing}")
-    return {name: load_group_mx(ckpt.groups[name]) for name in wanted}
+    resident: dict[str, MxGroup] = {}
+    for name in wanted:
+        _guard.checkpoint("set_group")  # before the read: a tripped load reads no further group
+        resident[name] = load_group_mx(ckpt.groups[name])
+    return resident
 
 
 def extras_plan(
